@@ -38,7 +38,12 @@ ApplicationWindow {
     }
     Connections {
         target: bridge
-        function onIslandRequested() { root.compact = true }
+        function onIslandRequested() {
+            root.compact = true
+            root.show()
+            root.raise()
+            root.requestActivate()
+        }
     }
     Shortcut { sequence: "Escape"; enabled: bridge.busy; onActivated: bridge.cancel() }
     Timer {
@@ -155,8 +160,8 @@ ApplicationWindow {
                 Waveform { Layout.fillWidth: true; Layout.preferredHeight: 18; bars: 46 }
             }
             Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 44; color: "#18ffffff" }
-            IconButton { text: "⌁"; onClicked: root.expand("models") }
-            IconButton { text: "⌃"; ink: "#ffffff"; onClicked: root.expand("live") }
+            IconButton { text: "⌁"; onClicked: root.expand("models"); ToolTip.visible: hovered; ToolTip.text: "Модели Whisper" }
+            IconButton { text: "⌃"; ink: "#ffffff"; onClicked: root.expand("live"); ToolTip.visible: hovered; ToolTip.text: "Открыть полное окно" }
         }
     }
 
@@ -232,8 +237,10 @@ ApplicationWindow {
                     }
                     Item { Layout.fillWidth: true }
                     Rectangle { visible: bridge.busy || bridge.recording; Layout.preferredHeight: 30; Layout.preferredWidth: 90; radius: 15; color: bridge.recording ? "#22ff375f" : "#22ff9f0a"; Row { anchors.centerIn: parent; spacing: 6; Rectangle { width: 6; height: 6; radius: 3; color: root.accent } Text { text: bridge.elapsed; color: root.accent; font.family: "Cascadia Mono"; font.pixelSize: 11; font.weight: Font.DemiBold } } }
-                    IconButton { text: "≡"; onClicked: root.logsOpen = !root.logsOpen }
-                    IconButton { text: "⌄"; onClicked: root.collapse() }
+                    IconButton { text: "≡"; onClicked: root.logsOpen = !root.logsOpen; ToolTip.visible: hovered; ToolTip.text: "Журнал" }
+                    ActionButton { text: "Скрыть"; onClicked: root.hide(); ToolTip.visible: hovered; ToolTip.text: "Вернуть: Ctrl + Alt + O" }
+                    IconButton { text: "×"; ink: "#ff6961"; onClicked: Qt.quit(); ToolTip.visible: hovered; ToolTip.text: "Закрыть программу" }
+                    IconButton { text: "⌄"; onClicked: root.collapse(); ToolTip.visible: hovered; ToolTip.text: "Свернуть в остров" }
                 }
                 Rectangle {
                     visible: bridge.notice.length > 0
