@@ -20,6 +20,16 @@ DEFAULTS = {
     "channels": "", "profile": "balanced",
 }
 
+STATUS_LABELS = {
+    "loading_model": "Загружаем выбранную модель…",
+    "transcribing_cpu": "Распознаём на процессоре…",
+    "transcribing_cuda": "Распознаём на видеокарте…",
+    "gpu_unavailable_falling_back_cpu": "Видеокарта недоступна, продолжаем на процессоре…",
+    "uploading": "Отправляем аудио на сервер…",
+    "completed": "Расшифровка готова",
+    "cancelled": "Обработка отменена",
+}
+
 
 class Controller(QObject):
     changed = Signal()
@@ -44,6 +54,8 @@ class Controller(QObject):
         self._level = 0.0
         self._segments, self._history, self._hits, self._devices = [], [], [], []
         self._session_id, self._media_url, self._query = "", "", ""
+        self._session_title = ""
+        self._session_mode = ""
         self._jobs = {}
         self._started = 0
         self._elapsed = "00:00"
@@ -105,6 +117,12 @@ class Controller(QObject):
     def mediaUrl(self): return self._media_url
 
     @Property(str, notify=changed)
+    def sessionTitle(self): return self._session_title
+
+    @Property(str, notify=changed)
+    def sessionMode(self): return self._session_mode
+
+    @Property(str, notify=changed)
     def text(self): return " ".join(s["text"].strip() for s in self._segments)
 
     @Property(str, notify=changed)
@@ -143,7 +161,7 @@ class Controller(QObject):
 
     def _set_status(self, value):
         if self._jobs:
-            self._status = value
+            self._status = STATUS_LABELS.get(value, value)
             self.changed.emit()
 
     def _set_level(self, value):
@@ -158,9 +176,14 @@ class Controller(QObject):
     def refreshDevices(self):
         def scan():
             try:
-                self.devicesArrived.emit(list_input_devices())
+                devices = list_input_devices()
             except Exception:
-                self.devicesArrived.emit([])
+                devices = []
+            try:
+                self.devicesArrived.emit(devices)
+            except RuntimeError:
+                # The app can close while a slow device driver is enumerated.
+                return
         threading.Thread(target=scan, daemon=True).start()
 
     @Slot()
@@ -206,6 +229,12 @@ class Controller(QObject):
         self._elapsed = "00:00"
         mode = self._page if self._page in ("dictation", "live", "monitor") else "dictation"
         self._recording_mode = mode
+        self._session_mode = mode
+        self._session_title = {
+            "dictation": "Диктовка",
+            "live": "Живые субтитры",
+            "monitor": "Мониторинг эфира",
+        }[mode]
         self._state = "recording"
         self._status = "Слушаю · модель загрузится при первой фразе"
         sources = [("Микрофон" if self._settings["source"] == "microphone" else "Звук компьютера", "")]
@@ -223,6 +252,8 @@ class Controller(QObject):
         for name, url in sources:
             sid = self.store.create_session(name, mode, url or self._settings["source"], self._settings["model"])
             self._session_id = sid
+            if sid == self._session_id:
+                self._session_title = name
             live = LiveSession(self.engine, self._config(),
                                lambda segment, sid=sid: self.segmentArrived.emit(sid, segment),
                                self.statusArrived.emit,
@@ -287,6 +318,8 @@ class Controller(QObject):
         sid = self.store.create_session(media.name, "media", str(media), self._settings["model"])
         self._session_id = sid
         self._segments = []
+        self._session_mode = "media"
+        self._session_title = media.name
         self._media_url = QUrl.fromLocalFile(str(media.resolve())).toString()
         self._page, self._state = "media", "processing"
         self._status = "Открываем файл и загружаем модель…"
@@ -374,9 +407,16 @@ class Controller(QObject):
         if session:
             self._session_id = sid
             self._segments = session["segments"]
+            self._session_mode = session["mode"]
+            self._session_title = session["title"]
             source = session["source"]
-            self._media_url = QUrl.fromLocalFile(source).toString() if session["mode"] == "media" and Path(source).is_file() else ""
-            self._page = "media"
+            is_media = session["mode"] == "media"
+            self._media_url = QUrl.fromLocalFile(source).toString() if is_media and Path(source).is_file() else ""
+            if is_media and source and not self._media_url:
+                self._notice = "Исходный медиафайл не найден. Расшифровку всё ещё можно редактировать и экспортировать."
+            self._page = session["mode"] if session["mode"] in (
+                "dictation", "live", "media", "monitor"
+            ) else "history"
             self._status = session["title"]
             self.changed.emit()
 

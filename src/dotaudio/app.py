@@ -37,7 +37,7 @@ def main():
     controller = Controller(args.data_dir or user_data_path("DotAudio", "DotCore"), desktop)
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("bridge", controller)
-    engine.load(QUrl.fromLocalFile(str(Path(__file__).parent / "qml" / "Main.qml")))
+    engine.load(QUrl.fromLocalFile(str(Path(__file__).parent / "qml" / "MainMvp.qml")))
     if not engine.rootObjects():
         desktop.close()
         return 1
@@ -48,7 +48,9 @@ def main():
         def finish():
             if args.screenshot:
                 args.screenshot.parent.mkdir(parents=True, exist_ok=True)
-                if not engine.rootObjects()[0].grabWindow().save(str(args.screenshot)):
+                window = engine.rootObjects()[0]
+                screenshot = window.screen().grabWindow(window.winId())
+                if not screenshot.save(str(args.screenshot)):
                     app.exit(2)
                     return
             app.quit()
