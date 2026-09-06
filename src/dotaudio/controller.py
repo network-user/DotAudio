@@ -71,6 +71,7 @@ class Controller(QObject):
         self._status = "Готов к работе"
         self._notice = ""
         self._level = 0.0
+        self._last_signal_at = 0.0
         self._segments, self._history, self._hits, self._devices = [], [], [], []
         self._session_id, self._media_url, self._query = "", "", ""
         self._session_title = ""
@@ -133,6 +134,16 @@ class Controller(QObject):
 
     @Property(float, notify=changed)
     def level(self): return self._level
+
+    @Property(str, notify=changed)
+    def inputState(self):
+        if self._state != "recording":
+            return "Ожидает запуска"
+        if self._level >= 0.001:
+            return "Сигнал есть"
+        if time.monotonic() - self._last_signal_at < 1.5:
+            return "Тишина"
+        return "Нет входного сигнала"
 
     @Property(bool, notify=changed)
     def busy(self): return bool(self._jobs)
@@ -278,6 +289,8 @@ class Controller(QObject):
 
     def _set_level(self, value):
         self._level = max(0.0, min(1.0, value)) if self.recording else 0.0
+        if self._level >= 0.001:
+            self._last_signal_at = time.monotonic()
         self.changed.emit()
 
     def _set_devices(self, value):
@@ -564,6 +577,7 @@ class Controller(QObject):
         self._media_url = ""
         self._hits = []
         self._started = time.monotonic()
+        self._last_signal_at = self._started
         self._elapsed = "00:00"
         mode = self._page if self._page in ("dictation", "live") else "dictation"
         self._recording_mode = mode
