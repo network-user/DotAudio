@@ -196,6 +196,24 @@ ApplicationWindow {
                                         wrapMode: Text.Wrap
                                         verticalAlignment: Text.AlignVCenter
                                     }
+                                    Row {
+                                        Layout.fillWidth: true
+                                        height: 24
+                                        spacing: 4
+                                        Repeater {
+                                            model: 52
+                                            delegate: Rectangle {
+                                                required property int index
+                                                property real shape: 0.2 + Math.abs(Math.sin(index * 1.9)) * 0.8
+                                                width: 6
+                                                height: 3 + bridge.level * 21 * shape
+                                                radius: 3
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                color: bridge.recording ? "#ff6c84" : "#354252"
+                                                Behavior on height { NumberAnimation { duration: 80 } }
+                                            }
+                                        }
+                                    }
                                     RowLayout {
                                         Button { text: bridge.recording ? "Завершить" : "Начать live"; enabled: !bridge.busy || bridge.recording; onClicked: bridge.toggleRecording() }
                                         Button { visible: bridge.busy; text: "Отмена"; onClicked: bridge.cancel() }
@@ -244,6 +262,16 @@ ApplicationWindow {
                                     radius: 22
                                     color: "#121720"
                                     VideoOutput { id: mediaVideo; anchors.fill: parent; anchors.margins: 8; visible: mediaPlayer.hasVideo; fillMode: VideoOutput.PreserveAspectFit }
+                                    KaraokePreview {
+                                        visible: bridge.mediaUrl.length > 0
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.bottom: parent.bottom
+                                        anchors.margins: 16
+                                        height: 118
+                                        player: mediaPlayer
+                                        segments: bridge.segments
+                                    }
                                     ColumnLayout {
                                         anchors.centerIn: parent
                                         width: parent.width - 60
