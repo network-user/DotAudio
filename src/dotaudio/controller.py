@@ -375,6 +375,58 @@ class Controller(QObject):
         """Check exactly the source selected for live captions."""
         self._test_capture(self._settings["source"])
 
+    @Slot()
+    def testSystemLoopback(self):
+        """Play a quiet tone and verify that the selected output loops back."""
+        if self._jobs or self._testing_device:
+            return
+        if self._settings["source"] != "system":
+            self._notice = "Для проверки loopback выберите «Звук системы» как источник Live."
+            self.changed.emit()
+            return
+        raw_device = str(self._settings["output_device"])
+        device = int(raw_device) if raw_device.isdigit() else raw_device or None
+        self._testing_device = True
+        self._device_test = {
+            "phase": "starting",
+            "message": "Подаём тихий тестовый тон и проверяем возврат в Live…",
+            "level": 0.0,
+        }
+        self._record_log("info", "Запущена проверка Windows loopback выбранного выхода.")
+        self.changed.emit()
+
+        def test():
+            errors: list[str] = []
+            levels: list[float] = []
+
+            def on_level(level: float) -> None:
+                levels.append(float(level))
+                self.deviceTestLevelArrived.emit(level)
+
+            capture = AudioCapture(kind="system", device=device, on_level=on_level, on_error=errors.append)
+            try:
+                capture.start()
+                time.sleep(0.2)
+                play_output_tone(device)
+                time.sleep(0.5)
+            except Exception as exc:
+                errors.append(str(exc))
+            finally:
+                capture.stop()
+            peak = max(levels, default=0.0)
+            if errors:
+                self.deviceTestFinished.emit("error", errors[-1])
+            elif peak < 0.001:
+                self.deviceTestFinished.emit(
+                    "error", "Loopback не получил тестовый тон. Выберите другой выход или проверьте драйвер Windows."
+                )
+            else:
+                self.deviceTestFinished.emit(
+                    "ready", f"Loopback работает. Пик тестового сигнала: {peak:.3f}."
+                )
+
+        threading.Thread(target=test, name="dotaudio-loopback-test", daemon=True).start()
+
     def _test_capture(self, kind: str):
         if self._jobs or self._testing_device:
             return

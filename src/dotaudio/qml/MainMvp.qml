@@ -513,7 +513,8 @@ ApplicationWindow {
                                                 background: Rectangle { radius: 12; color: "#0dffffff"; border.width: 1; border.color: "#14ffffff" }
                                             }
                                             ActionButton { text: "Обновить"; onClicked: bridge.refreshOutputs() }
-                                            ActionButton { text: "Тон"; onClicked: bridge.testOutputDevice() }
+                                            ActionButton { text: "Тон"; onClicked: bridge.testOutputDevice(); ToolTip.visible: hovered; ToolTip.text: "Проверить, что выход воспроизводит звук" }
+                                            ActionButton { text: "Loopback"; primary: bridge.settings.source === "system"; tint: "#0a84ff"; onClicked: bridge.testSystemLoopback(); ToolTip.visible: hovered; ToolTip.text: "Проверить, что этот выход попадает в Live" }
                                         }
                                         ProgressBar {
                                             Layout.fillWidth: true
