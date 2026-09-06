@@ -368,22 +368,32 @@ class Controller(QObject):
 
     @Slot()
     def testMicrophone(self):
+        self._test_capture("microphone")
+
+    @Slot()
+    def testLiveSource(self):
+        """Check exactly the source selected for live captions."""
+        self._test_capture(self._settings["source"])
+
+    def _test_capture(self, kind: str):
         if self._jobs or self._testing_device:
             return
-        raw_device = str(self._settings["input_device"])
-        device = int(raw_device) if raw_device.isdigit() else None
+        raw_device = str(self._settings["input_device"] if kind == "microphone" else self._settings["output_device"])
+        device = int(raw_device) if raw_device.isdigit() else raw_device or None
+        source_name = "микрофон" if kind == "microphone" else "звук системы"
         self._testing_device = True
         self._device_test = {
             "phase": "starting",
-            "message": "Открываем микрофон для короткой проверки…",
+            "message": f"Открываем {source_name} для короткой проверки…",
             "level": 0.0,
         }
-        self._record_log("info", "Запущена проверка микрофона без сохранения записи.")
+        self._record_log("info", f"Запущена проверка источника: {source_name}.")
         self.changed.emit()
 
         def test():
             errors: list[str] = []
             capture = AudioCapture(
+                kind=kind,
                 device=device,
                 on_level=lambda level: self.deviceTestLevelArrived.emit(level),
                 on_error=errors.append,
@@ -397,11 +407,11 @@ class Controller(QObject):
             if errors:
                 self.deviceTestFinished.emit("error", errors[-1])
             elif not started:
-                self.deviceTestFinished.emit("error", "Микрофон остановился до завершения проверки.")
+                self.deviceTestFinished.emit("error", f"Источник «{source_name}» остановился до завершения проверки.")
             else:
-                self.deviceTestFinished.emit("ready", "Микрофон отвечает. Тестовая запись не сохранена.")
+                self.deviceTestFinished.emit("ready", f"Источник «{source_name}» отвечает. Тестовая запись не сохранена.")
 
-        threading.Thread(target=test, name="dotaudio-microphone-test", daemon=True).start()
+        threading.Thread(target=test, name="dotaudio-capture-test", daemon=True).start()
 
     @Slot()
     def testOutputDevice(self):
@@ -533,9 +543,9 @@ class Controller(QObject):
                 if url:
                     capture = StreamCapture(url, **args)
                 else:
-                    device = self._settings["input_device"]
+                    device = self._settings["input_device"] if self._settings["source"] == "microphone" else self._settings["output_device"]
                     capture = AudioCapture(kind=self._settings["source"],
-                                           device=int(device) if str(device).isdigit() else None, **args)
+                                            device=int(device) if str(device).isdigit() else device or None, **args)
                 # Device startup and WASAPI initialization must not block the QML thread.
                 def start(live=live, capture=capture, sid=sid):
                     try:

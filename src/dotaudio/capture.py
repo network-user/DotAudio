@@ -230,9 +230,7 @@ class AudioCapture(_CallbackDispatcher):
         try:
             import soundcard as sc
 
-            speaker = self.device if self.device is not None else sc.default_speaker()
-            if isinstance(speaker, str):
-                speaker = sc.get_speaker(speaker)
+            speaker = self._resolve_loopback_speaker(sc)
             if speaker is None:
                 raise RuntimeError("no system output device available")
             with speaker.recorder(
@@ -245,6 +243,31 @@ class AudioCapture(_CallbackDispatcher):
         except Exception as exc:
             if not self._stop.is_set():
                 self._error(f"system loopback failed: {exc}")
+
+    def _resolve_loopback_speaker(self, soundcard: Any) -> Any:
+        """Match a UI output-device id to the soundcard loopback endpoint."""
+
+        device = self.device
+        if device is None or device == "":
+            return soundcard.default_speaker()
+        if isinstance(device, int) or (isinstance(device, str) and device.isdigit()):
+            try:
+                import sounddevice as sd
+
+                device = str(sd.query_devices(int(device), "output")["name"])
+            except Exception:
+                device = str(device)
+        if not isinstance(device, str):
+            return device
+        try:
+            return soundcard.get_speaker(device)
+        except Exception:
+            target = device.casefold()
+            for speaker in soundcard.all_speakers():
+                name = str(getattr(speaker, "name", ""))
+                if name.casefold() == target or target in name.casefold() or name.casefold() in target:
+                    return speaker
+            raise RuntimeError(f"output device not found for loopback: {device}")
 
 
 class StreamCapture(_CallbackDispatcher):

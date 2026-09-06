@@ -116,7 +116,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     spacing: 7
                     Rectangle { Layout.preferredWidth: 6; Layout.preferredHeight: 6; radius: 3; color: root.accent; SequentialAnimation on opacity { running: bridge.recording; loops: Animation.Infinite; NumberAnimation { to: 0.35; duration: 700 } NumberAnimation { to: 1; duration: 700 } } }
-                    Label { text: bridge.recording ? "СЛУШАЮ В ЭФИРЕ" : bridge.busy ? "ОБРАБАТЫВАЮ РЕЧЬ" : "DOTAUDIO ГОТОВ"; color: "#aeaeb2"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.75 }
+                    Label { text: bridge.recording ? "LIVE АКТИВЕН" : bridge.busy ? "ОБРАБАТЫВАЮ РЕЧЬ" : "DOTAUDIO ГОТОВ"; color: "#aeaeb2"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.75 }
                     Item { Layout.fillWidth: true }
                     Label { visible: bridge.recording || bridge.busy; text: bridge.elapsed; color: "#aeaeb2"; font.family: "Cascadia Mono"; font.pixelSize: 11 }
                 }
@@ -154,7 +154,7 @@ ApplicationWindow {
                         ColumnLayout { spacing: 0; Label { text: ".аудио"; color: "#f5f5f7"; font.pixelSize: 20; font.weight: Font.DemiBold } Label { text: "ЛОКАЛЬНАЯ РЕЧЬ"; color: "#8e8e93"; font.pixelSize: 9; font.weight: Font.DemiBold; font.letterSpacing: 1.1 } }
                     }
                     Repeater {
-                        model: [ { key: "live", icon: "◉", title: "В эфире", detail: "Субтитры" }, { key: "dictation", icon: "○", title: "Диктовка", detail: "Голос в текст" }, { key: "media", icon: "▸", title: "Караоке", detail: "Аудио и видео" }, { key: "models", icon: "⌁", title: "Модели", detail: "Whisper" }, { key: "history", icon: "◷", title: "История", detail: "Сессии" }, { key: "settings", icon: "⚙", title: "Среда", detail: "Устройства" } ]
+                        model: [ { key: "live", icon: "◉", title: "Live", detail: "Субтитры" }, { key: "dictation", icon: "○", title: "Диктовка", detail: "Голос в текст" }, { key: "media", icon: "▸", title: "Караоке", detail: "Аудио и видео" }, { key: "models", icon: "⌁", title: "Модели", detail: "Whisper" }, { key: "history", icon: "◷", title: "История", detail: "Сессии" }, { key: "settings", icon: "⚙", title: "Среда", detail: "Устройства" } ]
                         delegate: Button {
                             id: nav
                             required property var modelData
@@ -234,9 +234,9 @@ ApplicationWindow {
                                     anchors.fill: parent
                                     anchors.margins: 26
                                     spacing: 8
-                                    RowLayout { Layout.fillWidth: true; Label { text: bridge.recording ? "ПРЯМОЙ ЭФИР" : "ЖИВЫЕ СУБТИТРЫ"; color: root.accent; font.pixelSize: 11; font.weight: Font.DemiBold; font.letterSpacing: 0.7 } Item { Layout.fillWidth: true } Label { text: bridge.settings.language === "ru" ? "РУССКИЙ" : String(bridge.settings.language).toUpperCase(); color: "#8e8e93"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.8 } }
-                                    Text { Layout.fillWidth: true; Layout.fillHeight: true; text: bridge.caption.length ? bridge.caption : bridge.recording ? "Слушаю. Первая завершённая фраза появится здесь." : "Запустите эфир, чтобы увидеть субтитры."; color: bridge.caption.length ? "#f5f5f7" : "#98989d"; font.pixelSize: bridge.caption.length ? 31 : 20; font.weight: bridge.caption.length ? Font.DemiBold : Font.Normal; wrapMode: Text.Wrap; verticalAlignment: Text.AlignVCenter; Behavior on font.pixelSize { NumberAnimation { duration: 180 } } }
-                                    RowLayout { Layout.fillWidth: true; Waveform { Layout.fillWidth: true; bars: 58; Layout.preferredHeight: 34 } ActionButton { text: bridge.recording ? "Остановить" : "Начать эфир"; primary: true; tint: bridge.recording ? "#ff375f" : "#0a84ff"; enabled: !bridge.busy || bridge.recording; onClicked: bridge.toggleRecording() } ActionButton { visible: bridge.busy; text: "Отмена"; onClicked: bridge.cancel() } }
+                                    RowLayout { Layout.fillWidth: true; Label { text: bridge.recording ? "LIVE АКТИВЕН" : "LIVE-СУБТИТРЫ"; color: root.accent; font.pixelSize: 11; font.weight: Font.DemiBold; font.letterSpacing: 0.7 } Item { Layout.fillWidth: true } Label { text: (bridge.settings.source === "system" ? "ЗВУК СИСТЕМЫ" : "МИКРОФОН") + " · " + (bridge.settings.language === "ru" ? "РУССКИЙ" : String(bridge.settings.language).toUpperCase()); color: "#8e8e93"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.8 } }
+                                    Text { Layout.fillWidth: true; Layout.fillHeight: true; text: bridge.caption.length ? bridge.caption : bridge.recording ? "Слушаю. Первая завершённая фраза появится здесь." : "Запустите Live, чтобы увидеть субтитры."; color: bridge.caption.length ? "#f5f5f7" : "#98989d"; font.pixelSize: bridge.caption.length ? 31 : 20; font.weight: bridge.caption.length ? Font.DemiBold : Font.Normal; wrapMode: Text.Wrap; verticalAlignment: Text.AlignVCenter; Behavior on font.pixelSize { NumberAnimation { duration: 180 } } }
+                                    RowLayout { Layout.fillWidth: true; Waveform { Layout.fillWidth: true; bars: 58; Layout.preferredHeight: 34 } ActionButton { text: bridge.recording ? "Завершить Live" : "Начать Live"; primary: true; tint: bridge.recording ? "#ff375f" : "#0a84ff"; enabled: !bridge.busy || bridge.recording; onClicked: bridge.toggleRecording() } ActionButton { visible: bridge.busy; text: "Отмена"; onClicked: bridge.cancel() } }
                                 }
                             }
                             Rectangle {
@@ -367,7 +367,7 @@ ApplicationWindow {
                                 }
                                 Rectangle {
                                     Layout.fillWidth: true
-                                    Layout.preferredHeight: 228
+                                    Layout.preferredHeight: 270
                                     radius: 22
                                     color: "#1c1c1e"
                                     border.width: 1
@@ -376,7 +376,13 @@ ApplicationWindow {
                                         anchors.fill: parent
                                         anchors.margins: 18
                                         spacing: 10
-                                        Label { text: "Микрофон и наушники"; color: "#f5f5f7"; font.pixelSize: 16; font.weight: Font.DemiBold }
+                                        Label { text: "Источник Live и устройства"; color: "#f5f5f7"; font.pixelSize: 16; font.weight: Font.DemiBold }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Label { text: "Источник Live"; color: "#98989d"; font.pixelSize: 12; Layout.fillWidth: true }
+                                            ActionButton { text: "Микрофон"; primary: bridge.settings.source === "microphone"; tint: "#0a84ff"; onClicked: bridge.setSetting("source", "microphone") }
+                                            ActionButton { text: "Звук системы"; primary: bridge.settings.source === "system"; tint: "#0a84ff"; onClicked: bridge.setSetting("source", "system") }
+                                        }
                                         RowLayout {
                                             Layout.fillWidth: true
                                             ComboBox {
@@ -389,7 +395,7 @@ ApplicationWindow {
                                                 background: Rectangle { radius: 12; color: "#0dffffff"; border.width: 1; border.color: "#14ffffff" }
                                             }
                                             ActionButton { text: "Обновить"; onClicked: bridge.refreshDevices() }
-                                            ActionButton { text: "Проверить"; primary: true; tint: "#0a84ff"; onClicked: bridge.testMicrophone() }
+                                            ActionButton { text: "Проверить Live"; primary: true; tint: "#0a84ff"; onClicked: bridge.testLiveSource() }
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true

@@ -68,6 +68,21 @@ def test_capture_error_explains_how_to_recover() -> None:
     assert "driver failed" in message
 
 
+def test_system_capture_resolves_selected_output_index(monkeypatch) -> None:
+    selected_speaker = object()
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(query_devices=lambda index, kind: {"name": "Headphones"}),
+    )
+    soundcard = SimpleNamespace(
+        default_speaker=lambda: object(),
+        get_speaker=lambda name: selected_speaker if name == "Headphones" else None,
+    )
+
+    assert AudioCapture(kind="system", device=4)._resolve_loopback_speaker(soundcard) is selected_speaker
+
+
 @pytest.mark.parametrize(
     "url",
     ["file:///recording.wav", "https://user:pass@example.com/live", "not a url"],
