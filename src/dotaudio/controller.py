@@ -622,10 +622,10 @@ class Controller(QObject):
     def _on_segment(self, sid, segment):
         if sid not in self._jobs:
             return
-        self.store.append_segments(sid, [segment])
+        identifiers = self.store.append_segments(sid, [segment])
         job = self._jobs[sid]
         if sid == self._session_id:
-            self._segments = self.store.get_session(sid)["segments"]
+            self._segments = [*self._segments, {**segment, "id": identifiers[0]}]
         if job["mode"] == "monitor":
             keywords = [w.strip() for w in str(self._settings["keywords"]).split(",") if w.strip()]
             matches = match_keywords(segment["text"], keywords)

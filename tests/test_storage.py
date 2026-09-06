@@ -17,13 +17,14 @@ def test_store_persists_sessions_segments_and_settings(tmp_path: Path) -> None:
         source="microphone",
         model="small",
     )
-    store.append_segments(
+    identifiers = store.append_segments(
         session_id,
         [
             {"start": 0, "end": 1.25, "text": "Первый фрагмент"},
             {"start": 1.25, "end": 2.5, "text": "Второй фрагмент"},
         ],
     )
+    assert len(identifiers) == 2
     store.save_settings({"model": "small", "language": "ru"})
     store.finish_session(session_id)
 

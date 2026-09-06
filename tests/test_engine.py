@@ -23,7 +23,7 @@ def test_local_engine_caches_model_and_normalises_segments(monkeypatch) -> None:
         def transcribe(self, _source, **kwargs):
             assert kwargs["vad_filter"] is True
             assert kwargs["beam_size"] == 5
-            assert kwargs["word_timestamps"] is True
+            assert kwargs["word_timestamps"] is False
             return iter([_Segment(0, 0.5, " first "), _Segment(0.5, 1, "")]), object()
 
     def model(name: str, *, device: str, compute_type: str):
@@ -133,6 +133,7 @@ def test_media_recipe_keeps_sung_words_and_word_timings(monkeypatch) -> None:
     class FakeModel:
         def transcribe(self, _source, **kwargs):
             assert kwargs["vad_filter"] is False
+            assert kwargs["word_timestamps"] is True
             assert kwargs["compression_ratio_threshold"] == 2.4
             return iter([Segment()]), object()
 

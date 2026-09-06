@@ -131,21 +131,22 @@ class Store:
         self,
         session_id: str,
         segments: Iterable[dict[str, Any]],
-    ) -> None:
+    ) -> list[int]:
         rows = [_validate_segment(segment) for segment in segments]
         if not rows:
-            return
+            return []
+        identifiers: list[int] = []
         with self._connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO segments (session_id, start, end, text, original_text, words_json)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (session_id, start, end, text, text, words)
-                    for start, end, text, words in rows
-                ],
-            )
+            for start, end, text, words in rows:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO segments (session_id, start, end, text, original_text, words_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (session_id, start, end, text, text, words),
+                )
+                identifiers.append(int(cursor.lastrowid))
+        return identifiers
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:

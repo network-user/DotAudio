@@ -198,7 +198,9 @@ class Engine:
             "patience": profile["patience"],
             "vad_filter": use_vad,
             "condition_on_previous_text": False,
-            "word_timestamps": True,
+            # Word alignment is needed for offline karaoke, but it adds work
+            # that live phrase captions do not need.
+            "word_timestamps": config.media_mode,
             "initial_prompt": (
                 "Русская речь. Сохраняй имена, термины и пунктуацию."
                 if language == "ru" else None
