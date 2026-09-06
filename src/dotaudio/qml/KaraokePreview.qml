@@ -9,9 +9,9 @@ Rectangle {
     property real playbackSeconds: player ? player.position / 1000 : 0
     property var activeCue: cueAt(playbackSeconds)
 
-    radius: 18
-    color: "#10141be8"
-    border.color: "#ffffff20"
+    radius: 20
+    color: "#e81c1c1e"
+    border.color: "#20ffffff"
     border.width: 1
 
     function cueAt(position) {
@@ -25,12 +25,12 @@ Rectangle {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 14
-        spacing: 7
+        anchors.margins: 16
+        spacing: 8
 
         Label {
-            text: root.activeCue && root.activeCue.words ? "KARAOKE · WORD TIMESTAMPS" : "KARAOKE · ФРАЗА"
-            color: "#86dfbf"
+            text: root.activeCue && root.activeCue.words ? "KARAOKE · ПО СЛОВАМ" : "KARAOKE · ФРАЗА"
+            color: "#64d2ff"
             font.pixelSize: 9
             font.bold: true
             font.letterSpacing: 1.1
@@ -38,7 +38,7 @@ Rectangle {
 
         Flow {
             Layout.fillWidth: true
-            spacing: 7
+            spacing: 8
             Repeater {
                 model: root.activeCue && root.activeCue.words ? root.activeCue.words : []
                 delegate: Text {
@@ -46,11 +46,13 @@ Rectangle {
                     property bool active: root.playbackSeconds >= Number(modelData.start)
                                           && root.playbackSeconds < Number(modelData.end)
                     text: modelData.text
-                    color: active ? "#ffffff" : root.playbackSeconds >= Number(modelData.end) ? "#7ae0bd" : "#8392a3"
-                    font.pixelSize: active ? 23 : 19
+                    color: active ? "#ffffff" : root.playbackSeconds >= Number(modelData.end) ? "#64d2ff" : "#8e8e93"
+                    font.pixelSize: active ? 24 : 19
                     font.weight: active ? Font.DemiBold : Font.Normal
+                    scale: active ? 1.04 : 1
                     Behavior on color { ColorAnimation { duration: 120 } }
                     Behavior on font.pixelSize { NumberAnimation { duration: 120 } }
+                    Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
                 }
             }
         }

@@ -8,10 +8,10 @@ Rectangle {
     property bool editable: true
     property bool showEmptyHint: true
     property string emptyMessage: "Расшифровка появится после первой завершённой фразы."
-    color: "#17181c"
-    radius: 18
+    color: "#151517"
+    radius: 20
     border.width: 1
-    border.color: "#2e3037"
+    border.color: "#0cffffff"
 
     function timecode(seconds) {
         var total = Math.max(0, Math.round(Number(seconds) * 1000))
@@ -32,16 +32,16 @@ Rectangle {
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.Wrap
         text: root.emptyMessage
-        color: "#777981"
+        color: "#8e8e93"
         font.pixelSize: 14
     }
 
     ListView {
         id: transcript
         anchors.fill: parent
-        anchors.margins: 10
+        anchors.margins: 12
         clip: true
-        spacing: 6
+        spacing: 8
         model: bridge.segments
         ScrollBar.vertical: ScrollBar { }
         delegate: Rectangle {
@@ -50,33 +50,37 @@ Rectangle {
                                   && root.player.position >= Math.round(Number(modelData.start) * 1000)
                                   && root.player.position < Math.round(Number(modelData.end) * 1000)
             width: transcript.width
-            implicitHeight: editor.implicitHeight + 18
-            radius: 12
-            color: active ? "#262931" : "#1d1e23"
-            border.color: active ? "#e9ebee" : "#2d2f36"
-            border.width: active ? 1 : 0
+            implicitHeight: editor.implicitHeight + 22
+            radius: 15
+            color: active ? "#1b2a3c" : segmentMouse.containsMouse ? "#242426" : "#1c1c1e"
+            border.color: active ? "#660a84ff" : "#0cffffff"
+            border.width: 1
+            Behavior on color { ColorAnimation { duration: 140 } }
+            Behavior on border.color { ColorAnimation { duration: 140 } }
+            MouseArea { id: segmentMouse; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
 
             RowLayout {
                 anchors.fill: parent
-                anchors.margins: 9
-                spacing: 9
+                anchors.margins: 11
+                spacing: 10
                 Button {
                     id: timestampButton
                     Layout.alignment: Qt.AlignTop
                     text: root.timecode(modelData.start)
                     enabled: root.player !== null
+                    hoverEnabled: true
                     onClicked: {
                         root.player.position = Math.round(Number(modelData.start) * 1000)
                         root.player.play()
                     }
                     contentItem: Text {
                         text: timestampButton.text
-                        color: "#b7bbc4"
+                        color: active ? "#8dc6ff" : "#aeaeb2"
                         font.pixelSize: 11
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                     }
-                    background: Rectangle { radius: 8; color: timestampButton.down ? "#363943" : "#292b32" }
+                    background: Rectangle { radius: 9; color: timestampButton.down ? "#34506f" : timestampButton.hovered ? "#293846" : "#0effffff"; border.width: 1; border.color: "#0cffffff"; Behavior on color { ColorAnimation { duration: 120 } } }
                 }
                 TextArea {
                     id: editor
@@ -84,10 +88,10 @@ Rectangle {
                     readOnly: !root.editable
                     text: modelData.text
                     wrapMode: TextEdit.Wrap
-                    color: "#f0f1f2"
+                    color: "#f5f5f7"
                     placeholderText: "Пустой сегмент"
                     selectByMouse: true
-                    padding: 2
+                    padding: 3
                     background: null
                     onActiveFocusChanged: {
                         if (!activeFocus && root.editable && text !== modelData.text)

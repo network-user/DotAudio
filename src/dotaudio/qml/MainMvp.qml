@@ -10,7 +10,6 @@ ApplicationWindow {
     property bool logsOpen: false
     property var pageKeys: ["live", "dictation", "media", "models", "history", "settings"]
     property color accent: bridge.recording ? "#ff375f" : bridge.busy || bridge.modelPreparing ? "#ff9f0a" : "#0a84ff"
-    property real recordingPhase: 0
     width: compact ? 604 : 1220
     height: compact ? 132 : 790
     minimumWidth: compact ? 520 : 1000
@@ -46,12 +45,6 @@ ApplicationWindow {
         }
     }
     Shortcut { sequence: "Escape"; enabled: bridge.busy; onActivated: bridge.cancel() }
-    Timer {
-        interval: 70
-        running: bridge.recording
-        repeat: true
-        onTriggered: root.recordingPhase += 0.32
-    }
 
     component IconButton: Button {
         id: control
@@ -59,8 +52,11 @@ ApplicationWindow {
         implicitWidth: 38
         implicitHeight: 38
         hoverEnabled: true
+        transformOrigin: Item.Center
+        scale: control.enabled && control.hovered ? 1.06 : 1
+        Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
         contentItem: Text { text: control.text; color: control.enabled ? control.ink : "#6e6e73"; font.family: "Segoe UI Symbol"; font.pixelSize: 17; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-        background: Rectangle { radius: width / 2; color: control.down ? "#30ffffff" : control.hovered ? "#1fffffff" : "#10ffffff"; Behavior on color { ColorAnimation { duration: 130 } } }
+        background: Rectangle { radius: width / 2; color: control.down ? "#30ffffff" : control.hovered ? "#1fffffff" : "#10ffffff"; border.width: control.activeFocus ? 1 : 0; border.color: "#660a84ff"; Behavior on color { ColorAnimation { duration: 130 } } }
     }
     component ActionButton: Button {
         id: control
@@ -70,14 +66,19 @@ ApplicationWindow {
         leftPadding: 15
         rightPadding: 15
         hoverEnabled: true
+        transformOrigin: Item.Center
+        scale: control.enabled && control.hovered ? 1.025 : 1
+        Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
         contentItem: Text { text: control.text; color: control.primary ? "#ffffff" : control.enabled ? "#f5f5f7" : "#6e6e73"; font.pixelSize: 12; font.weight: Font.DemiBold; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-        background: Rectangle { radius: 19; color: control.primary ? (control.down ? Qt.darker(control.tint, 1.2) : control.hovered ? Qt.lighter(control.tint, 1.08) : control.tint) : control.down ? "#26ffffff" : control.hovered ? "#19ffffff" : "#0effffff"; border.width: control.primary ? 0 : 1; border.color: "#16ffffff"; Behavior on color { ColorAnimation { duration: 130 } } }
+        background: Rectangle { radius: 19; color: control.primary ? (control.down ? Qt.darker(control.tint, 1.2) : control.hovered ? Qt.lighter(control.tint, 1.08) : control.tint) : control.down ? "#26ffffff" : control.hovered ? "#19ffffff" : "#0effffff"; border.width: control.primary ? 0 : 1; border.color: control.activeFocus ? "#660a84ff" : "#16ffffff"; Behavior on color { ColorAnimation { duration: 130 } } }
     }
     component Waveform: Item {
         id: wave
         property int bars: 48
-        property real inputLevel: Math.min(1, Math.max(0, bridge.level * 28))
+        property real targetLevel: Math.min(1, Math.max(0, bridge.level * 28))
+        property real inputLevel: targetLevel
         implicitHeight: 28
+        Behavior on inputLevel { NumberAnimation { duration: 110; easing.type: Easing.OutQuad } }
         Row {
             anchors.centerIn: parent
             spacing: 3
@@ -158,7 +159,7 @@ ApplicationWindow {
                     Label { visible: bridge.recording || bridge.busy; text: bridge.elapsed; color: "#aeaeb2"; font.family: "Cascadia Mono"; font.pixelSize: 11 }
                 }
                 Text { Layout.fillWidth: true; text: bridge.caption.length ? bridge.caption : bridge.recording ? "Говорите, я собираю фразу…" : "Нажмите круглую кнопку для начала"; color: "#f5f5f7"; font.pixelSize: 16; font.weight: Font.DemiBold; elide: Text.ElideRight }
-                Waveform { Layout.fillWidth: true; Layout.preferredHeight: 18; bars: 46 }
+                Waveform { Layout.fillWidth: true; Layout.preferredHeight: 18; bars: 36 }
             }
             Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 44; color: "#18ffffff" }
             IconButton { text: "⌁"; onClicked: root.expand("models"); ToolTip.visible: hovered; ToolTip.text: "Модели Whisper" }
@@ -319,8 +320,18 @@ ApplicationWindow {
                                     anchors.margins: 26
                                     spacing: 8
                                     RowLayout { Layout.fillWidth: true; Label { text: bridge.recording ? "●  " + bridge.inputState.toUpperCase() + " · " + bridge.elapsed : "LIVE-СУБТИТРЫ"; color: bridge.inputState === "Сигнал есть" ? "#30d158" : root.accent; font.pixelSize: 11; font.weight: Font.DemiBold; font.letterSpacing: 0.7 } Item { Layout.fillWidth: true } Label { text: bridge.recording ? "ВХОД " + Math.round(Math.min(1, bridge.level * 28) * 100) + "%" : (bridge.settings.source === "system" ? "ЗВУК СИСТЕМЫ" : "МИКРОФОН") + " · " + (bridge.settings.language === "ru" ? "РУССКИЙ" : String(bridge.settings.language).toUpperCase()); color: bridge.recording && bridge.level > 0.003 ? "#30d158" : "#8e8e93"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.8 } }
+                                    RowLayout {
+                                        visible: !bridge.recording && !bridge.busy
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        Label { text: "ПРОФИЛЬ LIVE"; color: "#8e8e93"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.7; Layout.rightMargin: 4 }
+                                        ActionButton { text: "Быстро"; primary: bridge.settings.profile === "fast"; tint: "#0a84ff"; onClicked: bridge.setSetting("profile", "fast"); ToolTip.visible: hovered; ToolTip.text: "Минимальная задержка, модель tiny" }
+                                        ActionButton { text: "Баланс"; primary: bridge.settings.profile === "balanced"; tint: "#0a84ff"; onClicked: bridge.setSetting("profile", "balanced"); ToolTip.visible: hovered; ToolTip.text: "Базовая модель Whisper" }
+                                        ActionButton { text: "Качество"; primary: bridge.settings.profile === "quality"; tint: "#0a84ff"; onClicked: bridge.setSetting("profile", "quality"); ToolTip.visible: hovered; ToolTip.text: "Максимальная точность, large-v3" }
+                                        Item { Layout.fillWidth: true }
+                                    }
                                     Text { Layout.fillWidth: true; Layout.fillHeight: true; text: bridge.caption.length ? bridge.caption : bridge.recording ? "Слушаю. Первая завершённая фраза появится здесь." : "Запустите Live, чтобы увидеть субтитры."; color: bridge.caption.length ? "#f5f5f7" : "#98989d"; font.pixelSize: bridge.caption.length ? 31 : 20; font.weight: bridge.caption.length ? Font.DemiBold : Font.Normal; wrapMode: Text.Wrap; verticalAlignment: Text.AlignVCenter; Behavior on font.pixelSize { NumberAnimation { duration: 180 } } }
-                                    RowLayout { Layout.fillWidth: true; Waveform { Layout.fillWidth: true; bars: 58; Layout.preferredHeight: 34 } ActionButton { text: bridge.recording ? "Завершить Live" : "Начать Live"; primary: true; tint: bridge.recording ? "#ff375f" : "#0a84ff"; enabled: !bridge.busy || bridge.recording; onClicked: bridge.toggleRecording() } ActionButton { visible: bridge.busy; text: "Отмена"; onClicked: bridge.cancel() } }
+                                    RowLayout { Layout.fillWidth: true; Waveform { Layout.fillWidth: true; bars: 44; Layout.preferredHeight: 34 } ActionButton { text: bridge.recording ? "Завершить Live" : "Начать Live"; primary: true; tint: bridge.recording ? "#ff375f" : "#0a84ff"; enabled: !bridge.busy || bridge.recording; onClicked: bridge.toggleRecording() } ActionButton { visible: bridge.busy; text: "Отмена"; onClicked: bridge.cancel() } }
                                 }
                             }
                             Rectangle {
@@ -345,7 +356,7 @@ ApplicationWindow {
                                 color: "#1c1c1e"
                                 border.width: 1
                                 border.color: bridge.recording ? "#66ff375f" : "#12ffffff"
-                                ColumnLayout { anchors.fill: parent; anchors.margins: 26; spacing: 10; Label { text: "БЫСТРЫЙ ВВОД"; color: "#0a84ff"; font.pixelSize: 11; font.weight: Font.DemiBold; font.letterSpacing: 0.7 } Label { text: bridge.recording ? "Говорите естественно" : "Скажите мысль, я отдам текст в буфер"; color: "#f5f5f7"; font.pixelSize: 26; font.weight: Font.DemiBold } Text { Layout.fillWidth: true; text: "После остановки расшифровка сохранится в истории и попадёт в буфер обмена. Горячая клавиша: Ctrl + Alt + Space."; color: "#98989d"; font.pixelSize: 14; wrapMode: Text.Wrap } Item { Layout.fillHeight: true } RowLayout { Layout.fillWidth: true; ActionButton { text: bridge.recording ? "Остановить запись" : "Начать диктовку"; primary: true; tint: bridge.recording ? "#ff375f" : "#0a84ff"; onClicked: bridge.toggleRecording() } ActionButton { text: "Копировать текст"; enabled: bridge.text.length > 0; onClicked: bridge.copyText() } Item { Layout.fillWidth: true } Waveform { Layout.preferredWidth: 190; bars: 30 } } }
+                                ColumnLayout { anchors.fill: parent; anchors.margins: 26; spacing: 10; Label { text: "БЫСТРЫЙ ВВОД"; color: "#0a84ff"; font.pixelSize: 11; font.weight: Font.DemiBold; font.letterSpacing: 0.7 } Label { text: bridge.recording ? "Говорите естественно" : "Скажите мысль, я отдам текст в буфер"; color: "#f5f5f7"; font.pixelSize: 26; font.weight: Font.DemiBold } Text { Layout.fillWidth: true; text: "После остановки расшифровка сохранится в истории и попадёт в буфер обмена. Горячая клавиша: Ctrl + Alt + Space."; color: "#98989d"; font.pixelSize: 14; wrapMode: Text.Wrap } Item { Layout.fillHeight: true } RowLayout { Layout.fillWidth: true; ActionButton { text: bridge.recording ? "Остановить запись" : "Начать диктовку"; primary: true; tint: bridge.recording ? "#ff375f" : "#0a84ff"; onClicked: bridge.toggleRecording() } ActionButton { text: "Копировать текст"; enabled: bridge.text.length > 0; onClicked: bridge.copyText() } Item { Layout.fillWidth: true } Waveform { Layout.preferredWidth: 190; bars: 24 } } }
                             }
                             Rectangle { Layout.fillWidth: true; Layout.fillHeight: true; radius: 24; color: "#151517"; border.width: 1; border.color: "#0cffffff"; TranscriptEditor { anchors.fill: parent; anchors.margins: 20; editable: true } }
                         }
