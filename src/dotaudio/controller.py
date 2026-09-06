@@ -392,10 +392,16 @@ class Controller(QObject):
 
         def test():
             errors: list[str] = []
+            levels: list[float] = []
+
+            def on_level(level: float) -> None:
+                levels.append(float(level))
+                self.deviceTestLevelArrived.emit(level)
+
             capture = AudioCapture(
                 kind=kind,
                 device=device,
-                on_level=lambda level: self.deviceTestLevelArrived.emit(level),
+                on_level=on_level,
                 on_error=errors.append,
             )
             capture.start()
@@ -408,6 +414,12 @@ class Controller(QObject):
                 self.deviceTestFinished.emit("error", errors[-1])
             elif not started:
                 self.deviceTestFinished.emit("error", f"Источник «{source_name}» остановился до завершения проверки.")
+            elif max(levels, default=0.0) < 0.001:
+                hint = (
+                    "Выберите в списке именно устройство, через которое сейчас играет звук."
+                    if kind == "system" else "Проверьте разрешение Windows для микрофона и уровень входа."
+                )
+                self.deviceTestFinished.emit("silent", f"Источник «{source_name}» открыт, но сигнал нулевой. {hint}")
             else:
                 self.deviceTestFinished.emit("ready", f"Источник «{source_name}» отвечает. Тестовая запись не сохранена.")
 

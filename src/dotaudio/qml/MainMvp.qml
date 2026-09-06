@@ -474,7 +474,17 @@ ApplicationWindow {
                                                 Layout.fillWidth: true
                                                 model: [{ name: "Системный микрофон", id: "" }].concat(bridge.devices)
                                                 textRole: "name"
-                                                onActivated: { var device = model[index]; bridge.setSetting("input_device", String(device.id)) }
+                                                currentIndex: {
+                                                    var selected = String(bridge.settings.input_device)
+                                                    for (var i = 0; i < model.length; i++) {
+                                                        if (String(model[i].id) === selected) return i
+                                                    }
+                                                    return 0
+                                                }
+                                                onActivated: function(index) {
+                                                    var device = inputChooser.model[index]
+                                                    bridge.setSetting("input_device", String(device.id))
+                                                }
                                                 contentItem: Text { leftPadding: 12; text: inputChooser.displayText; color: "#f5f5f7"; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight; font.pixelSize: 12 }
                                                 background: Rectangle { radius: 12; color: "#0dffffff"; border.width: 1; border.color: "#14ffffff" }
                                             }
@@ -488,7 +498,17 @@ ApplicationWindow {
                                                 Layout.fillWidth: true
                                                 model: [{ name: "Системный вывод", id: "" }].concat(bridge.outputs)
                                                 textRole: "name"
-                                                onActivated: { var device = model[index]; bridge.setSetting("output_device", String(device.id)) }
+                                                currentIndex: {
+                                                    var selected = String(bridge.settings.output_device)
+                                                    for (var i = 0; i < model.length; i++) {
+                                                        if (String(model[i].id) === selected) return i
+                                                    }
+                                                    return 0
+                                                }
+                                                onActivated: function(index) {
+                                                    var device = outputChooser.model[index]
+                                                    bridge.setSetting("output_device", String(device.id))
+                                                }
                                                 contentItem: Text { leftPadding: 12; text: outputChooser.displayText; color: "#f5f5f7"; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight; font.pixelSize: 12 }
                                                 background: Rectangle { radius: 12; color: "#0dffffff"; border.width: 1; border.color: "#14ffffff" }
                                             }
