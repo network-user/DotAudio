@@ -8,6 +8,7 @@ ApplicationWindow {
     id: root
     property bool compact: true
     property bool logsOpen: false
+    property bool islandModesOpen: false
     property var pageKeys: ["live", "dictation", "media", "models", "history", "settings"]
     property color accent: bridge.recording ? "#ff375f" : bridge.busy || bridge.modelPreparing ? "#ff9f0a" : "#0a84ff"
     width: compact ? 604 : 1220
@@ -154,16 +155,41 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     spacing: 7
                     Rectangle { Layout.preferredWidth: 6; Layout.preferredHeight: 6; radius: 3; color: root.accent; SequentialAnimation on opacity { running: bridge.recording; loops: Animation.Infinite; NumberAnimation { to: 0.35; duration: 700 } NumberAnimation { to: 1; duration: 700 } } }
-                    Label { text: bridge.recording ? "LIVE · ВХОД " + Math.round(Math.min(1, bridge.level * 28) * 100) + "%" : bridge.busy ? "ОБРАБАТЫВАЮ РЕЧЬ" : "DOTAUDIO ГОТОВ"; color: bridge.recording && bridge.level > 0.003 ? "#30d158" : "#aeaeb2"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.75 }
+                    Label { text: bridge.recording ? (bridge.page === "dictation" ? "ДИКТОВКА" : "LIVE") + " · ВХОД " + Math.round(Math.min(1, bridge.level * 28) * 100) + "%" : bridge.busy ? "ОБРАБАТЫВАЮ РЕЧЬ" : bridge.page === "dictation" ? "ДИКТОВКА ГОТОВА" : "LIVE ГОТОВ"; color: bridge.recording && bridge.level > 0.003 ? "#30d158" : "#aeaeb2"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.75 }
                     Item { Layout.fillWidth: true }
                     Label { visible: bridge.recording || bridge.busy; text: bridge.elapsed; color: "#aeaeb2"; font.family: "Cascadia Mono"; font.pixelSize: 11 }
                 }
-                Text { Layout.fillWidth: true; text: bridge.caption.length ? bridge.caption : bridge.recording ? "Говорите, я собираю фразу…" : "Нажмите круглую кнопку для начала"; color: "#f5f5f7"; font.pixelSize: 16; font.weight: Font.DemiBold; elide: Text.ElideRight }
+                Text { Layout.fillWidth: true; text: bridge.caption.length ? bridge.caption : bridge.recording ? bridge.page === "dictation" ? "Говорите, текст попадёт в буфер…" : "Слушаю голосовую фразу…" : bridge.page === "dictation" ? "Нажмите запись для диктовки" : "Нажмите запись для Live"; color: "#f5f5f7"; font.pixelSize: 16; font.weight: Font.DemiBold; elide: Text.ElideRight }
                 Waveform { Layout.fillWidth: true; Layout.preferredHeight: 18; bars: 36 }
             }
             Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 44; color: "#18ffffff" }
+            IconButton { text: "☰"; onClicked: root.islandModesOpen = !root.islandModesOpen; ToolTip.visible: hovered; ToolTip.text: "Выбрать режим" }
             IconButton { text: "⌁"; onClicked: root.expand("models"); ToolTip.visible: hovered; ToolTip.text: "Модели Whisper" }
             IconButton { text: "⌃"; ink: "#ffffff"; onClicked: root.expand("live"); ToolTip.visible: hovered; ToolTip.text: "Открыть полное окно" }
+        }
+        Rectangle {
+            visible: root.islandModesOpen
+            z: 5
+            anchors.fill: parent
+            anchors.margins: 7
+            radius: 26
+            color: "#f21d1d1f"
+            border.width: 1
+            border.color: "#22ffffff"
+            RowLayout {
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 8
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 1
+                    Label { text: "Режим записи"; color: "#f5f5f7"; font.pixelSize: 14; font.weight: Font.DemiBold }
+                    Label { text: "Режим можно сменить до начала записи"; color: "#8e8e93"; font.pixelSize: 10 }
+                }
+                ActionButton { text: "Live"; primary: bridge.page === "live"; tint: "#0a84ff"; onClicked: { bridge.selectPage("live"); root.islandModesOpen = false } }
+                ActionButton { text: "Диктовка"; primary: bridge.page === "dictation"; tint: "#0a84ff"; onClicked: { bridge.selectPage("dictation"); root.islandModesOpen = false } }
+                IconButton { text: "×"; onClicked: root.islandModesOpen = false }
+            }
         }
     }
 
