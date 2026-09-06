@@ -36,6 +36,13 @@ def test_list_input_devices_filters_outputs(monkeypatch) -> None:
     assert list_input_devices() == [{"id": 1, "name": "Mic"}]
 
 
+def test_capture_error_explains_how_to_recover() -> None:
+    capture = AudioCapture(kind="microphone")
+    message = capture._start_error(RuntimeError("driver failed"))
+    assert "разрешение Windows" in message
+    assert "driver failed" in message
+
+
 @pytest.mark.parametrize(
     "url",
     ["file:///recording.wav", "https://user:pass@example.com/live", "not a url"],

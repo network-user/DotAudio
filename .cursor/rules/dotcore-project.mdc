@@ -8,7 +8,7 @@ alwaysApply: true
 Канон: [AGENTS.md](../../AGENTS.md) в корне проекта.
 Начни с [передачи работы](../../docs/HANDOFF.md).
 
-Python 3.12/3.13, PySide6, faster-whisper; приложение пока является заготовкой.
+Python 3.12/3.13, PySide6, faster-whisper; приложение находится на этапе MVP.
 Тесты: `.venv\Scripts\python.exe -m pytest -q`.
 Lint: `.venv\Scripts\python.exe -m ruff check src tests`.
 

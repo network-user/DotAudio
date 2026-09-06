@@ -155,7 +155,7 @@ class AudioCapture(_CallbackDispatcher):
                 else:
                     self._start_system_loopback()
             except Exception as exc:
-                self._error(f"audio capture failed: {exc}")
+                self._error(self._start_error(exc))
                 self._stop.set()
                 self._stop_dispatcher()
 
@@ -179,6 +179,19 @@ class AudioCapture(_CallbackDispatcher):
         if self.kind == "microphone":
             return self._stream is not None and not self._stop.is_set()
         return self._system_thread is not None and self._system_thread.is_alive()
+
+    def _start_error(self, error: Exception) -> str:
+        if self.kind == "microphone":
+            prefix = (
+                "Не удалось открыть микрофон. Выберите другое устройство в "
+                "разделе «Диктовка» и проверьте разрешение Windows для микрофона."
+            )
+        else:
+            prefix = (
+                "Не удалось открыть системный звук. Проверьте устройство вывода "
+                "и драйвер, затем попробуйте микрофон."
+            )
+        return f"{prefix} Детали драйвера: {error}"
 
     def _start_microphone(self) -> None:
         import sounddevice as sd
