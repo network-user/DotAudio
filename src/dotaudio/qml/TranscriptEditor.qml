@@ -7,7 +7,9 @@ Rectangle {
     property var player: null
     property bool editable: true
     property bool showEmptyHint: true
+    property bool followLatest: !editable
     property string emptyMessage: "Расшифровка появится после первой завершённой фразы."
+    property int observedSegmentCount: 0
     color: "#151517"
     radius: 20
     border.width: 1
@@ -36,6 +38,19 @@ Rectangle {
         font.pixelSize: 14
     }
 
+    Connections {
+        target: bridge
+        function onChanged() {
+            var count = bridge.segments.length
+            if (root.followLatest && count > root.observedSegmentCount) {
+                root.observedSegmentCount = count
+                transcript.positionViewAtEnd()
+            } else if (count < root.observedSegmentCount) {
+                root.observedSegmentCount = count
+            }
+        }
+    }
+
     ListView {
         id: transcript
         anchors.fill: parent
@@ -43,6 +58,7 @@ Rectangle {
         clip: true
         spacing: 8
         model: bridge.segments
+        Component.onCompleted: root.observedSegmentCount = bridge.segments.length
         ScrollBar.vertical: ScrollBar { }
         delegate: Rectangle {
             required property var modelData

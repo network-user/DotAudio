@@ -367,7 +367,7 @@ ApplicationWindow {
                                 color: "#151517"
                                 border.width: 1
                                 border.color: "#0cffffff"
-                                ColumnLayout { anchors.fill: parent; anchors.margins: 20; spacing: 10; RowLayout { Layout.fillWidth: true; Label { text: "Лента расшифровки"; color: "#f5f5f7"; font.pixelSize: 15; font.weight: Font.DemiBold } Item { Layout.fillWidth: true } Label { text: bridge.segments.length + " фрагм."; color: "#8e8e93"; font.pixelSize: 11 } } TranscriptEditor { Layout.fillWidth: true; Layout.fillHeight: true; editable: false; showEmptyHint: false } }
+                                ColumnLayout { anchors.fill: parent; anchors.margins: 20; spacing: 10; RowLayout { Layout.fillWidth: true; Label { text: "Лента расшифровки"; color: "#f5f5f7"; font.pixelSize: 15; font.weight: Font.DemiBold } Label { visible: bridge.recording; text: "LIVE FOLLOW"; color: "#64d2ff"; font.pixelSize: 9; font.weight: Font.DemiBold; font.letterSpacing: 0.8 } Item { Layout.fillWidth: true } Label { text: bridge.segments.length + " фрагм."; color: "#8e8e93"; font.pixelSize: 11 } ActionButton { text: "Копировать"; enabled: bridge.text.length > 0; onClicked: bridge.copyText() } } TranscriptEditor { Layout.fillWidth: true; Layout.fillHeight: true; editable: false; showEmptyHint: false } }
                             }
                         }
                     }
