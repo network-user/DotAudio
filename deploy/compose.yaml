@@ -1,0 +1,22 @@
+services:
+  asr:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - whisper-models:/home/dotaudio/.cache/huggingface
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # CPU service by default. Access a remote host through an SSH tunnel:
+    # ssh -N -L 8765:127.0.0.1:8765 user@server
+    # Downloads the selected model on first recognition.
+    command: ["dotaudio-server", "--host", "0.0.0.0", "--models", "base"]
+
+volumes:
+  whisper-models:

@@ -1,0 +1,17 @@
+---
+description: DotAudio - контекст разработки и передачи работы
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+Канон: [AGENTS.md](../../AGENTS.md) в корне проекта.
+Начни с [передачи работы](../../docs/HANDOFF.md).
+
+Python 3.12/3.13, PySide6, faster-whisper; приложение пока является заготовкой.
+Тесты: `.venv\Scripts\python.exe -m pytest -q`.
+Lint: `.venv\Scripts\python.exe -m ruff check src tests`.
+
+При глобальных изменениях обновляй README через `generate-readme`,
+правила через `sync-project-rules`. Соблюдай ограничения пользователя
+на чтение секретов, удаление файлов и Git-операции из AGENTS.md.

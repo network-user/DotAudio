@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-label="DotAudio">
+  <title>DotAudio</title>
+  <defs>
+    <linearGradient id="da-bg" x2="1" y2="1"><stop stop-color="#0a0b0d"/><stop offset="1" stop-color="#14161a"/></linearGradient>
+    <radialGradient id="da-glow" cx="75%" cy="25%" r="60%"><stop stop-color="#fff" stop-opacity=".12"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#da-bg)"/>
+  <rect width="1600" height="900" fill="url(#da-glow)"/>
+  <path d="M0 225H1600M0 450H1600M0 675H1600M400 0V900M800 0V900M1200 0V900" stroke="#fff" opacity=".045"/>
+  <g stroke="#f3f3f1" stroke-width="7" stroke-linecap="round"><path d="M148 155v30m20-50v70m20-85v100m20-80v60m20-45v30"/></g>
+  <g stroke="#fff" stroke-width="24" stroke-linecap="round" opacity=".1"><path d="M1020 420v100m70-160v220m70-290v360m70-290v220m70-160v100"/></g>
+  <text x="138" y="408" font-family="Segoe UI, Arial, sans-serif" font-size="132" font-weight="800" fill="#f3f3f1">.аудио</text>
+  <text x="146" y="474" font-family="Segoe UI, Arial, sans-serif" font-size="34" font-weight="600" fill="#f3f3f1">DotAudio</text>
+  <text x="146" y="526" font-family="Segoe UI, Arial, sans-serif" font-size="26" fill="#a6a7ab">Речь, субтитры и эфир</text>
+  <text x="1380" y="825" font-family="Segoe UI, Arial, sans-serif" font-size="22" fill="#66676c">.ядро</text>
+</svg>
