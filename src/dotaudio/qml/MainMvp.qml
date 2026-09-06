@@ -10,6 +10,7 @@ ApplicationWindow {
     property bool logsOpen: false
     property var pageKeys: ["live", "dictation", "media", "models", "history", "settings"]
     property color accent: bridge.recording ? "#ff375f" : bridge.busy || bridge.modelPreparing ? "#ff9f0a" : "#0a84ff"
+    property real recordingPhase: 0
     width: compact ? 604 : 1220
     height: compact ? 132 : 790
     minimumWidth: compact ? 520 : 1000
@@ -40,6 +41,12 @@ ApplicationWindow {
         function onIslandRequested() { root.compact = true }
     }
     Shortcut { sequence: "Escape"; enabled: bridge.busy; onActivated: bridge.cancel() }
+    Timer {
+        interval: 70
+        running: bridge.recording
+        repeat: true
+        onTriggered: root.recordingPhase += 0.32
+    }
 
     component IconButton: Button {
         id: control
@@ -74,7 +81,7 @@ ApplicationWindow {
                     required property int index
                     property real shape: 0.18 + Math.abs(Math.sin(index * 1.71)) * 0.82
                     width: 3
-                    height: bridge.recording ? 4 + Math.max(0, bridge.level) * 24 * shape : 3
+                    height: bridge.recording ? 5 + (Math.sin(root.recordingPhase + index * 0.7) + 1) * 1.8 + Math.max(0, bridge.level) * 24 * shape : 3
                     radius: 2
                     color: bridge.recording ? root.accent : "#22ffffff"
                     anchors.verticalCenter: parent.verticalCenter
@@ -107,7 +114,31 @@ ApplicationWindow {
                 hoverEnabled: true
                 onClicked: bridge.toggleRecording()
                 contentItem: Item { Rectangle { anchors.centerIn: parent; width: bridge.recording ? 17 : 18; height: bridge.recording ? 17 : 18; radius: bridge.recording ? 5 : 9; color: "#ffffff"; Behavior on width { NumberAnimation { duration: 140 } } Behavior on height { NumberAnimation { duration: 140 } } } }
-                background: Rectangle { radius: 27; color: bridge.recording ? "#ff375f" : islandRecord.hovered ? "#4c4c4f" : "#363638"; Behavior on color { ColorAnimation { duration: 150 } } }
+                background: Item {
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 54
+                        height: 54
+                        radius: 27
+                        color: "transparent"
+                        border.width: 1
+                        border.color: "#66ff375f"
+                        visible: bridge.recording
+                        SequentialAnimation on scale {
+                            running: bridge.recording
+                            loops: Animation.Infinite
+                            NumberAnimation { from: 1; to: 1.45; duration: 820 }
+                            NumberAnimation { from: 1.45; to: 1; duration: 820 }
+                        }
+                        SequentialAnimation on opacity {
+                            running: bridge.recording
+                            loops: Animation.Infinite
+                            NumberAnimation { from: 0.65; to: 0; duration: 820 }
+                            NumberAnimation { from: 0; to: 0.65; duration: 820 }
+                        }
+                    }
+                    Rectangle { anchors.centerIn: parent; width: 54; height: 54; radius: 27; color: bridge.recording ? "#ff375f" : islandRecord.hovered ? "#4c4c4f" : "#363638"; Behavior on color { ColorAnimation { duration: 150 } } }
+                }
             }
             ColumnLayout {
                 Layout.fillWidth: true
@@ -230,11 +261,56 @@ ApplicationWindow {
                                 border.width: 1
                                 border.color: bridge.recording ? "#66ff375f" : "#12ffffff"
                                 Rectangle { width: parent.width * 0.46; height: parent.height * 0.9; x: parent.width * 0.52; y: 18; radius: width / 2; color: bridge.recording ? "#12ff375f" : "#0c0a84ff" }
+                                Item {
+                                    visible: bridge.recording
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 30
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: 90
+                                    height: 90
+                                    z: 1
+                                    Rectangle {
+                                        anchors.centerIn: parent
+                                        width: 54
+                                        height: 54
+                                        radius: 27
+                                        color: "#ff375f"
+                                        Text { anchors.centerIn: parent; text: "●"; color: "#ffffff"; font.pixelSize: 19 }
+                                    }
+                                    Repeater {
+                                        model: 2
+                                        delegate: Rectangle {
+                                            required property int index
+                                            anchors.centerIn: parent
+                                            width: 54
+                                            height: 54
+                                            radius: 27
+                                            color: "transparent"
+                                            border.width: 1
+                                            border.color: "#66ff375f"
+                                            SequentialAnimation on scale {
+                                                running: bridge.recording
+                                                loops: Animation.Infinite
+                                                PauseAnimation { duration: index * 580 }
+                                                NumberAnimation { from: 1; to: 1.66; duration: 1160 }
+                                                PauseAnimation { duration: (1 - index) * 580 }
+                                            }
+                                            SequentialAnimation on opacity {
+                                                running: bridge.recording
+                                                loops: Animation.Infinite
+                                                PauseAnimation { duration: index * 580 }
+                                                NumberAnimation { from: 0.65; to: 0; duration: 1160 }
+                                                PauseAnimation { duration: (1 - index) * 580 }
+                                            }
+                                        }
+                                    }
+                                }
                                 ColumnLayout {
+                                    z: 2
                                     anchors.fill: parent
                                     anchors.margins: 26
                                     spacing: 8
-                                    RowLayout { Layout.fillWidth: true; Label { text: bridge.recording ? "LIVE АКТИВЕН" : "LIVE-СУБТИТРЫ"; color: root.accent; font.pixelSize: 11; font.weight: Font.DemiBold; font.letterSpacing: 0.7 } Item { Layout.fillWidth: true } Label { text: (bridge.settings.source === "system" ? "ЗВУК СИСТЕМЫ" : "МИКРОФОН") + " · " + (bridge.settings.language === "ru" ? "РУССКИЙ" : String(bridge.settings.language).toUpperCase()); color: "#8e8e93"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.8 } }
+                                    RowLayout { Layout.fillWidth: true; Label { text: bridge.recording ? "●  ЗАПИСЬ ИДЁТ · " + bridge.elapsed : "LIVE-СУБТИТРЫ"; color: root.accent; font.pixelSize: 11; font.weight: Font.DemiBold; font.letterSpacing: 0.7 } Item { Layout.fillWidth: true } Label { text: (bridge.settings.source === "system" ? "ЗВУК СИСТЕМЫ" : "МИКРОФОН") + " · " + (bridge.settings.language === "ru" ? "РУССКИЙ" : String(bridge.settings.language).toUpperCase()); color: "#8e8e93"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.8 } }
                                     Text { Layout.fillWidth: true; Layout.fillHeight: true; text: bridge.caption.length ? bridge.caption : bridge.recording ? "Слушаю. Первая завершённая фраза появится здесь." : "Запустите Live, чтобы увидеть субтитры."; color: bridge.caption.length ? "#f5f5f7" : "#98989d"; font.pixelSize: bridge.caption.length ? 31 : 20; font.weight: bridge.caption.length ? Font.DemiBold : Font.Normal; wrapMode: Text.Wrap; verticalAlignment: Text.AlignVCenter; Behavior on font.pixelSize { NumberAnimation { duration: 180 } } }
                                     RowLayout { Layout.fillWidth: true; Waveform { Layout.fillWidth: true; bars: 58; Layout.preferredHeight: 34 } ActionButton { text: bridge.recording ? "Завершить Live" : "Начать Live"; primary: true; tint: bridge.recording ? "#ff375f" : "#0a84ff"; enabled: !bridge.busy || bridge.recording; onClicked: bridge.toggleRecording() } ActionButton { visible: bridge.busy; text: "Отмена"; onClicked: bridge.cancel() } }
                                 }
