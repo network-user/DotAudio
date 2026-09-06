@@ -76,6 +76,7 @@ ApplicationWindow {
     component Waveform: Item {
         id: wave
         property int bars: 48
+        property real inputLevel: Math.min(1, Math.max(0, bridge.level * 28))
         implicitHeight: 28
         Row {
             anchors.centerIn: parent
@@ -86,7 +87,7 @@ ApplicationWindow {
                     required property int index
                     property real shape: 0.18 + Math.abs(Math.sin(index * 1.71)) * 0.82
                     width: 3
-                    height: bridge.recording ? 5 + (Math.sin(root.recordingPhase + index * 0.7) + 1) * 1.8 + Math.max(0, bridge.level) * 24 * shape : 3
+                    height: bridge.recording ? 3 + wave.inputLevel * 34 * shape : 3
                     radius: 2
                     color: bridge.recording ? root.accent : "#22ffffff"
                     anchors.verticalCenter: parent.verticalCenter
@@ -152,7 +153,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     spacing: 7
                     Rectangle { Layout.preferredWidth: 6; Layout.preferredHeight: 6; radius: 3; color: root.accent; SequentialAnimation on opacity { running: bridge.recording; loops: Animation.Infinite; NumberAnimation { to: 0.35; duration: 700 } NumberAnimation { to: 1; duration: 700 } } }
-                    Label { text: bridge.recording ? "LIVE АКТИВЕН" : bridge.busy ? "ОБРАБАТЫВАЮ РЕЧЬ" : "DOTAUDIO ГОТОВ"; color: "#aeaeb2"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.75 }
+                    Label { text: bridge.recording ? "LIVE · ВХОД " + Math.round(Math.min(1, bridge.level * 28) * 100) + "%" : bridge.busy ? "ОБРАБАТЫВАЮ РЕЧЬ" : "DOTAUDIO ГОТОВ"; color: bridge.recording && bridge.level > 0.003 ? "#30d158" : "#aeaeb2"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.75 }
                     Item { Layout.fillWidth: true }
                     Label { visible: bridge.recording || bridge.busy; text: bridge.elapsed; color: "#aeaeb2"; font.family: "Cascadia Mono"; font.pixelSize: 11 }
                 }
@@ -317,7 +318,7 @@ ApplicationWindow {
                                     anchors.fill: parent
                                     anchors.margins: 26
                                     spacing: 8
-                                    RowLayout { Layout.fillWidth: true; Label { text: bridge.recording ? "●  ЗАПИСЬ ИДЁТ · " + bridge.elapsed : "LIVE-СУБТИТРЫ"; color: root.accent; font.pixelSize: 11; font.weight: Font.DemiBold; font.letterSpacing: 0.7 } Item { Layout.fillWidth: true } Label { text: (bridge.settings.source === "system" ? "ЗВУК СИСТЕМЫ" : "МИКРОФОН") + " · " + (bridge.settings.language === "ru" ? "РУССКИЙ" : String(bridge.settings.language).toUpperCase()); color: "#8e8e93"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.8 } }
+                                    RowLayout { Layout.fillWidth: true; Label { text: bridge.recording ? "●  ЗАПИСЬ ИДЁТ · " + bridge.elapsed : "LIVE-СУБТИТРЫ"; color: root.accent; font.pixelSize: 11; font.weight: Font.DemiBold; font.letterSpacing: 0.7 } Item { Layout.fillWidth: true } Label { text: bridge.recording ? "ВХОД " + Math.round(Math.min(1, bridge.level * 28) * 100) + "%" : (bridge.settings.source === "system" ? "ЗВУК СИСТЕМЫ" : "МИКРОФОН") + " · " + (bridge.settings.language === "ru" ? "РУССКИЙ" : String(bridge.settings.language).toUpperCase()); color: bridge.recording && bridge.level > 0.003 ? "#30d158" : "#8e8e93"; font.pixelSize: 10; font.weight: Font.DemiBold; font.letterSpacing: 0.8 } }
                                     Text { Layout.fillWidth: true; Layout.fillHeight: true; text: bridge.caption.length ? bridge.caption : bridge.recording ? "Слушаю. Первая завершённая фраза появится здесь." : "Запустите Live, чтобы увидеть субтитры."; color: bridge.caption.length ? "#f5f5f7" : "#98989d"; font.pixelSize: bridge.caption.length ? 31 : 20; font.weight: bridge.caption.length ? Font.DemiBold : Font.Normal; wrapMode: Text.Wrap; verticalAlignment: Text.AlignVCenter; Behavior on font.pixelSize { NumberAnimation { duration: 180 } } }
                                     RowLayout { Layout.fillWidth: true; Waveform { Layout.fillWidth: true; bars: 58; Layout.preferredHeight: 34 } ActionButton { text: bridge.recording ? "Завершить Live" : "Начать Live"; primary: true; tint: bridge.recording ? "#ff375f" : "#0a84ff"; enabled: !bridge.busy || bridge.recording; onClicked: bridge.toggleRecording() } ActionButton { visible: bridge.busy; text: "Отмена"; onClicked: bridge.cancel() } }
                                 }

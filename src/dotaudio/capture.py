@@ -155,9 +155,12 @@ class AudioCapture(_CallbackDispatcher):
                 else:
                     self._start_system_loopback()
             except Exception as exc:
-                self._error(self._start_error(exc))
                 self._stop.set()
                 self._stop_dispatcher()
+                # The previous implementation only queued an error and then
+                # immediately stopped its dispatcher.  A failed microphone
+                # could therefore leave Live visually recording forever.
+                raise RuntimeError(self._start_error(exc)) from exc
 
     def stop(self) -> None:
         with self._lock:

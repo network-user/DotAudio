@@ -68,6 +68,15 @@ def test_capture_error_explains_how_to_recover() -> None:
     assert "driver failed" in message
 
 
+def test_start_propagates_microphone_open_failure(monkeypatch) -> None:
+    def fail_stream(**_kwargs):
+        raise RuntimeError("driver busy")
+
+    monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(InputStream=fail_stream))
+    with pytest.raises(RuntimeError, match="Не удалось открыть микрофон"):
+        AudioCapture(kind="microphone").start()
+
+
 def test_system_capture_resolves_selected_output_index(monkeypatch) -> None:
     selected_speaker = object()
     monkeypatch.setitem(

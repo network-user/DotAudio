@@ -14,7 +14,7 @@ SAMPLE_RATE = 16000
 class SpeechBuffer:
     """Energy endpointing with pre-roll; Whisper VAD filters each utterance again."""
 
-    def __init__(self, max_seconds=10.0, silence_seconds=0.7, threshold=0.006):
+    def __init__(self, max_seconds=4.0, silence_seconds=0.45, threshold=0.004):
         self.limit = int(max_seconds * SAMPLE_RATE)
         self.silence_limit = int(silence_seconds * SAMPLE_RATE)
         self.threshold = threshold
@@ -65,7 +65,9 @@ class LiveSession:
     def __init__(self, engine: Engine, config: RecognitionConfig, on_segment, on_status, on_done):
         self.engine, self.config = engine, config
         self.on_segment, self.on_status, self.on_done = on_segment, on_status, on_done
-        self.buffer = SpeechBuffer()
+        # Short phrases give subtitles a usable live cadence.  The engine VAD
+        # remains a second guard against noise before Whisper runs.
+        self.buffer = SpeechBuffer(max_seconds=4.0, silence_seconds=0.45, threshold=0.004)
         self.queue = Queue(maxsize=8)
         self.cancel = Event()
         self.closed = Event()
