@@ -49,7 +49,8 @@ def export_transcript(
     segments: Iterable[dict[str, Any]], format: str
 ) -> str:
     """Export segments as TXT, SRT, VTT or a compact JSON document."""
-    prepared = [_segment_values(segment) for segment in segments]
+    source_segments = list(segments)
+    prepared = [_segment_values(segment) for segment in source_segments]
     output_format = format.strip().upper()
 
     if output_format == "TXT":
@@ -57,8 +58,13 @@ def export_transcript(
     if output_format == "JSON":
         return json.dumps(
             [
-                {"start": start, "end": end, "text": text}
-                for start, end, text in prepared
+                {
+                    "start": start,
+                    "end": end,
+                    "text": text,
+                    **({"words": segment["words"]} if isinstance(segment.get("words"), list) and segment["words"] else {}),
+                }
+                for (start, end, text), segment in zip(prepared, source_segments, strict=True)
             ],
             ensure_ascii=False,
             indent=2,

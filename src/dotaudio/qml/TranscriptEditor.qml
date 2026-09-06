@@ -7,6 +7,7 @@ Rectangle {
     property var player: null
     property bool editable: true
     property bool showEmptyHint: true
+    property string emptyMessage: "Расшифровка появится после первой завершённой фразы."
     color: "#17181c"
     radius: 18
     border.width: 1
@@ -30,7 +31,7 @@ Rectangle {
         width: parent.width - 60
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.Wrap
-        text: "Расшифровка появится здесь.\nТаймкоды и текст можно редактировать после обработки."
+        text: root.emptyMessage
         color: "#777981"
         font.pixelSize: 14
     }

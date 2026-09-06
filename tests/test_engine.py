@@ -23,6 +23,7 @@ def test_local_engine_caches_model_and_normalises_segments(monkeypatch) -> None:
         def transcribe(self, _source, **kwargs):
             assert kwargs["vad_filter"] is True
             assert kwargs["beam_size"] == 5
+            assert kwargs["word_timestamps"] is True
             return iter([_Segment(0, 0.5, " first "), _Segment(0.5, 1, "")]), object()
 
     def model(name: str, *, device: str, compute_type: str):
@@ -120,3 +121,22 @@ def test_remote_backend_posts_form_and_returns_segments(monkeypatch) -> None:
     assert calls["method"] == "POST"
     assert calls["url"] == "http://127.0.0.1:8765/v1/transcribe"
     assert calls["data"] == {"model": "base", "language": "ru", "task": "transcribe"}
+
+
+def test_media_recipe_keeps_sung_words_and_word_timings(monkeypatch) -> None:
+    class Word:
+        word, start, end = "привет", 0.1, 0.5
+
+    class Segment:
+        start, end, text, words = 0.0, 1.0, "привет", [Word()]
+
+    class FakeModel:
+        def transcribe(self, _source, **kwargs):
+            assert kwargs["vad_filter"] is False
+            assert kwargs["compression_ratio_threshold"] == 2.4
+            return iter([Segment()]), object()
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=lambda *_args, **_kwargs: FakeModel()))
+    assert Engine().transcribe(np.zeros(1600), RecognitionConfig(device="cpu", media_mode=True)) == [
+        {"start": 0.0, "end": 1.0, "text": "привет", "words": [{"text": "привет", "start": 0.1, "end": 0.5}]}
+    ]

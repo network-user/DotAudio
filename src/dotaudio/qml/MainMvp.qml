@@ -1,4 +1,4 @@
-import QtQuick
+﻿import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
@@ -6,420 +6,262 @@ import QtMultimedia
 
 ApplicationWindow {
     id: root
-    width: 1260
-    height: 820
-    minimumWidth: 920
-    minimumHeight: 640
+    property bool compactMode: true
+    property bool restorePosition: false
+    property var nav: [
+        { key: "live", icon: "◉", title: "Live-субтитры", hint: "главный режим" },
+        { key: "dictation", icon: "✦", title: "Диктовка", hint: "голос в буфер" },
+        { key: "media", icon: "▣", title: "Караоке", hint: "аудио и видео" },
+        { key: "models", icon: "⌁", title: "Модели", hint: "скачать заранее" },
+        { key: "history", icon: "◷", title: "История", hint: "локальные сессии" },
+        { key: "settings", icon: "⚙", title: "Настройки", hint: "звук и остров" }
+    ]
+    property int pageIndex: ["live", "dictation", "media", "models", "history", "settings"].indexOf(bridge.page)
+    width: compactMode ? 580 : 1280
+    height: compactMode ? 164 : 820
+    minimumWidth: compactMode ? 500 : 960
+    minimumHeight: compactMode ? 144 : 650
     visible: true
     title: "DotAudio"
-    color: "#0b0c0e"
+    color: compactMode ? "transparent" : "#0b0d10"
+    flags: compactMode ? (Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint) : Qt.Window
+    opacity: compactMode ? Number(bridge.settings.island_opacity) : 1
     font.family: "Segoe UI"
     font.pointSize: 10
-    property var nav: [
-        { key: "dictation", title: "Диктовка", hint: "Голос в текст" },
-        { key: "live", title: "Субтитры", hint: "Здесь и сейчас" },
-        { key: "media", title: "Аудио и видео", hint: "Файл и таймкоды" },
-        { key: "monitor", title: "Эфиры", hint: "Ключевые новости" },
-        { key: "history", title: "История", hint: "Все сессии" },
-        { key: "settings", title: "Настройки", hint: "Модель и устройства" }
-    ]
-    property var titles: ({
-        dictation: "Диктовка", live: "Живые субтитры", media: "Аудио и видео",
-        monitor: "Мониторинг эфиров", history: "История", settings: "Настройки"
-    })
-    property int pageIndex: ["dictation", "live", "media", "monitor", "history", "settings"].indexOf(bridge.page)
 
+    function openWorkspace(page) {
+        if (page) bridge.selectPage(page)
+        bridge.applyIslandClickThrough(false)
+        compactMode = false
+    }
+    function closeWorkspace() {
+        compactMode = true
+        bridge.applyIslandClickThrough(Boolean(bridge.settings.island_click_through))
+    }
+    function levelColor() {
+        if (bridge.recording) return "#ff5f7b"
+        if (bridge.busy || bridge.modelPreparing) return "#f4b860"
+        return "#73e2b7"
+    }
+    function shortCaption() {
+        if (bridge.caption.length) return bridge.caption
+        if (bridge.recording) return "Слушаю речь и жду первую завершённую фразу"
+        if (bridge.modelPreparing) return bridge.modelState.message
+        return "Нажмите запись - текст появится после первой фразы"
+    }
     function timestamp(milliseconds) {
         var total = Math.max(0, Math.floor(milliseconds / 1000))
         var h = Math.floor(total / 3600)
         var m = Math.floor((total % 3600) / 60)
         var s = total % 60
         return (h > 0 ? (h < 10 ? "0" : "") + h + ":" : "")
-            + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s
+             + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s
     }
 
-    function startLabel() {
-        if (bridge.recording) return "Завершить"
-        if (bridge.page === "monitor") return "Запустить эфиры"
-        if (bridge.page === "live") return "Начать субтитры"
-        return "Начать запись"
+    Component.onCompleted: {
+        if (Number(bridge.settings.island_x) >= 0) {
+            x = Number(bridge.settings.island_x)
+            y = Number(bridge.settings.island_y)
+        }
+        bridge.applyIslandClickThrough(Boolean(bridge.settings.island_click_through))
+    }
+    onClosing: function(close) { if (bridge.busy) { close.accepted = false; bridge.cancel() } }
+    Shortcut { sequence: "Escape"; enabled: bridge.busy; onActivated: bridge.cancel() }
+    Connections {
+        target: bridge
+        function onIslandRequested() { root.compactMode = true; bridge.applyIslandClickThrough(Boolean(bridge.settings.island_click_through)) }
     }
 
-    onClosing: function(close) {
-        if (bridge.busy) {
-            close.accepted = false
-            bridge.cancel()
+    Rectangle {
+        id: island
+        visible: root.compactMode
+        anchors.fill: parent
+        radius: 32
+        color: "#15171bcc"
+        border.width: 1
+        border.color: bridge.recording ? "#ff6c85" : bridge.busy ? "#f4b860" : "#3a424e"
+        layer.enabled: true
+
+        Rectangle { anchors.fill: parent; radius: parent.radius; color: "transparent"; border.color: "#ffffff14"; border.width: 1 }
+        MouseArea {
+            id: islandDrag
+            anchors { left: parent.left; right: parent.right; top: parent.top; bottom: parent.bottom }
+            anchors.rightMargin: 168
+            z: 1
+            drag.target: root
+            drag.minimumX: 0; drag.minimumY: 0
+            onReleased: bridge.saveIslandPosition(root.x, root.y)
+        }
+        RowLayout {
+            z: 2
+            anchors.fill: parent
+            anchors.margins: 18
+            spacing: 14
+            Button {
+                id: recordButton
+                Layout.preferredWidth: 58; Layout.preferredHeight: 58
+                text: bridge.recording ? "■" : "●"
+                onClicked: bridge.toggleRecording()
+                contentItem: Text { text: recordButton.text; color: "#111318"; font.pixelSize: bridge.recording ? 16 : 26; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                background: Rectangle { radius: 29; color: root.levelColor(); Behavior on color { ColorAnimation { duration: 180 } } }
+            }
+            ColumnLayout {
+                Layout.fillWidth: true; spacing: 5
+                RowLayout {
+                    Layout.fillWidth: true
+                    Label { text: bridge.recording ? "LIVE · запись" : bridge.busy ? "WHISPER · обработка" : "DOTAUDIO · готов"; color: root.levelColor(); font.pixelSize: 10; font.bold: true; font.letterSpacing: 1.3 }
+                    Item { Layout.fillWidth: true }
+                    Label { text: bridge.elapsed; color: "#aeb6c4"; font.family: "Consolas"; font.pixelSize: 11; visible: bridge.recording || bridge.busy }
+                }
+                Text {
+                    Layout.fillWidth: true; text: root.shortCaption(); color: "#f2f5f7"; font.pixelSize: 15; font.weight: Font.DemiBold
+                    elide: Text.ElideRight; maximumLineCount: 1
+                }
+                Row {
+                    Layout.fillWidth: true; spacing: 3; height: 22
+                    Repeater {
+                        model: 42
+                        delegate: Rectangle {
+                            required property int index
+                            width: 4; radius: 2; anchors.verticalCenter: parent.verticalCenter
+                            property real pulse: 0.18 + Math.abs(Math.sin(index * 1.73)) * 0.82
+                            height: 3 + (bridge.recording ? (8 + bridge.level * 25 * pulse) : bridge.busy ? 8 * pulse : 3)
+                            color: bridge.recording ? "#ff7890" : bridge.busy ? "#f4b860" : "#52606d"
+                            Behavior on height { NumberAnimation { duration: 90 } }
+                            SequentialAnimation on opacity { running: bridge.recording; loops: Animation.Infinite; NumberAnimation { to: 0.45; duration: 370 + index * 14 }; NumberAnimation { to: 1; duration: 370 + index * 14 } }
+                        }
+                    }
+                }
+            }
+            Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 58; color: "#ffffff16" }
+            Button {
+                Layout.preferredWidth: 42; Layout.preferredHeight: 42; text: "⌁"
+                onClicked: root.openWorkspace("models")
+                contentItem: Text { text: "⌁"; color: "#dce3ed"; font.pixelSize: 22; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                background: Rectangle { radius: 15; color: parent.hovered ? "#2a3039" : "#20242b" }
+            }
+            Button {
+                Layout.preferredWidth: 42; Layout.preferredHeight: 42; text: "↗"
+                onClicked: root.openWorkspace("live")
+                contentItem: Text { text: "↗"; color: "#dce3ed"; font.pixelSize: 21; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                background: Rectangle { radius: 15; color: parent.hovered ? "#2a3039" : "#20242b" }
+            }
         }
     }
 
-    Shortcut { sequence: "Escape"; enabled: bridge.busy; onActivated: bridge.cancel() }
-
     RowLayout {
+        visible: !root.compactMode
         anchors.fill: parent
         spacing: 0
-
         Rectangle {
-            id: sidebar
-            Layout.preferredWidth: 238
-            Layout.fillHeight: true
-            color: "#101115"
-            border.color: "#24262c"
-            border.width: 1
+            Layout.preferredWidth: 244; Layout.fillHeight: true; color: "#111319"; border.color: "#252a33"; border.width: 1
             ColumnLayout {
-                anchors.fill: parent
-                anchors.margins: 20
-                spacing: 8
-                Item { Layout.preferredHeight: 16 }
+                anchors.fill: parent; anchors.margins: 18; spacing: 8
                 RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 10
-                    Rectangle {
-                        width: 38; height: 38; radius: 14
-                        color: "#f0f1ef"
-                        Label { anchors.centerIn: parent; text: ".a"; color: "#101115"; font.bold: true; font.pixelSize: 15 }
-                    }
-                    ColumnLayout {
-                        spacing: 0
-                        Label { text: ".аудио"; color: "#f2f3f1"; font.bold: true; font.pixelSize: 23 }
-                        Label { text: "DOTCORE / WHISPER"; color: "#8d9098"; font.pixelSize: 9; font.letterSpacing: 1.4 }
-                    }
+                    Layout.fillWidth: true; spacing: 10
+                    Rectangle { width: 42; height: 42; radius: 15; color: "#f1f5f9"; Label { anchors.centerIn: parent; text: ".a"; color: "#101217"; font.pixelSize: 16; font.bold: true } }
+                    ColumnLayout { spacing: 0; Label { text: ".аудио"; color: "#f4f6f8"; font.pixelSize: 22; font.bold: true }; Label { text: "DOTCORE / WHISPER"; color: "#7d8999"; font.pixelSize: 9; font.letterSpacing: 1.4 } }
                 }
-                Item { Layout.preferredHeight: 28 }
+                Label { text: "РУССКАЯ РЕЧЬ · LIVE FIRST"; color: "#6f7f92"; font.pixelSize: 9; font.letterSpacing: 1.1; Layout.topMargin: 18; Layout.bottomMargin: 6 }
                 Repeater {
                     model: root.nav
                     delegate: Button {
-                        id: navButton
                         required property var modelData
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 48
-                        text: modelData.title
-                        checkable: true
-                        checked: bridge.page === modelData.key
+                        Layout.fillWidth: true; Layout.preferredHeight: 52; text: modelData.title
                         onClicked: bridge.selectPage(modelData.key)
-                        contentItem: Column {
-                            anchors.left: parent.left
-                            anchors.leftMargin: 13
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: 1
-                            Text { text: navButton.text; color: navButton.checked ? "#121316" : "#e8e9e8"; font.pixelSize: 14; font.weight: Font.DemiBold }
-                            Text { text: navButton.modelData.hint; color: navButton.checked ? "#46484e" : "#858892"; font.pixelSize: 10 }
+                        contentItem: RowLayout {
+                            anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 10; spacing: 10
+                            Label { text: modelData.icon; color: bridge.page === modelData.key ? "#12151a" : "#91a0b2"; font.pixelSize: 18; Layout.preferredWidth: 22; horizontalAlignment: Text.AlignHCenter }
+                            ColumnLayout { Layout.fillWidth: true; spacing: 0; Label { text: modelData.title; color: bridge.page === modelData.key ? "#12151a" : "#ecf0f5"; font.pixelSize: 13; font.bold: true }; Label { text: modelData.hint; color: bridge.page === modelData.key ? "#4a5664" : "#758193"; font.pixelSize: 10 } }
                         }
-                        background: Rectangle { radius: 13; color: navButton.checked ? "#eceeeb" : navButton.hovered ? "#1b1d22" : "transparent" }
+                        background: Rectangle { radius: 14; color: bridge.page === modelData.key ? "#eaf1f4" : parent.hovered ? "#1b2028" : "transparent" }
                     }
                 }
                 Item { Layout.fillHeight: true }
                 Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 74
-                    radius: 14
-                    color: "#181a1f"
-                    border.color: "#2a2c32"
-                    ColumnLayout {
-                        anchors.fill: parent; anchors.margins: 11; spacing: 3
-                        Label { text: bridge.hotkeysAvailable ? "Горячая клавиша включена" : "Горячая клавиша занята"; color: "#dedfdf"; font.pixelSize: 11; font.weight: Font.DemiBold }
-                        Label { text: bridge.hotkeysAvailable ? "Ctrl + Alt + Space" : "Используйте кнопку записи"; color: "#8c9099"; font.pixelSize: 10 }
-                    }
+                    Layout.fillWidth: true; Layout.preferredHeight: 86; radius: 16; color: "#181d25"; border.color: "#28313d"
+                    ColumnLayout { anchors.fill: parent; anchors.margins: 12; spacing: 4; Label { text: bridge.hotkeysAvailable ? "Глобальные клавиши включены" : "Глобальная клавиша занята"; color: "#dce5ee"; font.pixelSize: 11; font.bold: true }; Label { text: "Ctrl + Alt + Space - запись\nCtrl + Alt + O - остров"; color: "#8290a0"; font.pixelSize: 10 } }
                 }
             }
         }
-
         ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            Layout.margins: 30
-            spacing: 16
+            Layout.fillWidth: true; Layout.fillHeight: true; Layout.margins: 28; spacing: 16
             RowLayout {
                 Layout.fillWidth: true
-                ColumnLayout {
-                    spacing: 2
-                    Label { text: root.titles[bridge.page]; color: "#f2f3f1"; font.pixelSize: 30; font.weight: Font.DemiBold }
-                    Label { text: bridge.sessionTitle || "Локальная расшифровка · история сохраняется на этом устройстве"; color: "#8e9199"; font.pixelSize: 12 }
-                }
+                ColumnLayout { spacing: 2; Label { text: ({live:"Live-субтитры", dictation:"Диктовка", media:"Караоке-студия", models:"Модели Whisper", history:"История", settings:"Настройки"})[bridge.page]; color: "#f3f5f8"; font.pixelSize: 28; font.bold: true }; Label { text: bridge.status; color: "#8d9aaa"; font.pixelSize: 12 } }
                 Item { Layout.fillWidth: true }
-                Rectangle {
-                    Layout.preferredWidth: Math.max(126, statusText.implicitWidth + 28)
-                    Layout.preferredHeight: 34
-                    radius: 17
-                    color: bridge.recording ? "#f0f1ef" : "#1a1c21"
-                    Label { id: statusText; anchors.centerIn: parent; text: bridge.status; color: bridge.recording ? "#121316" : "#b7bac1"; font.pixelSize: 11 }
-                }
-                Button {
-                    id: islandButton
-                    text: "Остров"
-                    onClicked: bridge.showIsland()
-                    contentItem: Text { text: "Остров"; color: "#e8e9e9"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
-                    background: Rectangle { radius: 16; color: islandButton.down ? "#34363d" : "#24262d" }
-                }
+                Button { text: "Журнал"; onClicked: logDrawer.open(); contentItem: Text { text: "Журнал"; color: "#d6dfe9"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }; background: Rectangle { radius: 14; color: parent.hovered ? "#28303b" : "#1c222b" } }
+                Button { text: "Свернуть"; onClicked: root.closeWorkspace(); contentItem: Text { text: "Свернуть"; color: "#101318"; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }; background: Rectangle { radius: 14; color: "#e6eef0" } }
             }
-
-            Rectangle {
-                visible: bridge.notice.length > 0
-                Layout.fillWidth: true
-                implicitHeight: notice.implicitHeight + 22
-                radius: 12
-                color: "#272930"
-                border.color: "#3a3d46"
-                Label { id: notice; anchors.fill: parent; anchors.margins: 11; text: bridge.notice; wrapMode: Text.Wrap; color: "#e9eaeb"; font.pixelSize: 12 }
-                TapHandler { onTapped: bridge.clearNotice() }
-            }
-
+            Rectangle { visible: bridge.notice.length > 0; Layout.fillWidth: true; implicitHeight: notice.implicitHeight + 22; radius: 14; color: "#2b2523"; border.color: "#5e4638"; Label { id: notice; anchors.fill: parent; anchors.margins: 11; text: bridge.notice; color: "#f6ded1"; wrapMode: Text.Wrap; font.pixelSize: 12 }; TapHandler { onTapped: bridge.clearNotice() } }
             StackLayout {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                currentIndex: root.pageIndex < 0 ? 0 : root.pageIndex
-
+                Layout.fillWidth: true; Layout.fillHeight: true; currentIndex: root.pageIndex < 0 ? 0 : root.pageIndex
+                // Live
                 Item {
-                    ColumnLayout {
-                        anchors.fill: parent
-                        spacing: 16
-                        Rectangle {
-                            Layout.fillWidth: true; Layout.preferredHeight: 252; radius: 22
-                            color: "#17181c"; border.color: "#2c2e35"
-                            ColumnLayout {
-                                anchors.fill: parent; anchors.margins: 26; spacing: 12
-                                Label { text: bridge.recording ? "Говорите. Я сохраню текст в историю и буфер обмена." : "Скажите мысль - DotAudio подготовит текст для вставки."; color: "#f0f1ef"; font.pixelSize: 22; font.weight: Font.DemiBold; wrapMode: Text.Wrap; Layout.fillWidth: true }
-                                Label { text: "Запись включается кнопкой или Ctrl + Alt + Space. После завершения текст попадёт в буфер; автовставка работает только при запуске горячей клавишей и сохранённом фокусе окна."; color: "#9b9ea6"; font.pixelSize: 13; wrapMode: Text.Wrap; Layout.fillWidth: true }
+                    ColumnLayout { anchors.fill: parent; spacing: 14
+                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 270; radius: 24; color: "#14181f"; border.color: bridge.recording ? "#7e4052" : "#273240"; border.width: 1
+                            ColumnLayout { anchors.fill: parent; anchors.margins: 26; spacing: 10
+                                RowLayout { Layout.fillWidth: true; Label { text: bridge.recording ? "Эфир в работе" : "Готов к прямым субтитрам"; color: "#f5f7fa"; font.pixelSize: 23; font.bold: true }; Item { Layout.fillWidth: true }; Rectangle { width: 12; height: 12; radius: 6; color: root.levelColor(); SequentialAnimation on opacity { running: bridge.recording; loops: Animation.Infinite; NumberAnimation { to: 0.25; duration: 600 }; NumberAnimation { to: 1; duration: 600 } } } }
+                                Text { Layout.fillWidth: true; text: bridge.caption.length ? bridge.caption : "Начните запись. После первой законченной фразы текст появится здесь, а не в пустом поле."; color: bridge.caption.length ? "#ffffff" : "#94a1b1"; font.pixelSize: bridge.caption.length ? 30 : 17; font.weight: bridge.caption.length ? Font.DemiBold : Font.Normal; wrapMode: Text.Wrap; maximumLineCount: 3; Behavior on opacity { NumberAnimation { duration: 220 } } }
+                                Text { visible: bridge.settings.task === "translate"; text: "Перевод в English выполняет Whisper Translate"; color: "#8cd8c2"; font.pixelSize: 11; font.letterSpacing: 0.4 }
                                 Item { Layout.fillHeight: true }
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Button {
-                                        id: dictationButton
-                                        text: root.startLabel(); enabled: !bridge.busy || bridge.recording
-                                        onClicked: bridge.toggleRecording()
-                                        contentItem: Text { text: dictationButton.text; color: "#111215"; font.pixelSize: 14; font.weight: Font.DemiBold; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                                        background: Rectangle { radius: 18; color: dictationButton.enabled ? "#eef0ed" : "#5d6067" }
-                                    }
-                                    Button { visible: bridge.busy; text: "Отменить"; onClicked: bridge.cancel() }
-                                    Item { Layout.fillWidth: true }
-                                    Label { text: bridge.elapsed; color: "#f0f1ef"; font.pixelSize: 20; font.family: "Consolas" }
-                                }
-                                ProgressBar { Layout.fillWidth: true; from: 0; to: 0.25; value: bridge.level; visible: bridge.recording }
+                                RowLayout { Layout.fillWidth: true; Button { id: liveStart; text: bridge.recording ? "Завершить и сохранить" : "Начать live"; enabled: !bridge.busy || bridge.recording; onClicked: bridge.toggleRecording(); contentItem: Text { text: liveStart.text; color: "#101318"; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }; background: Rectangle { radius: 17; color: root.levelColor() } }; Button { visible: bridge.busy; text: "Отмена"; onClicked: bridge.cancel() }; Item { Layout.fillWidth: true }; Label { text: bridge.elapsed; color: "#d6dce5"; font.family: "Consolas"; font.pixelSize: 18 } }
+                                Row { Layout.fillWidth: true; height: 28; spacing: 4; Repeater { model: 64; delegate: Rectangle { required property int index; width: 5; radius: 3; anchors.verticalCenter: parent.verticalCenter; property real texture: 0.25 + Math.abs(Math.sin(index * 2.17)) * 0.75; height: 3 + bridge.level * 25 * texture; color: bridge.recording ? "#ff607e" : "#33404e"; Behavior on height { NumberAnimation { duration: 85 } } } } }
                             }
                         }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            Label { text: "Микрофон"; color: "#a7aab2" }
-                            ComboBox {
-                                id: inputDevices
-                                Layout.preferredWidth: 310
-                                model: [{id:"", name:"Системный микрофон"}].concat(bridge.devices)
-                                textRole: "name"
-                                currentIndex: {
-                                    for (var i = 0; i < model.length; ++i) if (String(model[i].id) === String(bridge.settings.input_device)) return i
-                                    return 0
-                                }
-                                enabled: !bridge.busy
-                                onActivated: bridge.setSetting("input_device", String(model[currentIndex].id))
-                            }
-                            Button { text: "Обновить"; enabled: !bridge.busy; onClicked: bridge.refreshDevices() }
-                            Item { Layout.fillWidth: true }
-                            Switch { text: "Автовставка"; checked: bridge.settings.auto_paste; enabled: !bridge.busy; onToggled: bridge.setSetting("auto_paste", checked) }
-                        }
-                        TranscriptEditor { Layout.fillWidth: true; Layout.fillHeight: true; editable: true }
+                        TranscriptEditor { Layout.fillWidth: true; Layout.fillHeight: true; editable: false; showEmptyHint: false }
                     }
                 }
-
+                // Dictation
                 Item {
-                    ColumnLayout {
-                        anchors.fill: parent; spacing: 16
-                        Rectangle {
-                            Layout.fillWidth: true; Layout.preferredHeight: 188; radius: 22
-                            color: "#17181c"; border.color: "#2c2e35"
-                            ColumnLayout {
-                                anchors.fill: parent; anchors.margins: 24; spacing: 10
-                                Label { text: "Субтитры без отвлечения от события"; color: "#f0f1ef"; font.pixelSize: 22; font.weight: Font.DemiBold }
-                                Label { text: "Выберите микрофон или системный звук в настройках. Остров можно вынести поверх презентации или видеозвонка."; color: "#9b9ea6"; font.pixelSize: 13; wrapMode: Text.Wrap; Layout.fillWidth: true }
-                                Item { Layout.fillHeight: true }
-                                RowLayout {
-                                    Button { text: root.startLabel(); enabled: !bridge.busy || bridge.recording; onClicked: bridge.toggleRecording() }
-                                    Button { visible: bridge.busy; text: "Отменить"; onClicked: bridge.cancel() }
-                                    Item { Layout.fillWidth: true }
-                                    Label { text: bridge.caption; width: 400; elide: Text.ElideRight; color: "#d9dbdf"; font.pixelSize: 14 }
-                                }
-                            }
+                    ColumnLayout { anchors.fill: parent; spacing: 14
+                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 230; radius: 24; color: "#151a21"; border.color: "#293544"
+                            ColumnLayout { anchors.fill: parent; anchors.margins: 24; spacing: 10; Label { text: bridge.recording ? "Говорите спокойно" : "Голос в текст и буфер обмена"; color: "#f4f7fa"; font.pixelSize: 24; font.bold: true }; Label { text: "Результат останется в истории. Запуск по Ctrl + Alt + Space бережно вставит текст в предыдущее окно, если оно сохранило фокус."; color: "#99a6b6"; font.pixelSize: 13; wrapMode: Text.Wrap; Layout.fillWidth: true }; Item { Layout.fillHeight: true }; RowLayout { Layout.fillWidth: true; Button { text: bridge.recording ? "Завершить" : "Записать"; onClicked: bridge.toggleRecording() }; Button { text: "Копировать текст"; enabled: bridge.text.length > 0; onClicked: bridge.copyText() }; Item { Layout.fillWidth: true }; Switch { text: "Автовставка"; checked: bridge.settings.auto_paste; onToggled: bridge.setSetting("auto_paste", checked) } } }
                         }
-                        TranscriptEditor { Layout.fillWidth: true; Layout.fillHeight: true; editable: false }
+                        TranscriptEditor { Layout.fillWidth: true; Layout.fillHeight: true; editable: true; showEmptyHint: true }
                     }
                 }
-
+                // Karaoke media
                 Item {
-                    RowLayout {
-                        anchors.fill: parent; spacing: 16
-                        ColumnLayout {
-                            Layout.preferredWidth: Math.max(360, parent.width * 0.45)
-                            Layout.fillHeight: true; spacing: 12
-                            Rectangle {
-                                Layout.fillWidth: true; Layout.fillHeight: true; radius: 20
-                                color: "#15161a"; border.color: "#2b2d34"
+                    RowLayout { anchors.fill: parent; spacing: 14
+                        ColumnLayout { Layout.preferredWidth: parent.width * 0.53; Layout.fillHeight: true; spacing: 12
+                            Rectangle { Layout.fillWidth: true; Layout.fillHeight: true; radius: 24; color: "#10141a"; border.color: "#293543"
                                 VideoOutput { id: mediaVideo; anchors.fill: parent; anchors.margins: 8; fillMode: VideoOutput.PreserveAspectFit; visible: mediaPlayer.hasVideo }
-                                ColumnLayout {
-                                    anchors.centerIn: parent; width: parent.width - 60; visible: !bridge.mediaUrl
-                                    Label { text: "Откройте запись, подкаст или видео"; color: "#f0f1ef"; font.pixelSize: 18; font.weight: Font.DemiBold; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
-                                    Label { text: "После обработки появятся синхронизированные реплики. Файл остаётся в исходной папке."; color: "#9699a2"; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
-                                    Button { text: "Выбрать файл"; Layout.alignment: Qt.AlignHCenter; onClicked: bridge.importFile() }
-                                }
-                                DropArea { anchors.fill: parent; onDropped: if (drop.urls.length) bridge.transcribePath(drop.urls[0].toString()) }
+                                ColumnLayout { anchors.centerIn: parent; width: parent.width - 70; visible: !bridge.mediaUrl; Label { text: "Аудио в караоке-субтитры"; color: "#f3f6f9"; font.pixelSize: 23; font.bold: true; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }; Label { text: "Откройте аудио или видео. Word timestamps сохранятся вместе с расшифровкой и сформируют анимированный ASS-трек."; color: "#94a2b1"; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }; Button { text: "Выбрать медиа"; Layout.alignment: Qt.AlignHCenter; onClicked: bridge.importFile() } }
+                                Rectangle { visible: bridge.mediaUrl.length > 0; anchors { left: parent.left; right: parent.right; bottom: parent.bottom; margins: 24 }; height: 94; radius: 18; color: "#101216e8"; border.color: "#ffffff20"; ColumnLayout { anchors.fill: parent; anchors.margins: 12; RowLayout { Layout.fillWidth: true; Text { text: bridge.caption.length ? bridge.caption : "Караоке появится после распознавания"; color: "#ffffff"; font.pixelSize: 19; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true } }; Slider { Layout.fillWidth: true; from: 0; to: Math.max(1, mediaPlayer.duration); value: mediaPlayer.position; onMoved: mediaPlayer.position = value } } }
                             }
-                            RowLayout {
-                                Layout.fillWidth: true; visible: bridge.mediaUrl.length > 0
-                                Button { text: mediaPlayer.playbackState === MediaPlayer.PlayingState ? "Пауза" : "Воспроизвести"; onClicked: mediaPlayer.playbackState === MediaPlayer.PlayingState ? mediaPlayer.pause() : mediaPlayer.play() }
-                                Slider { Layout.fillWidth: true; from: 0; to: Math.max(1, mediaPlayer.duration); value: mediaPlayer.position; onMoved: mediaPlayer.position = value }
-                                Label { text: root.timestamp(mediaPlayer.position) + " / " + root.timestamp(mediaPlayer.duration); color: "#a4a7af"; font.family: "Consolas"; font.pixelSize: 11 }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                Button { text: "Открыть файл"; enabled: !bridge.busy; onClicked: bridge.importFile() }
-                                Button { text: "Отменить"; visible: bridge.busy; onClicked: bridge.cancel() }
-                                Item { Layout.fillWidth: true }
-                            }
+                            RowLayout { Layout.fillWidth: true; Button { text: "Открыть файл"; enabled: !bridge.busy; onClicked: bridge.importFile() }; Button { text: mediaPlayer.playbackState === MediaPlayer.PlayingState ? "Пауза" : "Воспроизвести"; visible: bridge.mediaUrl.length > 0; onClicked: mediaPlayer.playbackState === MediaPlayer.PlayingState ? mediaPlayer.pause() : mediaPlayer.play() }; Button { text: "Обложка"; visible: bridge.mediaUrl.length > 0; onClicked: bridge.chooseCover() }; Button { text: "Экспорт ASS"; enabled: bridge.segments.length > 0; onClicked: bridge.exportKaraokeFile() }; Button { text: bridge.rendering ? "Рендер…" : "MP4"; enabled: bridge.segments.length > 0 && !bridge.rendering; onClicked: bridge.exportKaraokeVideo() }; Item { Layout.fillWidth: true }; Label { text: root.timestamp(mediaPlayer.position); color: "#98a6b6"; font.family: "Consolas" } }
                         }
-                        TranscriptEditor { Layout.fillWidth: true; Layout.fillHeight: true; player: mediaPlayer; editable: true }
+                        TranscriptEditor { Layout.fillWidth: true; Layout.fillHeight: true; player: mediaPlayer; editable: true; showEmptyHint: true }
                     }
-                    MediaPlayer { id: mediaPlayer; source: bridge.mediaUrl; videoOutput: mediaVideo; audioOutput: AudioOutput { id: mediaAudio } }
+                    MediaPlayer { id: mediaPlayer; source: bridge.mediaUrl; videoOutput: mediaVideo; audioOutput: AudioOutput {} }
                 }
-
+                // Models
                 Item {
-                    ColumnLayout {
-                        anchors.fill: parent; spacing: 12
-                        Rectangle {
-                            Layout.fillWidth: true; Layout.preferredHeight: 185; radius: 20
-                            color: "#17181c"; border.color: "#2c2e35"
-                            ColumnLayout {
-                                anchors.fill: parent; anchors.margins: 18; spacing: 8
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Label { text: "Ключевые слова"; color: "#e8e9e9"; font.pixelSize: 12; Layout.preferredWidth: 120 }
-                                    TextField { Layout.fillWidth: true; placeholderText: "Например: выборы, ставка, Whisper"; text: bridge.settings.keywords; enabled: !bridge.busy; onEditingFinished: bridge.setSetting("keywords", text) }
-                                }
-                                TextArea { Layout.fillWidth: true; Layout.fillHeight: true; placeholderText: "Название | https://прямая-ссылка-на-эфир\nДо четырёх HTTP(S)-потоков, один на строку"; text: bridge.settings.channels; enabled: !bridge.busy; wrapMode: TextEdit.Wrap; onActiveFocusChanged: if (!activeFocus) bridge.setSetting("channels", text) }
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Button { text: root.startLabel(); enabled: !bridge.busy || bridge.recording; onClicked: bridge.toggleRecording() }
-                                    Button { visible: bridge.busy; text: "Остановить"; onClicked: bridge.toggleRecording() }
-                                    Item { Layout.fillWidth: true }
-                                    Label { text: "Совпадений: " + bridge.hits.length; color: "#9b9ea6" }
-                                }
-                            }
-                        }
-                        Rectangle {
-                            Layout.fillWidth: true; Layout.fillHeight: true; radius: 18; color: "#17181c"; border.color: "#2c2e35"
-                            Label { visible: bridge.hits.length === 0; anchors.centerIn: parent; text: "Совпадения по словам появятся здесь"; color: "#777981" }
-                            ListView {
-                                anchors.fill: parent; anchors.margins: 10; clip: true; spacing: 7; model: bridge.hits
-                                delegate: Rectangle {
-                                    required property var modelData
-                                    width: ListView.view.width; implicitHeight: eventText.implicitHeight + 28; radius: 12; color: "#1e2026"
-                                    ColumnLayout {
-                                        anchors.fill: parent; anchors.margins: 12; spacing: 4
-                                        Label { text: modelData.source + " · " + modelData.matches; color: "#b8bdc7"; font.pixelSize: 11 }
-                                        Label { id: eventText; text: modelData.text; color: "#eceeec"; wrapMode: Text.Wrap; Layout.fillWidth: true }
-                                    }
-                                    TapHandler { onTapped: bridge.openSession(modelData.session_id) }
-                                }
-                                ScrollBar.vertical: ScrollBar { }
-                            }
+                    Flickable { anchors.fill: parent; contentWidth: width; contentHeight: modelsColumn.implicitHeight; clip: true
+                        ColumnLayout { id: modelsColumn; width: parent.width; spacing: 14
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 112; radius: 20; color: "#15211f"; border.color: "#285048"; RowLayout { anchors.fill: parent; anchors.margins: 18; Rectangle { width: 44; height: 44; radius: 15; color: "#73e2b7"; Label { anchors.centerIn: parent; text: bridge.modelPreparing ? "…" : "✓"; color: "#102019"; font.pixelSize: 22; font.bold: true } }; ColumnLayout { Layout.fillWidth: true; Label { text: bridge.modelState.message; color: "#eaf8f2"; font.pixelSize: 15; font.bold: true; wrapMode: Text.Wrap; Layout.fillWidth: true }; Label { text: "Подготовка идёт в фоне. Скачивание требуется только один раз для локальной модели."; color: "#8fc3b1"; font.pixelSize: 11 } }; BusyIndicator { running: bridge.modelPreparing; visible: running } } }
+                            Repeater { model: [ {id:"tiny", title:"tiny", hint:"самый быстрый, демонстрация"}, {id:"base", title:"base", hint:"рекомендуется для live"}, {id:"small", title:"small", hint:"точнее русская речь"}, {id:"medium", title:"medium", hint:"мощный ПК или GPU"}, {id:"large-v3", title:"large-v3", hint:"максимум качества"}, {id:"turbo", title:"turbo", hint:"быстрый крупный вариант"} ]; delegate: Rectangle { required property var modelData; Layout.fillWidth: true; Layout.preferredHeight: 78; radius: 18; color: bridge.settings.model === modelData.id ? "#202b32" : "#151a21"; border.color: bridge.settings.model === modelData.id ? "#71c9b2" : "#2a333f"; RowLayout { anchors.fill: parent; anchors.margins: 15; ColumnLayout { Layout.fillWidth: true; Label { text: modelData.title; color: "#f2f6f8"; font.pixelSize: 16; font.bold: true }; Label { text: modelData.hint; color: "#94a3b2"; font.pixelSize: 11 } }; Button { text: bridge.settings.model === modelData.id ? "Выбрана" : "Выбрать"; enabled: !bridge.busy; onClicked: bridge.setSetting("model", modelData.id) }; Button { text: bridge.modelPreparing && bridge.modelState.model === modelData.id ? "Готовим…" : "Скачать"; enabled: !bridge.busy && !bridge.modelPreparing; onClicked: { bridge.setSetting("model", modelData.id); bridge.prepareSelectedModel() } } } } }
                         }
                     }
                 }
-
+                // History
                 Item {
-                    ColumnLayout {
-                        anchors.fill: parent; spacing: 12
-                        TextField { Layout.fillWidth: true; placeholderText: "Поиск по названию и тексту"; onTextChanged: bridge.refreshHistory(text) }
-                        Label { text: bridge.history.length ? "Выберите сессию, чтобы открыть текст или медиа." : "История пока пуста."; color: "#93969f"; font.pixelSize: 12 }
-                        ListView {
-                            Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8; model: bridge.history
-                            delegate: Button {
-                                id: historyButton
-                                required property var modelData
-                                width: ListView.view.width; implicitHeight: 70; onClicked: bridge.openSession(modelData.id)
-                                contentItem: ColumnLayout {
-                                    anchors.fill: parent; anchors.margins: 13; spacing: 2
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        Label { text: modelData.title; color: "#e9eae9"; font.pixelSize: 14; font.weight: Font.DemiBold }
-                                        Item { Layout.fillWidth: true }
-                                        Label { text: modelData.mode + " · " + modelData.segment_count + " фраз"; color: "#a2a5ad"; font.pixelSize: 11 }
-                                    }
-                                    Label { text: modelData.text || "Нет распознанного текста"; color: "#777b84"; elide: Text.ElideRight; Layout.fillWidth: true; maximumLineCount: 1 }
-                                }
-                                background: Rectangle { radius: 14; color: historyButton.hovered ? "#22242a" : "#191a1e"; border.color: "#2b2d34" }
-                            }
-                            ScrollBar.vertical: ScrollBar { }
-                        }
-                    }
+                    ColumnLayout { anchors.fill: parent; spacing: 12; TextField { Layout.fillWidth: true; placeholderText: "Поиск по истории"; color: "#edf2f6"; onTextChanged: bridge.refreshHistory(text); background: Rectangle { radius: 14; color: "#181e26"; border.color: "#2c3846" } }; ListView { Layout.fillWidth: true; Layout.fillHeight: true; model: bridge.history; spacing: 7; clip: true; ScrollBar.vertical: ScrollBar {}; delegate: Rectangle { required property var modelData; width: ListView.view.width; height: 74; radius: 16; color: "#161b22"; border.color: "#293340"; MouseArea { anchors.fill: parent; onClicked: bridge.openSession(modelData.id) }; Column { anchors.fill: parent; anchors.margins: 12; spacing: 3; Text { text: modelData.title; color: "#edf2f6"; font.pixelSize: 14; font.bold: true }; Text { text: modelData.mode + " · " + modelData.segment_count + " сегм. · " + modelData.text; color: "#93a1b1"; font.pixelSize: 11; elide: Text.ElideRight; width: parent.width } } } } }
                 }
-
+                // Settings
                 Item {
-                    Flickable {
-                        anchors.fill: parent; contentWidth: width; contentHeight: settingsColumn.implicitHeight + 20; clip: true
-                        ColumnLayout {
-                            id: settingsColumn; width: parent.width; spacing: 14
-                            Label { text: "Распознавание"; color: "#f0f1ef"; font.pixelSize: 18; font.weight: Font.DemiBold }
-                            GridLayout {
-                                columns: 2; columnSpacing: 16; rowSpacing: 10
-                                Repeater {
-                                    model: [
-                                        {key:"profile", title:"Профиль", values:["fast","balanced","quality"]},
-                                        {key:"model", title:"Модель", values:["tiny","base","small","medium","large-v3","turbo"]},
-                                        {key:"device", title:"Устройство", values:["auto","cpu","cuda"]},
-                                        {key:"language", title:"Язык", values:["auto","ru","en","de","es","fr","zh"]},
-                                        {key:"task", title:"Задача", values:["transcribe","translate"]},
-                                        {key:"backend", title:"Обработка", values:["local","remote"]}
-                                    ]
-                                    delegate: RowLayout {
-                                        required property var modelData
-                                        Layout.fillWidth: true
-                                        Label { text: modelData.title; color: "#a9acb4"; Layout.preferredWidth: 105 }
-                                        ComboBox { Layout.fillWidth: true; model: modelData.values; currentIndex: modelData.values.indexOf(bridge.settings[modelData.key]); enabled: !bridge.busy; onActivated: bridge.setSetting(modelData.key, currentText) }
-                                    }
-                                }
-                            }
-                            Label { text: "Сервер"; color: "#f0f1ef"; font.pixelSize: 18; font.weight: Font.DemiBold; Layout.topMargin: 16 }
-                            TextField { Layout.fillWidth: true; placeholderText: "http://127.0.0.1:8765"; text: bridge.settings.server_url; enabled: !bridge.busy; onEditingFinished: bridge.setSetting("server_url", text) }
-                            Label { text: "Локальная обработка хранит аудио на устройстве. В удалённом режиме файл или аудиофрагмент отправляется по указанному адресу."; color: "#92959e"; wrapMode: Text.Wrap; Layout.fillWidth: true }
-                            Label { text: "Источники"; color: "#f0f1ef"; font.pixelSize: 18; font.weight: Font.DemiBold; Layout.topMargin: 16 }
-                            RowLayout {
-                                RadioButton { text: "Микрофон"; checked: bridge.settings.source === "microphone"; enabled: !bridge.busy; onToggled: if (checked) bridge.setSetting("source", "microphone") }
-                                RadioButton { text: "Системный звук"; checked: bridge.settings.source === "system"; enabled: !bridge.busy; onToggled: if (checked) bridge.setSetting("source", "system") }
-                            }
-                            Label { text: "Режим " + (bridge.settings.source === "system" ? "системного звука" : "микрофона") + " зависит от доступности устройства и драйверов Windows."; color: "#92959e"; wrapMode: Text.Wrap; Layout.fillWidth: true }
+                    Flickable { anchors.fill: parent; contentWidth: width; contentHeight: settingsColumn.implicitHeight; clip: true
+                        ColumnLayout { id: settingsColumn; width: parent.width; spacing: 14
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 154; radius: 20; color: "#151b22"; border.color: "#2b3744"; ColumnLayout { anchors.fill: parent; anchors.margins: 17; Label { text: "Речь и перевод"; color: "#f0f4f7"; font.pixelSize: 16; font.bold: true }; RowLayout { Layout.fillWidth: true; Label { text: "Язык распознавания"; color: "#a9b5c1"; Layout.preferredWidth: 175 }; ComboBox { Layout.preferredWidth: 240; model: [{id:"ru",name:"Русский"},{id:"auto",name:"Автоопределение"},{id:"en",name:"English"}]; textRole:"name"; currentIndex: bridge.settings.language === "ru" ? 0 : bridge.settings.language === "auto" ? 1 : 2; onActivated: bridge.setSetting("language", model[currentIndex].id) }; Item { Layout.fillWidth: true } }; RowLayout { Layout.fillWidth: true; Label { text: "Вывод субтитров"; color: "#a9b5c1"; Layout.preferredWidth: 175 }; ComboBox { Layout.preferredWidth: 240; model: [{id:"transcribe",name:"Исходный язык"},{id:"translate",name:"English через Whisper"}]; textRole:"name"; currentIndex: bridge.settings.task === "translate" ? 1 : 0; onActivated: bridge.setSetting("task", model[currentIndex].id) }; Label { text: "Whisper Translate переводит на английский"; color: "#718091"; font.pixelSize: 10 } } } }
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 236; radius: 20; color: "#151b22"; border.color: "#2b3744"; ColumnLayout { anchors.fill: parent; anchors.margins: 17; spacing: 8; RowLayout { Layout.fillWidth: true; Label { text: "Микрофон и наушники"; color: "#f0f4f7"; font.pixelSize: 16; font.bold: true }; Item { Layout.fillWidth: true }; Button { text: "Обновить"; onClicked: { bridge.refreshDevices(); bridge.refreshOutputs() } } }; RowLayout { Layout.fillWidth: true; Label { text: "Вход"; color: "#a9b5c1"; Layout.preferredWidth: 68 }; ComboBox { Layout.fillWidth: true; model: [{id:"",name:"Системный микрофон"}].concat(bridge.devices); textRole:"name"; currentIndex: { for (var i=0; i<model.length; ++i) if (String(model[i].id) === String(bridge.settings.input_device)) return i; return 0 }; onActivated: bridge.setSetting("input_device", String(model[currentIndex].id)) }; Button { text: "Тест 3 сек"; onClicked: bridge.testMicrophone() } }; RowLayout { Layout.fillWidth: true; Label { text: "Выход"; color: "#a9b5c1"; Layout.preferredWidth: 68 }; ComboBox { Layout.fillWidth: true; model: [{id:"",name:"Системный вывод"}].concat(bridge.outputs); textRole:"name"; currentIndex: { for (var i=0; i<model.length; ++i) if (String(model[i].id) === String(bridge.settings.output_device)) return i; return 0 }; onActivated: bridge.setSetting("output_device", String(model[currentIndex].id)) }; Button { text: "Тон"; onClicked: bridge.testOutputDevice() } }; ProgressBar { Layout.fillWidth: true; from: 0; to: 0.35; value: bridge.deviceTest.level; visible: bridge.deviceTest.phase === "listening" }; Label { text: bridge.deviceTest.message || "Тест не записывает и не сохраняет аудио."; color: bridge.deviceTest.phase === "error" ? "#ff9da9" : "#8393a4"; font.pixelSize: 11; wrapMode: Text.Wrap; Layout.fillWidth: true } } }
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 205; radius: 20; color: "#151b22"; border.color: "#2b3744"; ColumnLayout { anchors.fill: parent; anchors.margins: 17; spacing: 7; Label { text: "Мини-островок"; color: "#f0f4f7"; font.pixelSize: 16; font.bold: true }; RowLayout { Layout.fillWidth: true; Label { text: "Прозрачность"; color: "#a9b5c1"; Layout.preferredWidth: 130 }; Slider { Layout.fillWidth: true; from: 0.35; to: 1; value: Number(bridge.settings.island_opacity); onMoved: bridge.setSetting("island_opacity", value) }; Label { text: Math.round(Number(bridge.settings.island_opacity)*100) + "%"; color: "#dce4ec"; Layout.preferredWidth: 40 } }; Switch { text: "Пропускать клики сквозь остров"; checked: Boolean(bridge.settings.island_click_through); onToggled: bridge.setIslandClickThrough(checked) }; Switch { text: "Запоминать позицию острова"; checked: Boolean(bridge.settings.island_snap); onToggled: bridge.setSetting("island_snap", checked) }; Label { text: "При пропуске кликов верните рабочее окно горячей клавишей Ctrl + Alt + O."; color: "#718192"; font.pixelSize: 10 } } }
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 104; radius: 20; color: "#151b22"; border.color: "#2b3744"; RowLayout { anchors.fill: parent; anchors.margins: 17; ColumnLayout { Layout.fillWidth: true; Label { text: "Профиль качества"; color: "#f0f4f7"; font.pixelSize: 16; font.bold: true }; Label { text: "Fast уменьшает задержку, quality увеличивает точность и нагрузку."; color: "#8392a2"; font.pixelSize: 11 } }; ComboBox { model: [{id:"fast",name:"Fast"},{id:"balanced",name:"Balanced"},{id:"quality",name:"Quality"}]; textRole:"name"; currentIndex: bridge.settings.profile === "fast" ? 0 : bridge.settings.profile === "quality" ? 2 : 1; onActivated: bridge.setSetting("profile", model[currentIndex].id) } } }
                         }
                     }
                 }
-            }
-
-            RowLayout {
-                Layout.fillWidth: true; spacing: 8
-                Button { text: "Копировать текст"; enabled: bridge.segments.length > 0; onClicked: bridge.copyText() }
-                Repeater { model: ["txt", "srt", "vtt", "json"]; delegate: Button { required property string modelData; text: modelData.toUpperCase(); enabled: bridge.segments.length > 0; onClicked: bridge.exportFile(modelData) } }
-                Item { Layout.fillWidth: true }
-                Label { text: bridge.segments.length ? bridge.segments.length + " сегм." : ""; color: "#777981"; font.pixelSize: 11 }
             }
         }
     }
-
-    Window {
-        id: island
-        width: 530; height: 138; visible: false; color: "transparent"
-        flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus
-        x: Screen.width / 2 - width / 2; y: 36
-        Rectangle {
-            anchors.fill: parent; radius: 30; color: "#f113151a"; border.color: "#4b4e56"
-            ColumnLayout {
-                anchors.fill: parent; anchors.margins: 18; spacing: 7
-                RowLayout {
-                    Layout.fillWidth: true
-                    Label { text: ".аудио"; color: "#eef0ed"; font.bold: true; font.pixelSize: 13 }
-                    Item { Layout.fillWidth: true }
-                    Label { text: bridge.recording ? "● СЛУШАЮ" : bridge.status; color: bridge.recording ? "#eef0ed" : "#aeb1b9"; font.pixelSize: 10 }
-                }
-                Label { text: bridge.caption; color: "#f5f6f5"; font.pixelSize: 19; maximumLineCount: 2; wrapMode: Text.Wrap; elide: Text.ElideRight; Layout.fillWidth: true; Layout.fillHeight: true }
-                ProgressBar { Layout.fillWidth: true; from: 0; to: 0.25; value: bridge.level; visible: bridge.recording }
-            }
-            TapHandler { onDoubleTapped: island.visible = false }
-        }
-    }
-
-    Connections { target: bridge; function onIslandRequested() { island.visible = !island.visible } }
+    Drawer { id: logDrawer; parent: root.contentItem; width: Math.min(440, root.width * .86); height: parent.height; edge: Qt.Right; modal: true; background: Rectangle { color: "#12171e"; border.color: "#2c3947" }; ColumnLayout { anchors.fill: parent; anchors.margins: 18; Label { text: "Журнал работы"; color: "#f2f5f8"; font.pixelSize: 20; font.bold: true }; Label { text: "Статусы, модель и сохранение сегментов"; color: "#8493a2"; font.pixelSize: 11 }; ListView { Layout.fillWidth: true; Layout.fillHeight: true; model: bridge.logs; spacing: 8; clip: true; delegate: Rectangle { required property var modelData; width: ListView.view.width; implicitHeight: logText.implicitHeight + 18; radius: 12; color: modelData.tone === "error" ? "#352126" : modelData.tone === "success" ? "#1c302b" : modelData.tone === "warning" ? "#352f20" : "#1a212a"; Text { id: logText; anchors.fill: parent; anchors.margins: 9; text: modelData.time + "  " + modelData.message; color: "#dce5ed"; font.pixelSize: 11; wrapMode: Text.Wrap } } } } }
 }

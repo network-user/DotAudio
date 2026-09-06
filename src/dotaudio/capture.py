@@ -382,4 +382,53 @@ def list_input_devices() -> list[dict[str, str | int]]:
     return result
 
 
-__all__ = ["AudioCapture", "StreamCapture", "list_input_devices"]
+def list_output_devices() -> list[dict[str, str | int]]:
+    """Return playback-device choices for the no-file headphone test."""
+
+    try:
+        import sounddevice as sd
+
+        devices = sd.query_devices()
+    except Exception:
+        return []
+    result: list[dict[str, str | int]] = []
+    for index, device in enumerate(devices):
+        try:
+            channels = int(device["max_output_channels"])
+            name = str(device["name"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if channels > 0:
+            result.append({"id": index, "name": name})
+    return result
+
+
+def play_output_tone(device: int | str | None, duration: float = 0.35) -> None:
+    """Play a short low-volume test tone without writing an audio file."""
+
+    if not 0 < duration <= 2:
+        raise ValueError("duration must be between 0 and 2 seconds")
+    import sounddevice as sd
+
+    details = sd.query_devices(device, "output")
+    rate = int(float(details["default_samplerate"]))
+    frames = max(1, int(rate * duration))
+    time = np.arange(frames, dtype=np.float32) / rate
+    # A short fade avoids an audible click at the edges of the test tone.
+    fade_frames = min(int(rate * 0.025), frames // 2)
+    envelope = np.ones(frames, dtype=np.float32)
+    if fade_frames:
+        ramp = np.linspace(0.0, 1.0, fade_frames, dtype=np.float32)
+        envelope[:fade_frames] = ramp
+        envelope[-fade_frames:] = ramp[::-1]
+    tone = (0.12 * envelope * np.sin(2 * np.pi * 440 * time)).astype(np.float32)
+    sd.play(tone, samplerate=rate, device=device, blocking=True)
+
+
+__all__ = [
+    "AudioCapture",
+    "StreamCapture",
+    "list_input_devices",
+    "list_output_devices",
+    "play_output_tone",
+]

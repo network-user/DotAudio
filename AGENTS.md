@@ -44,7 +44,8 @@ src/dotaudio/
   qml/MainMvp.qml, TranscriptEditor.qml  интерфейс MVP и редактор
   capture.py, pipeline.py           захват и live-очередь
   engine.py                        локальный/удалённый ASR
-  storage.py, transcripts.py        история и экспорт
+  storage.py, transcripts.py        история и текстовый экспорт
+  karaoke.py                        ASS и MP4-экспорт караоке
   server.py                        optional FastAPI
 tests/
 deploy/

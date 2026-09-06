@@ -41,6 +41,7 @@ def main():
     if not engine.rootObjects():
         desktop.close()
         return 1
+    controller.set_window(engine.rootObjects()[0])
     controller.shutdownReady.connect(app.quit)
     app.aboutToQuit.connect(desktop.close)
     app.aboutToQuit.connect(controller.shutdown)

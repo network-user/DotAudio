@@ -22,7 +22,7 @@ def _unicode_fold(value: str) -> str:
     return unicodedata.normalize("NFC", value).casefold().replace("ё", "е")
 
 
-def _validate_segment(segment: dict[str, Any]) -> tuple[float, float, str]:
+def _validate_segment(segment: dict[str, Any]) -> tuple[float, float, str, str]:
     try:
         start = float(segment["start"])
         end = float(segment["end"])
@@ -36,7 +36,22 @@ def _validate_segment(segment: dict[str, Any]) -> tuple[float, float, str]:
         raise ValueError("segment timestamps must be finite")
     if start < 0 or end < 0 or end < start:
         raise ValueError("segment timestamps are invalid")
-    return start, end, text
+    words = segment.get("words", [])
+    if not isinstance(words, list):
+        words = []
+    safe_words = []
+    for word in words:
+        if not isinstance(word, dict):
+            continue
+        try:
+            word_text = str(word.get("text", "")).strip()
+            word_start = float(word.get("start", start))
+            word_end = float(word.get("end", word_start))
+        except (TypeError, ValueError):
+            continue
+        if word_text and math.isfinite(word_start) and math.isfinite(word_end):
+            safe_words.append({"text": word_text, "start": max(0.0, word_start), "end": max(word_start, word_end)})
+    return start, end, text, json.dumps(safe_words, ensure_ascii=False)
 
 
 class Store:
@@ -77,7 +92,8 @@ class Store:
                     start REAL NOT NULL,
                     end REAL NOT NULL,
                     text TEXT NOT NULL,
-                    original_text TEXT NOT NULL
+                    original_text TEXT NOT NULL,
+                    words_json TEXT NOT NULL DEFAULT '[]'
                 );
 
                 CREATE INDEX IF NOT EXISTS ix_segments_session_order
@@ -89,6 +105,9 @@ class Store:
                 );
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(segments)")}
+            if "words_json" not in columns:
+                connection.execute("ALTER TABLE segments ADD COLUMN words_json TEXT NOT NULL DEFAULT '[]'")
 
     def create_session(
         self,
@@ -119,12 +138,12 @@ class Store:
         with self._connect() as connection:
             connection.executemany(
                 """
-                INSERT INTO segments (session_id, start, end, text, original_text)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO segments (session_id, start, end, text, original_text, words_json)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    (session_id, start, end, text, text)
-                    for start, end, text in rows
+                    (session_id, start, end, text, text, words)
+                    for start, end, text, words in rows
                 ],
             )
 
@@ -137,7 +156,7 @@ class Store:
                 return None
             segments = connection.execute(
                 """
-                SELECT id, start, end, text
+                SELECT id, start, end, text, words_json
                 FROM segments
                 WHERE session_id = ?
                 ORDER BY start ASC, id ASC
@@ -145,7 +164,17 @@ class Store:
                 (session_id,),
             ).fetchall()
         result = dict(session)
-        result["segments"] = [dict(segment) for segment in segments]
+        result["segments"] = []
+        for segment in segments:
+            item = dict(segment)
+            raw_words = item.pop("words_json", "[]")
+            try:
+                words = json.loads(raw_words)
+            except (TypeError, ValueError):
+                words = []
+            if isinstance(words, list) and words:
+                item["words"] = words
+            result["segments"].append(item)
         return result
 
     def list_sessions(self, query: str = "") -> list[dict[str, Any]]:

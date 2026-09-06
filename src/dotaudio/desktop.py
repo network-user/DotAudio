@@ -60,6 +60,30 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         self.user32.keybd_event(0x11, 0, 2, 0)
         return True
 
+    def set_click_through(self, window_id: int, enabled: bool) -> bool:
+        """Let a transparent island pass mouse input through on Windows.
+
+        The option changes only the extended window style.  It never installs
+        a global mouse hook and it is turned off when the full workspace opens.
+        """
+
+        if not self.user32 or not window_id:
+            return False
+        get_style = self.user32.GetWindowLongPtrW
+        set_style = self.user32.SetWindowLongPtrW
+        get_style.argtypes = [wintypes.HWND, ctypes.c_int]
+        get_style.restype = ctypes.c_ssize_t
+        set_style.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+        set_style.restype = ctypes.c_ssize_t
+        style_index = -20  # GWL_EXSTYLE
+        transparent = 0x00000020  # WS_EX_TRANSPARENT
+        window = wintypes.HWND(window_id)
+        style = int(get_style(window, style_index))
+        desired = style | transparent if enabled else style & ~transparent
+        if desired != style:
+            set_style(window, style_index, desired)
+        return True
+
     def close(self):
         if self.user32:
             self.user32.UnregisterHotKey(None, 41)

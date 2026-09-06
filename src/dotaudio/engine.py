@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 import numpy as np
 
-Segment = dict[str, float | str]
+Segment = dict[str, Any]
 SegmentCallback = Callable[[Segment], None]
 StatusCallback = Callable[[str], None]
 
@@ -31,10 +31,14 @@ class RecognitionConfig:
 
     model: str = "base"
     device: str = "auto"
-    language: str = "auto"
+    # Russian is the useful default for the article and avoids an unnecessary
+    # language-identification pass at the beginning of a live subtitle.
+    language: str = "ru"
     task: str = "transcribe"
     backend: str = "local"
     server_url: str = "http://127.0.0.1:8765"
+    profile: str = "balanced"
+    media_mode: bool = False
 
 
 class Engine:
@@ -80,6 +84,27 @@ class Engine:
             source, config, cancel, on_segment, on_status
         )
 
+    def prepare(
+        self,
+        config: RecognitionConfig,
+        on_status: StatusCallback | None = None,
+    ) -> str:
+        """Download and initialise a local model before the user starts recording.
+
+        ``WhisperModel`` uses the Hugging Face cache, so preparation survives an
+        application restart.  A precise download percentage is intentionally
+        not fabricated: the dependency can reuse files already in its cache.
+        """
+
+        self._validate_config(config)
+        if config.backend == "remote":
+            self._status(on_status, "remote_model_managed_by_server")
+            return "remote"
+        self._status(on_status, "loading_model")
+        _model, device = self._model_for(config.model, config.device)
+        self._status(on_status, "model_ready")
+        return device
+
     @staticmethod
     def _validate_config(config: RecognitionConfig) -> None:
         if config.backend not in {"local", "remote"}:
@@ -88,6 +113,8 @@ class Engine:
             raise ValueError("device must be 'auto', 'cpu', or 'cuda'")
         if config.task not in {"transcribe", "translate"}:
             raise ValueError("task must be 'transcribe' or 'translate'")
+        if config.profile not in {"fast", "balanced", "quality"}:
+            raise ValueError("profile must be 'fast', 'balanced', or 'quality'")
         if not config.model.strip():
             raise ValueError("model must not be empty")
 
@@ -153,19 +180,43 @@ class Engine:
             return []
 
         language = None if config.language.strip().lower() == "auto" else config.language
-        # These values are a safe general default for spoken audio.  VAD avoids
-        # wasting inference on silence, while beam 5 remains usable on CPU.
+        # This is the spoken-audio subset of the .sound recipe: word timings
+        # power the karaoke view, VAD skips silence, and no previous-text
+        # conditioning limits repeated phrases at live chunk boundaries.
+        profile = {
+            "fast": {"beam": 3, "patience": 1.0},
+            "balanced": {"beam": 5, "patience": 1.0},
+            "quality": {"beam": 8, "patience": 1.5},
+        }[config.profile]
+        # Music commonly has speech-like instrumental fragments.  DotSound
+        # keeps VAD off for this case; spoken live input benefits from it.
+        use_vad = not config.media_mode
         kwargs: dict[str, Any] = {
             "task": config.task,
             "language": language,
-            "beam_size": 5,
-            "vad_filter": True,
-            "vad_parameters": {
+            "beam_size": profile["beam"],
+            "patience": profile["patience"],
+            "vad_filter": use_vad,
+            "condition_on_previous_text": False,
+            "word_timestamps": True,
+            "initial_prompt": (
+                "Русская речь. Сохраняй имена, термины и пунктуацию."
+                if language == "ru" else None
+            ),
+        }
+        if use_vad:
+            kwargs["vad_parameters"] = {
+                "threshold": 0.35,
                 "min_silence_duration_ms": 350,
                 "min_speech_duration_ms": 120,
-            },
-            "condition_on_previous_text": False,
-        }
+            }
+        else:
+            # Less aggressive filtering preserves real sung Russian words.
+            kwargs.update({
+                "compression_ratio_threshold": 2.4,
+                "log_prob_threshold": -1.2,
+                "no_speech_threshold": 0.3,
+            })
         self._status(on_status, f"transcribing_{actual_device}")
         result: list[Segment] = []
         # CTranslate2 / CUDA execution is native and is not safe to run in
@@ -185,9 +236,26 @@ class Engine:
                     "end": float(getattr(raw, "end", 0.0)),
                     "text": text,
                 }
+                words = self._word_timings(raw)
+                if words:
+                    segment["words"] = words
                 result.append(segment)
                 self._emit_segment(on_segment, segment)
         self._status(on_status, "completed")
+        return result
+
+    @staticmethod
+    def _word_timings(raw: Any) -> list[dict[str, float | str]]:
+        """Normalise optional faster-whisper word timings for QML and export."""
+
+        result: list[dict[str, float | str]] = []
+        for word in getattr(raw, "words", None) or []:
+            text = str(getattr(word, "word", "")).strip()
+            if not text:
+                continue
+            start = max(0.0, float(getattr(word, "start", 0.0)))
+            end = max(start, float(getattr(word, "end", start)))
+            result.append({"text": text, "start": start, "end": end})
         return result
 
     def _model_for(self, model_name: str, requested_device: str) -> tuple[Any, str]:
@@ -296,6 +364,9 @@ class Engine:
                 "end": float(item.get("end", 0.0)),
                 "text": text,
             }
+            words = item.get("words")
+            if isinstance(words, list):
+                segment["words"] = words
             result.append(segment)
             self._emit_segment(on_segment, segment)
         self._status(on_status, "completed")

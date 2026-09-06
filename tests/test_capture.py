@@ -7,7 +7,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from dotaudio.capture import AudioCapture, StreamCapture, list_input_devices
+from dotaudio.capture import (
+    AudioCapture,
+    StreamCapture,
+    list_input_devices,
+    list_output_devices,
+    play_output_tone,
+)
 
 
 def test_audio_capture_normalises_and_dispatches_without_device() -> None:
@@ -34,6 +40,25 @@ def test_list_input_devices_filters_outputs(monkeypatch) -> None:
         ),
     )
     assert list_input_devices() == [{"id": 1, "name": "Mic"}]
+
+
+def test_list_output_devices_filters_inputs(monkeypatch) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(
+            query_devices=lambda: [
+                {"name": "Mic", "max_output_channels": 0},
+                {"name": "Headphones", "max_output_channels": 2},
+            ]
+        ),
+    )
+    assert list_output_devices() == [{"id": 1, "name": "Headphones"}]
+
+
+def test_output_tone_rejects_unreasonable_duration() -> None:
+    with pytest.raises(ValueError):
+        play_output_tone(None, duration=0)
 
 
 def test_capture_error_explains_how_to_recover() -> None:
