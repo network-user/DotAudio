@@ -29,7 +29,8 @@ class Desktop(QObject, QAbstractNativeEventFilter):
             self.user32.RegisterHotKey(None, 42, 0x4000 | 0x0001 | 0x0002, 0x4F)
 
     def nativeEventFilter(self, event_type, message):
-        if self.user32 and bytes(event_type) in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
+        event_name = event_type.encode() if isinstance(event_type, str) else bytes(event_type)
+        if self.user32 and event_name in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
             msg = wintypes.MSG.from_address(int(message))
             if msg.message == 0x0312:
                 if msg.wParam == 41:
