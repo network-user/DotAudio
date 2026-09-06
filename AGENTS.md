@@ -41,7 +41,8 @@ python -m venv .venv
 ```text
 src/dotaudio/
   app.py, controller.py, desktop.py  Qt и Windows
-  qml/MainMvp.qml, TranscriptEditor.qml  интерфейс MVP и редактор
+  qml/MainMvp.qml, TranscriptEditor.qml, KaraokePreview.qml
+                                      интерфейс, редактор и karaoke-превью
   capture.py, pipeline.py           захват и live-очередь
   engine.py                        локальный/удалённый ASR
   storage.py, transcripts.py        история и текстовый экспорт

@@ -83,7 +83,7 @@ LoC РїРѕСЃС‡РёС‚Р°РЅ `code-counter .`: 2677 СЃС‚СЂРѕ�
 ```text
 src/dotaudio/
   app.py, controller.py, desktop.py
-  qml/MainMvp.qml, qml/TranscriptEditor.qml
+  qml/MainMvp.qml, qml/TranscriptEditor.qml, qml/KaraokePreview.qml
   capture.py -> pipeline.py -> engine.py
   storage.py, transcripts.py
   server.py
