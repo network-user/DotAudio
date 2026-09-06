@@ -144,10 +144,11 @@ ApplicationWindow {
                     Label { id: statusText; anchors.centerIn: parent; text: bridge.status; color: bridge.recording ? "#121316" : "#b7bac1"; font.pixelSize: 11 }
                 }
                 Button {
+                    id: islandButton
                     text: "Остров"
                     onClicked: bridge.showIsland()
                     contentItem: Text { text: "Остров"; color: "#e8e9e9"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
-                    background: Rectangle { radius: 16; color: parent.down ? "#34363d" : "#24262d" }
+                    background: Rectangle { radius: 16; color: islandButton.down ? "#34363d" : "#24262d" }
                 }
             }
 
@@ -182,10 +183,11 @@ ApplicationWindow {
                                 RowLayout {
                                     Layout.fillWidth: true
                                     Button {
+                                        id: dictationButton
                                         text: root.startLabel(); enabled: !bridge.busy || bridge.recording
                                         onClicked: bridge.toggleRecording()
-                                        contentItem: Text { text: parent.text; color: "#111215"; font.pixelSize: 14; font.weight: Font.DemiBold; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                                        background: Rectangle { radius: 18; color: parent.enabled ? "#eef0ed" : "#5d6067" }
+                                        contentItem: Text { text: dictationButton.text; color: "#111215"; font.pixelSize: 14; font.weight: Font.DemiBold; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                        background: Rectangle { radius: 18; color: dictationButton.enabled ? "#eef0ed" : "#5d6067" }
                                     }
                                     Button { visible: bridge.busy; text: "Отменить"; onClicked: bridge.cancel() }
                                     Item { Layout.fillWidth: true }
@@ -328,6 +330,7 @@ ApplicationWindow {
                         ListView {
                             Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8; model: bridge.history
                             delegate: Button {
+                                id: historyButton
                                 required property var modelData
                                 width: ListView.view.width; implicitHeight: 70; onClicked: bridge.openSession(modelData.id)
                                 contentItem: ColumnLayout {
@@ -340,7 +343,7 @@ ApplicationWindow {
                                     }
                                     Label { text: modelData.text || "Нет распознанного текста"; color: "#777b84"; elide: Text.ElideRight; Layout.fillWidth: true; maximumLineCount: 1 }
                                 }
-                                background: Rectangle { radius: 14; color: parent.hovered ? "#22242a" : "#191a1e"; border.color: "#2b2d34" }
+                                background: Rectangle { radius: 14; color: historyButton.hovered ? "#22242a" : "#191a1e"; border.color: "#2b2d34" }
                             }
                             ScrollBar.vertical: ScrollBar { }
                         }
