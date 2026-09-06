@@ -92,6 +92,19 @@ def test_system_capture_resolves_selected_output_index(monkeypatch) -> None:
     assert AudioCapture(kind="system", device=4)._resolve_loopback_speaker(soundcard) is selected_speaker
 
 
+def test_system_capture_uses_loopback_microphone_endpoint() -> None:
+    speaker = SimpleNamespace(id="speaker-id")
+    microphone = object()
+    soundcard = SimpleNamespace(
+        default_speaker=lambda: speaker,
+        get_microphone=lambda identifier, include_loopback: (
+            microphone if identifier == "speaker-id" and include_loopback else None
+        ),
+    )
+
+    assert AudioCapture(kind="system")._resolve_loopback_microphone(soundcard) is microphone
+
+
 @pytest.mark.parametrize(
     "url",
     ["file:///recording.wav", "https://user:pass@example.com/live", "not a url"],

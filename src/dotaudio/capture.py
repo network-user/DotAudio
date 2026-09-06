@@ -233,10 +233,10 @@ class AudioCapture(_CallbackDispatcher):
         try:
             import soundcard as sc
 
-            speaker = self._resolve_loopback_speaker(sc)
-            if speaker is None:
+            microphone = self._resolve_loopback_microphone(sc)
+            if microphone is None:
                 raise RuntimeError("no system output device available")
-            with speaker.recorder(
+            with microphone.recorder(
                 samplerate=_SAMPLE_RATE,
                 channels=1,
                 blocksize=_BLOCK_FRAMES,
@@ -271,6 +271,20 @@ class AudioCapture(_CallbackDispatcher):
                 if name.casefold() == target or target in name.casefold() or name.casefold() in target:
                     return speaker
             raise RuntimeError(f"output device not found for loopback: {device}")
+
+    def _resolve_loopback_microphone(self, soundcard: Any) -> Any:
+        """Return the Media Foundation loopback microphone for a speaker.
+
+        In soundcard on Windows, a ``Speaker`` only plays audio.  The capture
+        endpoint is exposed separately as a ``Microphone`` with
+        ``include_loopback=True`` and the same Windows device id.
+        """
+
+        speaker = self._resolve_loopback_speaker(soundcard)
+        identifier = getattr(speaker, "id", None)
+        if not identifier:
+            raise RuntimeError("selected output device has no Windows endpoint id")
+        return soundcard.get_microphone(identifier, include_loopback=True)
 
 
 class StreamCapture(_CallbackDispatcher):
