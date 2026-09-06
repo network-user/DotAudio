@@ -12,8 +12,10 @@ from dotaudio.capture import (
     AudioCapture,
     StreamCapture,
     list_input_devices,
+    list_loopback_devices,
     list_output_devices,
     play_output_tone,
+    playback_device_for_loopback,
 )
 from dotaudio.engine import Engine, RecognitionConfig
 from dotaudio.karaoke import export_ass, render_video
@@ -25,7 +27,7 @@ DEFAULTS = {
     "model": "base", "device": "auto", "language": "ru", "task": "transcribe",
     "backend": "local", "server_url": "http://127.0.0.1:8765", "source": "microphone",
     "input_device": "", "auto_paste": True, "keywords": "Whisper, искусственный интеллект",
-    "channels": "", "profile": "balanced", "output_device": "",
+    "channels": "", "profile": "balanced", "output_device": "", "loopback_device": "",
     "island_opacity": 0.94, "island_click_through": False, "island_snap": True,
     "island_x": -1, "island_y": 32,
 }
@@ -55,6 +57,7 @@ class Controller(QObject):
     modelProgressArrived = Signal(str, str)
     modelFinished = Signal(str, str, str)
     outputsArrived = Signal(object)
+    loopbacksArrived = Signal(object)
     deviceTestLevelArrived = Signal(float)
     deviceTestFinished = Signal(str, str)
     renderFinished = Signal(str)
@@ -90,6 +93,7 @@ class Controller(QObject):
         }
         self._model_preparing = False
         self._outputs: list[dict[str, str | int]] = []
+        self._loopbacks: list[dict[str, str]] = []
         self._device_test = {"phase": "idle", "message": "", "level": 0.0}
         self._window = None
         self._testing_device = False
@@ -104,6 +108,7 @@ class Controller(QObject):
         self.modelProgressArrived.connect(self._on_model_progress)
         self.modelFinished.connect(self._on_model_finished)
         self.outputsArrived.connect(self._set_outputs)
+        self.loopbacksArrived.connect(self._set_loopbacks)
         self.deviceTestLevelArrived.connect(self._on_device_test_level)
         self.deviceTestFinished.connect(self._on_device_test_finished)
         self.renderFinished.connect(self._on_render_finished)
@@ -115,6 +120,7 @@ class Controller(QObject):
         self.refreshHistory("")
         self.refreshDevices()
         self.refreshOutputs()
+        self.refreshLoopbacks()
         self._record_log("system", "DotAudio запущен. Выберите модель или начните работу.")
 
     @Property(str, notify=changed)
@@ -168,6 +174,9 @@ class Controller(QObject):
 
     @Property("QVariantList", notify=changed)
     def outputs(self): return self._outputs
+
+    @Property("QVariantList", notify=changed)
+    def loopbacks(self): return self._loopbacks
 
     @Property("QVariantMap", notify=changed)
     def deviceTest(self): return self._device_test
@@ -301,6 +310,10 @@ class Controller(QObject):
         self._outputs = value
         self.changed.emit()
 
+    def _set_loopbacks(self, value):
+        self._loopbacks = value
+        self.changed.emit()
+
     @Slot()
     def refreshDevices(self):
         def scan():
@@ -324,6 +337,19 @@ class Controller(QObject):
                 outputs = []
             try:
                 self.outputsArrived.emit(outputs)
+            except RuntimeError:
+                return
+        threading.Thread(target=scan, daemon=True).start()
+
+    @Slot()
+    def refreshLoopbacks(self):
+        def scan():
+            try:
+                devices = list_loopback_devices()
+            except Exception:
+                devices = []
+            try:
+                self.loopbacksArrived.emit(devices)
             except RuntimeError:
                 return
         threading.Thread(target=scan, daemon=True).start()
@@ -397,8 +423,8 @@ class Controller(QObject):
             self._notice = "Для проверки loopback выберите «Звук системы» как источник Live."
             self.changed.emit()
             return
-        raw_device = str(self._settings["output_device"])
-        device = int(raw_device) if raw_device.isdigit() else raw_device or None
+        raw_loopback = str(self._settings["loopback_device"])
+        loopback_device = raw_loopback or None
         self._testing_device = True
         self._device_test = {
             "phase": "starting",
@@ -416,11 +442,14 @@ class Controller(QObject):
                 levels.append(float(level))
                 self.deviceTestLevelArrived.emit(level)
 
-            capture = AudioCapture(kind="system", device=device, on_level=on_level, on_error=errors.append)
+            capture = AudioCapture(kind="system", device=loopback_device, on_level=on_level, on_error=errors.append)
             try:
                 capture.start()
                 time.sleep(0.2)
-                play_output_tone(device)
+                tone_device = playback_device_for_loopback(loopback_device)
+                if tone_device is None:
+                    raise RuntimeError("не найден выход Windows для выбранного loopback-устройства")
+                play_output_tone(tone_device)
                 time.sleep(0.5)
             except Exception as exc:
                 errors.append(str(exc))
@@ -443,7 +472,8 @@ class Controller(QObject):
     def _test_capture(self, kind: str):
         if self._jobs or self._testing_device:
             return
-        raw_device = str(self._settings["input_device"] if kind == "microphone" else self._settings["output_device"])
+        setting = "input_device" if kind == "microphone" else "loopback_device"
+        raw_device = str(self._settings[setting])
         device = int(raw_device) if raw_device.isdigit() else raw_device or None
         source_name = "микрофон" if kind == "microphone" else "звук системы"
         self._testing_device = True
@@ -469,12 +499,17 @@ class Controller(QObject):
                 on_level=on_level,
                 on_error=errors.append,
             )
-            capture.start()
-            started = capture.running
-            deadline = time.monotonic() + 3.0
-            while capture.running and time.monotonic() < deadline:
-                time.sleep(0.05)
-            capture.stop()
+            try:
+                capture.start()
+                started = capture.running
+                deadline = time.monotonic() + 3.0
+                while capture.running and time.monotonic() < deadline:
+                    time.sleep(0.05)
+            except Exception as exc:
+                errors.append(str(exc))
+                started = False
+            finally:
+                capture.stop()
             if errors:
                 self.deviceTestFinished.emit("error", errors[-1])
             elif not started:
@@ -621,7 +656,7 @@ class Controller(QObject):
                 if url:
                     capture = StreamCapture(url, **args)
                 else:
-                    device = self._settings["input_device"] if self._settings["source"] == "microphone" else self._settings["output_device"]
+                    device = self._settings["input_device"] if self._settings["source"] == "microphone" else self._settings["loopback_device"]
                     capture = AudioCapture(kind=self._settings["source"],
                                             device=int(device) if str(device).isdigit() else device or None, **args)
                 # Device startup and WASAPI initialization must not block the QML thread.

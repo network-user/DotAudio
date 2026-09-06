@@ -11,8 +11,10 @@ from dotaudio.capture import (
     AudioCapture,
     StreamCapture,
     list_input_devices,
+    list_loopback_devices,
     list_output_devices,
     play_output_tone,
+    playback_device_for_loopback,
 )
 
 
@@ -54,6 +56,46 @@ def test_list_output_devices_filters_inputs(monkeypatch) -> None:
         ),
     )
     assert list_output_devices() == [{"id": 1, "name": "Headphones"}]
+
+
+def test_list_loopback_devices_keeps_unique_windows_endpoint_ids(monkeypatch) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "soundcard",
+        SimpleNamespace(
+            all_speakers=lambda: [
+                SimpleNamespace(id="endpoint-1", name="Headphones"),
+                SimpleNamespace(id="endpoint-1", name="Headphones duplicate"),
+                SimpleNamespace(id="endpoint-2", name="Monitor"),
+            ]
+        ),
+    )
+
+    assert list_loopback_devices() == [
+        {"id": "endpoint-1", "name": "Headphones"},
+        {"id": "endpoint-2", "name": "Monitor"},
+    ]
+
+
+def test_playback_device_for_loopback_prefers_wasapi_alias(monkeypatch) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "soundcard",
+        SimpleNamespace(get_speaker=lambda identifier: SimpleNamespace(name="Headphones")),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(
+            query_devices=lambda: [
+                {"name": "Headphones, Windows DirectSound", "max_output_channels": 2},
+                {"name": "Headphones, Windows WASAPI", "max_output_channels": 2},
+            ],
+            default=SimpleNamespace(device=[0, -1]),
+        ),
+    )
+
+    assert playback_device_for_loopback("endpoint-1") == 1
 
 
 def test_output_tone_rejects_unreasonable_duration() -> None:

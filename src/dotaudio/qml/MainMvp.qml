@@ -488,7 +488,7 @@ ApplicationWindow {
                                 }
                                 Rectangle {
                                     Layout.fillWidth: true
-                                    Layout.preferredHeight: 270
+                                    Layout.preferredHeight: 318
                                     radius: 22
                                     color: "#1c1c1e"
                                     border.width: 1
@@ -506,6 +506,7 @@ ApplicationWindow {
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
+                                            visible: bridge.settings.source === "microphone"
                                             ComboBox {
                                                 id: inputChooser
                                                 Layout.fillWidth: true
@@ -526,6 +527,31 @@ ApplicationWindow {
                                                 background: Rectangle { radius: 12; color: "#0dffffff"; border.width: 1; border.color: "#14ffffff" }
                                             }
                                             ActionButton { text: "Обновить"; onClicked: bridge.refreshDevices() }
+                                            ActionButton { text: "Проверить Live"; primary: true; tint: "#0a84ff"; onClicked: bridge.testLiveSource() }
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            visible: bridge.settings.source === "system"
+                                            ComboBox {
+                                                id: loopbackChooser
+                                                Layout.fillWidth: true
+                                                model: [{ name: "Системный вывод Windows", id: "" }].concat(bridge.loopbacks)
+                                                textRole: "name"
+                                                currentIndex: {
+                                                    var selected = String(bridge.settings.loopback_device)
+                                                    for (var i = 0; i < model.length; i++) {
+                                                        if (String(model[i].id) === selected) return i
+                                                    }
+                                                    return 0
+                                                }
+                                                onActivated: function(index) {
+                                                    var device = loopbackChooser.model[index]
+                                                    bridge.setSetting("loopback_device", String(device.id))
+                                                }
+                                                contentItem: Text { leftPadding: 12; text: loopbackChooser.displayText; color: "#f5f5f7"; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight; font.pixelSize: 12 }
+                                                background: Rectangle { radius: 12; color: "#0dffffff"; border.width: 1; border.color: "#14ffffff" }
+                                            }
+                                            ActionButton { text: "Обновить"; onClicked: bridge.refreshLoopbacks() }
                                             ActionButton { text: "Проверить Live"; primary: true; tint: "#0a84ff"; onClicked: bridge.testLiveSource() }
                                         }
                                         RowLayout {

@@ -443,6 +443,73 @@ def list_output_devices() -> list[dict[str, str | int]]:
     return result
 
 
+def list_loopback_devices() -> list[dict[str, str]]:
+    """Return Windows playback endpoints that SoundCard can capture exactly.
+
+    SoundDevice indexes are useful for playback, but can be duplicated by
+    Windows audio APIs.  A SoundCard speaker id is the Media Foundation
+    endpoint id and is the matching key for its loopback microphone.
+    """
+
+    try:
+        import soundcard as sc
+
+        speakers = sc.all_speakers()
+    except Exception:
+        return []
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for speaker in speakers:
+        identifier = str(getattr(speaker, "id", ""))
+        name = str(getattr(speaker, "name", ""))
+        if identifier and name and identifier not in seen:
+            result.append({"id": identifier, "name": name})
+            seen.add(identifier)
+    return result
+
+
+def playback_device_for_loopback(endpoint_id: str | None) -> int | None:
+    """Find the SoundDevice playback index for a SoundCard endpoint.
+
+    Windows can expose one physical output through MME, DirectSound, WASAPI
+    and WDM-KS at once.  For a loopback probe we must play through an alias of
+    the exact endpoint being captured, rather than an arbitrary output index.
+    """
+
+    try:
+        import soundcard as sc
+        import sounddevice as sd
+
+        speaker = sc.get_speaker(endpoint_id) if endpoint_id else sc.default_speaker()
+        target = str(getattr(speaker, "name", "")).casefold()
+        devices = sd.query_devices()
+    except Exception:
+        return None
+    candidates: list[tuple[int, str]] = []
+    for index, device in enumerate(devices):
+        try:
+            name = str(device["name"])
+            channels = int(device["max_output_channels"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        folded = name.casefold()
+        if channels > 0 and target and (target in folded or folded in target):
+            candidates.append((index, folded))
+    if not candidates:
+        return None
+    try:
+        default_index = int(sd.default.device[1])
+    except (AttributeError, IndexError, TypeError, ValueError):
+        default_index = -1
+    for index, _ in candidates:
+        if index == default_index:
+            return index
+    for index, name in candidates:
+        if "wasapi" in name:
+            return index
+    return candidates[0][0]
+
+
 def play_output_tone(device: int | str | None, duration: float = 0.35) -> None:
     """Play a short low-volume test tone without writing an audio file."""
 
@@ -469,6 +536,8 @@ __all__ = [
     "AudioCapture",
     "StreamCapture",
     "list_input_devices",
+    "list_loopback_devices",
     "list_output_devices",
+    "playback_device_for_loopback",
     "play_output_tone",
 ]
