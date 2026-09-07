@@ -7,12 +7,23 @@ from pathlib import Path
 
 from platformdirs import user_data_path
 from PySide6.QtCore import QTimer, QUrl
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from dotaudio.controller import Controller
 from dotaudio.desktop import Desktop
+
+
+def _tray_icon() -> QIcon:
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(QColor("#0a0b0d"))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QPen(QColor("#f3f3f1"), 2))
+    painter.drawRoundedRect(6, 8, 20, 16, 4, 4)
+    painter.end()
+    return QIcon(pixmap)
 
 
 def _register_ui_fonts():
@@ -55,12 +66,32 @@ def main():
         return 1
     window = engine.rootObjects()[0]
     controller.set_window(window)
+    tray = None
+    if QSystemTrayIcon.isSystemTrayAvailable() and not args.smoke_test and not args.screenshot:
+        tray = QSystemTrayIcon(_tray_icon(), app)
+        menu = QMenu()
+        show_island = menu.addAction("Остров")
+        show_app = menu.addAction("Окно")
+        menu.addSeparator()
+        quit_action = menu.addAction("Выйти")
+        show_island.triggered.connect(lambda: window.setProperty("shellMode", "island"))
+        show_app.triggered.connect(lambda: window.setProperty("shellMode", "app"))
+        quit_action.triggered.connect(app.quit)
+        tray.setContextMenu(menu)
+        tray.setToolTip("DotAudio")
+        tray.show()
+        window.setProperty("trayPresent", True)
     shell = os.environ.get("DOTAUDIO_SHELL", "")
     if shell in ("island", "theater", "app"):
         window.setProperty("shellMode", shell)
     controller.shutdownReady.connect(app.quit)
     app.aboutToQuit.connect(desktop.close)
     app.aboutToQuit.connect(controller.shutdown)
+    # Warm the selected local model after the UI is ready.  Preparation runs in
+    # Controller's worker thread and never blocks the Qt event loop.  Smoke
+    # tests and screenshots must remain model/network free.
+    if not args.smoke_test and not args.screenshot:
+        QTimer.singleShot(0, controller.prepareSelectedModel)
     if args.smoke_test or args.screenshot:
         def finish():
             if args.screenshot:
