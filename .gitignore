@@ -12,4 +12,6 @@ dist/
 *.wav
 *.mp4
 .env*
-.local-check/
+# Local QML/smoke-test data and screenshots.  Keep every ad-hoc diagnostic
+# run out of the working tree, not only the canonical .local-check directory.
+.local*/
