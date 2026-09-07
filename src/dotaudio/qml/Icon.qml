@@ -147,6 +147,20 @@ Item {
                 ctx.arc(13, 13, 1.7, 0, Math.PI * 2)
                 ctx.stroke()
                 break
+            case "undo":
+                ctx.beginPath()
+                ctx.arc(10, 11, 5.2, Math.PI, Math.PI * 2.1)
+                ctx.stroke()
+                line(ctx, 4.8, 11, 4.8, 6.6)
+                line(ctx, 4.8, 11, 9.2, 11)
+                break
+            case "redo":
+                ctx.beginPath()
+                ctx.arc(10, 11, 5.2, Math.PI * 0.9, Math.PI * 2)
+                ctx.stroke()
+                line(ctx, 15.2, 11, 15.2, 6.6)
+                line(ctx, 15.2, 11, 10.8, 11)
+                break
             case "logs":
                 line(ctx, 5, 6, 15, 6)
                 line(ctx, 5, 10, 15, 10)

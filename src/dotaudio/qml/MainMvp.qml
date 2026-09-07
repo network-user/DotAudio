@@ -16,6 +16,18 @@ ApplicationWindow {
     property real islandCenterX: -1
     property real islandTopY: 32
     property var pageKeys: ["live", "dictation", "media", "models", "history", "settings"]
+    // Страница не переключается в тот же кадр: содержимое сначала гаснет,
+    // затем новое приезжает снизу. Индекс меняет сам переход.
+    property int pageIndex: 0
+    property real pageFade: 1
+    property real pageSlide: 0
+    readonly property int targetPageIndex: Math.max(0, pageKeys.indexOf(bridge.page))
+    onTargetPageIndexChanged: {
+        if (root.shellMode === "app")
+            pageSwap.restart()
+        else
+            root.pageIndex = root.targetPageIndex
+    }
     width: shellMode === "app" ? 1220 : shellMode === "theater" ? 740 : islandW
     height: shellMode === "app" ? 790 : shellMode === "theater" ? 420 : islandH
     minimumWidth: shellMode === "app" ? 1000 : 180
@@ -36,7 +48,7 @@ ApplicationWindow {
             return "caption"
         if (bridge.liveActive && bridge.livePhase === "quiet")
             return "quiet"
-        if (bridge.liveActive && (bridge.livePhase === "process" || bridge.livePhase === "decoding"))
+        if (bridge.liveActive && (bridge.livePhase === "process" || bridge.livePhase === "decoding" || bridge.livePhase === "stopping"))
             return "process"
         if (bridge.liveActive)
             return "listen"
@@ -56,9 +68,9 @@ ApplicationWindow {
         switch (islandPhase) {
         case "listen":
         case "quiet":
-        case "process": return bridge.page === "live" ? 360 : 304
+        case "process": return bridge.page === "live" ? 412 : 352
         case "caption":
-        case "result": return 540
+        case "result": return 552
         case "error": return 380
         case "modePick": return 352
         default: return bridge.page === "live" ? 268 : 228
@@ -68,9 +80,9 @@ ApplicationWindow {
         switch (islandPhase) {
         case "listen":
         case "quiet":
-        case "process": return 56
+        case "process": return 62
         case "caption":
-        case "result": return 100
+        case "result": return 108
         case "error": return 68
         case "modePick": return 56
         default: return 52
@@ -80,7 +92,7 @@ ApplicationWindow {
         switch (islandPhase) {
         case "listen":
         case "quiet":
-        case "process": return 28
+        case "process": return 30
         case "caption":
         case "result": return 32
         case "error": return 26
@@ -89,13 +101,26 @@ ApplicationWindow {
         }
     }
 
+    // Ширина едет с лёгким перелётом - это и читается как morph острова.
+    // Высота идёт без отката, иначе содержимое подрезается на возврате.
     Behavior on width {
         enabled: root.morphGeo && !root.dragging
-        NumberAnimation { duration: Theme.morphMs; easing.type: Easing.InOutCubic }
+        NumberAnimation {
+            duration: Theme.morphMs
+            easing.type: Easing.Bezier
+            easing.bezierCurve: Theme.easeSpring
+        }
     }
     Behavior on height {
         enabled: root.morphGeo && !root.dragging
-        NumberAnimation { duration: Theme.morphMs; easing.type: Easing.InOutCubic }
+        NumberAnimation {
+            duration: Theme.morphMs
+            easing.type: Easing.Bezier
+            easing.bezierCurve: Theme.easeOut
+        }
+    }
+    Behavior on opacity {
+        NumberAnimation { duration: Theme.baseMs }
     }
 
     Binding on x {
@@ -133,6 +158,7 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        root.pageIndex = root.targetPageIndex
         if (Number(bridge.settings.island_x) >= 0) {
             root.x = Number(bridge.settings.island_x)
             root.y = Number(bridge.settings.island_y)
@@ -174,14 +200,48 @@ ApplicationWindow {
         onTriggered: root.quietHeld = true
     }
 
+    SequentialAnimation {
+        id: pageSwap
+        ParallelAnimation {
+            NumberAnimation { target: root; property: "pageFade"; to: 0; duration: Theme.instantMs }
+            NumberAnimation { target: root; property: "pageSlide"; to: -10; duration: Theme.instantMs }
+        }
+        ScriptAction {
+            script: {
+                root.pageIndex = root.targetPageIndex
+                root.pageSlide = 16
+            }
+        }
+        ParallelAnimation {
+            NumberAnimation {
+                target: root
+                property: "pageFade"
+                to: 1
+                duration: Theme.baseMs
+                easing.type: Easing.Bezier
+                easing.bezierCurve: Theme.easeOut
+            }
+            NumberAnimation {
+                target: root
+                property: "pageSlide"
+                to: 0
+                duration: Theme.slowMs
+                easing.type: Easing.Bezier
+                easing.bezierCurve: Theme.easeOut
+            }
+        }
+    }
+
     Shortcut {
         sequence: "Escape"
         onActivated: {
             if (bridge.busy)
                 bridge.cancel()
+            else if (bridge.notice.length > 0)
+                bridge.clearNotice()
             else if (root.islandModesOpen)
                 root.islandModesOpen = false
-            else if (root.shellMode === "theater")
+            else if (root.shellMode === "theater" || root.shellMode === "app")
                 root.collapse()
         }
     }
@@ -268,60 +328,90 @@ ApplicationWindow {
                             Label { text: "локальная речь"; color: Theme.muted; font.pixelSize: 10 }
                         }
                     }
-                    Repeater {
-                        model: [
-                            { key: "live", icon: "live", title: "Live", detail: "Субтитры" },
-                            { key: "dictation", icon: "dictation", title: "Диктовка", detail: "Голос в текст" },
-                            { key: "media", icon: "media", title: "Караоке", detail: "Аудио и видео" },
-                            { key: "models", icon: "models", title: "Модели", detail: "Whisper" },
-                            { key: "history", icon: "history", title: "История", detail: "Сессии" },
-                            { key: "settings", icon: "settings", title: "Среда", detail: "Устройства" }
-                        ]
-                        delegate: Button {
-                            id: nav
-                            required property var modelData
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 50
-                            hoverEnabled: true
-                            onClicked: bridge.selectPage(modelData.key)
-                            contentItem: RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 10
-                                anchors.rightMargin: 10
-                                spacing: 10
-                                Icon {
-                                    name: nav.modelData.icon
-                                    ink: bridge.page === nav.modelData.key ? Theme.text : Theme.muted
-                                    width: 16
-                                    height: 16
-                                }
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 0
-                                    Label {
-                                        text: nav.modelData.title
-                                        color: bridge.page === nav.modelData.key ? Theme.text : "#d1d1d6"
-                                        font.pixelSize: 13
-                                        font.weight: Font.DemiBold
-                                    }
-                                    Label {
-                                        text: nav.modelData.detail
-                                        color: Theme.muted
-                                        font.pixelSize: 10
-                                    }
-                                }
-                                Rectangle {
-                                    visible: bridge.page === nav.modelData.key
-                                    Layout.preferredWidth: 5
-                                    Layout.preferredHeight: 5
-                                    radius: 3
-                                    color: Theme.text
+                    // Навигация. Выделение - один переезжающий блок, а не
+                    // мгновенная перекраска: видно, откуда и куда ушёл фокус.
+                    Item {
+                        id: navBox
+                        readonly property int rowH: 48
+                        readonly property int rowGap: 6
+                        readonly property int current: Math.max(0, root.pageKeys.indexOf(bridge.page))
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 6 * rowH + 5 * rowGap
+
+                        Rectangle {
+                            width: navBox.width
+                            height: navBox.rowH
+                            radius: Theme.radiusMd
+                            color: Theme.fill
+                            border.width: 1
+                            border.color: Theme.hairline
+                            y: navBox.current * (navBox.rowH + navBox.rowGap)
+                            Behavior on y {
+                                NumberAnimation {
+                                    duration: Theme.slowMs
+                                    easing.type: Easing.Bezier
+                                    easing.bezierCurve: Theme.easeSpring
                                 }
                             }
-                            background: Rectangle {
-                                radius: 14
-                                color: bridge.page === nav.modelData.key ? Theme.fill : (nav.hovered ? "#0bffffff" : "transparent")
-                                Behavior on color { ColorAnimation { duration: 140 } }
+                        }
+
+                        Column {
+                            width: navBox.width
+                            spacing: navBox.rowGap
+
+                            Repeater {
+                                model: [
+                                    { key: "live", icon: "live", title: "Live", detail: "Субтитры" },
+                                    { key: "dictation", icon: "dictation", title: "Диктовка", detail: "Голос в текст" },
+                                    { key: "media", icon: "media", title: "Караоке", detail: "Аудио и видео" },
+                                    { key: "models", icon: "models", title: "Модели", detail: "Whisper" },
+                                    { key: "history", icon: "history", title: "История", detail: "Сессии" },
+                                    { key: "settings", icon: "settings", title: "Среда", detail: "Устройства" }
+                                ]
+                                delegate: Button {
+                                    id: nav
+                                    required property var modelData
+                                    readonly property bool selected: bridge.page === nav.modelData.key
+                                    width: navBox.width
+                                    height: navBox.rowH
+                                    hoverEnabled: true
+                                    onClicked: bridge.selectPage(nav.modelData.key)
+                                    contentItem: RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 12
+                                        anchors.rightMargin: 12
+                                        spacing: 10
+                                        Icon {
+                                            name: nav.modelData.icon
+                                            ink: nav.selected ? Theme.text : Theme.muted
+                                            width: 16
+                                            height: 16
+                                        }
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 0
+                                            Label {
+                                                text: nav.modelData.title
+                                                color: nav.selected ? Theme.text : "#d1d1d6"
+                                                font.pixelSize: Theme.fsBody
+                                                font.weight: Font.DemiBold
+                                                Behavior on color { ColorAnimation { duration: Theme.baseMs } }
+                                            }
+                                            Label {
+                                                text: nav.modelData.detail
+                                                color: Theme.muted
+                                                font.pixelSize: Theme.fsMicro
+                                                opacity: nav.selected ? 1 : 0.75
+                                                Behavior on opacity { NumberAnimation { duration: Theme.baseMs } }
+                                            }
+                                        }
+                                    }
+                                    background: Rectangle {
+                                        radius: Theme.radiusMd
+                                        color: !nav.selected && nav.hovered ? "#0bffffff" : "transparent"
+                                        Behavior on color { ColorAnimation { duration: Theme.fastMs } }
+                                    }
+                                }
                             }
                         }
                     }
@@ -330,7 +420,7 @@ ApplicationWindow {
                     Text {
                         Layout.fillWidth: true
                         text: bridge.hotkeysAvailable
-                              ? bridge.settings.dictate_hotkey + " диктовка\n" + bridge.settings.island_hotkey + " остров"
+                              ? bridge.settings.dictate_hotkey + " диктовка\n" + bridge.settings.island_hotkey + " остров\n" + bridge.settings.paste_last_hotkey + " вставить"
                               : "Горячие клавиши недоступны"
                         color: Theme.muted
                         font.pixelSize: 10
@@ -348,6 +438,7 @@ ApplicationWindow {
                     spacing: 12
                     ColumnLayout {
                         spacing: 2
+                        opacity: root.pageFade
                         Label {
                             text: ({
                                 live: "Живые субтитры",
@@ -378,13 +469,23 @@ ApplicationWindow {
                     IconButton { iconName: "collapse"; onClicked: root.collapse(); ToolTip.visible: hovered; ToolTip.text: "Свернуть в остров" }
                 }
                 Rectangle {
+                    id: noticeCard
                     visible: bridge.notice.length > 0
                     Layout.fillWidth: true
                     Layout.preferredHeight: noticeText.implicitHeight + 22
-                    radius: 14
+                    radius: Theme.radiusMd
                     color: Theme.fill
                     border.width: 1
                     border.color: Theme.border
+                    // Сообщение не выпрыгивает: короткое проявление на месте.
+                    NumberAnimation on opacity {
+                        running: noticeCard.visible
+                        from: 0
+                        to: 1
+                        duration: Theme.baseMs
+                        easing.type: Easing.Bezier
+                        easing.bezierCurve: Theme.easeOut
+                    }
                     RowLayout {
                         anchors.fill: parent
                         anchors.leftMargin: 14
@@ -403,9 +504,13 @@ ApplicationWindow {
                     }
                 }
                 StackLayout {
+                    id: pageStack
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    currentIndex: Math.max(0, root.pageKeys.indexOf(bridge.page))
+                    currentIndex: root.pageIndex
+                    opacity: root.pageFade
+                    clip: true
+                    transform: Translate { y: root.pageSlide }
                     LiveTheater {
                         embedded: true
                         onRequestIsland: root.collapse()
@@ -418,7 +523,7 @@ ApplicationWindow {
                             Rectangle {
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 220
-                                radius: 24
+                                radius: Theme.radiusXl
                                 color: Theme.surface
                                 border.width: 1
                                 border.color: Theme.border
@@ -426,13 +531,77 @@ ApplicationWindow {
                                     anchors.fill: parent
                                     anchors.margins: 24
                                     spacing: 8
-                                    Label { text: bridge.recording ? "Говорите естественно" : "Скажите мысль, текст попадёт в буфер"; color: Theme.text; font.pixelSize: 24; font.weight: Font.DemiBold; wrapMode: Text.Wrap; Layout.fillWidth: true }
-                                    Text { Layout.fillWidth: true; text: "После остановки расшифровка сохранится в истории. Горячая клавиша: Ctrl+Alt+Space."; color: Theme.muted; font.pixelSize: 13; wrapMode: Text.Wrap }
-                                    Item { Layout.fillHeight: true }
                                     RowLayout {
                                         Layout.fillWidth: true
-                                        PillButton { text: bridge.recording ? "Стоп" : "Диктовать"; primary: true; onClicked: bridge.toggleRecording() }
+                                        spacing: 9
+                                        StatusDot { active: bridge.recording }
+                                        Label {
+                                            text: bridge.recording
+                                                  ? (bridge.inputState === "Нет входного сигнала" ? "Не слышу микрофон" : "Слушаю")
+                                                  : bridge.busy ? "Распознаю" : "Готов к диктовке"
+                                            color: Theme.muted
+                                            font.pixelSize: Theme.fsSmall
+                                            font.weight: Font.DemiBold
+                                        }
+                                        Item { Layout.fillWidth: true }
+                                        Label {
+                                            opacity: bridge.recording || bridge.busy ? 1 : 0
+                                            text: bridge.elapsed
+                                            color: Theme.muted
+                                            font.family: Theme.monoFamily
+                                            font.pixelSize: Theme.fsSmall
+                                            Behavior on opacity { NumberAnimation { duration: Theme.baseMs } }
+                                        }
+                                    }
+                                    // Пока текста нет - приглашение и горячая клавиша.
+                                    // Как только фраза распознана, она занимает это же
+                                    // место и появляется словами.
+                                    Item {
+                                        Layout.fillWidth: true
+                                        Layout.fillHeight: true
+                                        ColumnLayout {
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            spacing: 8
+                                            visible: opacity > 0.01
+                                            opacity: bridge.caption.length ? 0 : 1
+                                            Behavior on opacity { NumberAnimation { duration: Theme.contentMs } }
+                                            Label {
+                                                Layout.fillWidth: true
+                                                text: bridge.recording ? "Говорите естественно" : "Скажите мысль, текст попадёт в буфер"
+                                                color: Theme.text
+                                                font.pixelSize: 24
+                                                font.weight: Font.DemiBold
+                                                wrapMode: Text.Wrap
+                                            }
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: Boolean(bridge.settings.dictate_hold)
+                                                      ? "Удерживайте " + bridge.settings.dictate_hotkey + ", чтобы диктовать. Отпустите - текст попадёт в буфер. Вставка последнего: " + bridge.settings.paste_last_hotkey + "."
+                                                      : "После остановки расшифровка сохранится в истории. Горячая клавиша: " + bridge.settings.dictate_hotkey + ". Вставка последнего: " + bridge.settings.paste_last_hotkey + "."
+                                                color: Theme.muted
+                                                font.pixelSize: Theme.fsBody
+                                                wrapMode: Text.Wrap
+                                            }
+                                        }
+                                        CaptionText {
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            confirmed: bridge.caption
+                                            pixelSize: 24
+                                            maxLines: 3
+                                            align: Text.AlignLeft
+                                            opacity: bridge.caption.length ? 1 : 0
+                                            Behavior on opacity { NumberAnimation { duration: Theme.fastMs } }
+                                        }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        PillButton { text: bridge.recording ? "Стоп" : bridge.busy ? "Остановить" : "Диктовать"; primary: true; onClicked: bridge.toggleRecording() }
                                         PillButton { text: "Копировать"; enabled: bridge.text.length > 0; onClicked: bridge.copyText() }
+                                        PillButton { text: "Вставить последний"; enabled: bridge.lastTranscript.length > 0 && !bridge.recording; onClicked: bridge.pasteLastTranscript() }
                                         Item { Layout.fillWidth: true }
                                         Waveform { Layout.preferredWidth: 180; bars: 22; barH: 18 }
                                     }
@@ -446,13 +615,17 @@ ApplicationWindow {
                             anchors.fill: parent
                             spacing: 16
                             ColumnLayout {
-                                Layout.preferredWidth: parent.width * 0.53
+                                // Доля ширины задаётся растяжением, а не через
+                                // parent.width: прежняя привязка зацикливалась и
+                                // выдавливала редактор за край окна.
+                                Layout.fillWidth: true
+                                Layout.horizontalStretchFactor: 53
                                 Layout.fillHeight: true
                                 spacing: 12
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
-                                    radius: 24
+                                    radius: Theme.radiusXl
                                     color: Theme.surface
                                     border.width: 1
                                     border.color: Theme.border
@@ -475,75 +648,119 @@ ApplicationWindow {
                                     Layout.fillWidth: true
                                     PillButton { text: "Открыть"; onClicked: bridge.importFile() }
                                     PillButton { text: "Обложка"; enabled: bridge.mediaUrl.length > 0; onClicked: bridge.chooseCover() }
-                                    PillButton { text: "↶"; enabled: bridge.canUndoEdit; onClicked: bridge.undoEdit(); ToolTip.visible: hovered; ToolTip.text: "Отменить правку" }
-                                    PillButton { text: "↷"; enabled: bridge.canRedoEdit; onClicked: bridge.redoEdit(); ToolTip.visible: hovered; ToolTip.text: "Повторить правку" }
+                                    IconButton { iconName: "undo"; enabled: bridge.canUndoEdit; onClicked: bridge.undoEdit(); ToolTip.visible: hovered; ToolTip.text: "Отменить правку" }
+                                    IconButton { iconName: "redo"; enabled: bridge.canRedoEdit; onClicked: bridge.redoEdit(); ToolTip.visible: hovered; ToolTip.text: "Повторить правку" }
                                     Item { Layout.fillWidth: true }
                                     PillButton { text: "ASS"; enabled: bridge.segments.length > 0; onClicked: bridge.exportKaraokeFile() }
                                     PillButton { text: bridge.rendering ? "Рендер…" : "MP4"; primary: true; enabled: bridge.segments.length > 0 && !bridge.rendering; onClicked: bridge.exportKaraokeVideo() }
                                 }
                             }
-                            TranscriptEditor { Layout.fillWidth: true; Layout.fillHeight: true; player: mediaPlayer; editable: true }
+                            TranscriptEditor { Layout.fillWidth: true; Layout.horizontalStretchFactor: 47; Layout.fillHeight: true; player: mediaPlayer; editable: true }
                         }
                         MediaPlayer { id: mediaPlayer; source: bridge.mediaUrl; videoOutput: mediaVideo; audioOutput: AudioOutput {} }
                     }
                     Item {
-                        ListView {
+                        // Одна прокрутка на страницу. Раньше список моделей скроллился
+                        // внутри страницы и последняя карточка обрезалась половиной.
+                        Flickable {
                             anchors.fill: parent
-                            spacing: 10
+                            contentWidth: width
+                            contentHeight: modelsColumn.implicitHeight
                             clip: true
-                            model: ["tiny", "base", "small", "medium", "large-v3", "turbo"]
-                            delegate: Rectangle {
-                                id: modelCard
-                                required property string modelData
-                                width: ListView.view.width
-                                height: 82
-                                radius: 20
-                                color: bridge.settings.model === modelData ? Theme.fill : Theme.surface
-                                border.width: 1
-                                border.color: bridge.settings.model === modelData ? Theme.borderHi : Theme.border
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.margins: 16
-                                    spacing: 12
-                                    Icon { name: "models"; width: 20; height: 20 }
-                                    ColumnLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 2
-                                        Label { text: modelCard.modelData; color: Theme.text; font.pixelSize: 16; font.weight: Font.DemiBold }
-                                        Label { text: bridge.settings.model === modelCard.modelData ? bridge.modelState.message : "Выберите для работы или подготовьте заранее"; color: Theme.muted; font.pixelSize: 11; wrapMode: Text.Wrap }
-                                    }
-                                    PillButton { text: "Выбрать"; enabled: !bridge.busy; onClicked: bridge.setSetting("model", modelCard.modelData) }
-                                    PillButton { text: bridge.modelPreparing && bridge.modelState.model === modelCard.modelData ? "Готовим" : "Загрузить"; primary: true; enabled: !bridge.busy && !bridge.modelPreparing; onClicked: { bridge.setSetting("model", modelCard.modelData); bridge.prepareSelectedModel() } }
-                                }
-                                Rectangle {
+                            ScrollBar.vertical: ScrollBar {}
+                            ColumnLayout {
+                                id: modelsColumn
+                                width: parent.width
+                                spacing: 10
+                            Repeater {
+                                model: ["tiny", "base", "small", "medium", "large-v3", "turbo"]
+                                delegate: Rectangle {
+                                    id: modelCard
+                                    required property string modelData
+                                    required property int index
                                     Layout.fillWidth: true
-                                    implicitHeight: rulesBox.implicitHeight + 36
-                                    radius: 20
-                                    color: Theme.surface
+                                    implicitHeight: 82
+                                    radius: Theme.radiusLg
+                                    color: bridge.settings.model === modelData ? Theme.fill : Theme.surface
                                     border.width: 1
-                                    border.color: Theme.border
-                                    ColumnLayout {
-                                        id: rulesBox
-                                        anchors.fill: parent
-                                        anchors.margins: 18
-                                        spacing: 8
-                                        Label { text: "Словарь и snippets"; color: Theme.text; font.pixelSize: 16; font.weight: Font.DemiBold }
-                                        Text { Layout.fillWidth: true; text: "Термины помогают Whisper, а замены применяются только к финальному тексту диктовки. Всё остаётся на этом устройстве."; color: Theme.muted; font.pixelSize: 11; wrapMode: Text.Wrap }
-                                        RowLayout {
-                                            Layout.fillWidth: true
-                                            TextField { id: termInput; Layout.fillWidth: true; placeholderText: "Термин"; color: Theme.text; placeholderTextColor: Theme.muted; background: Rectangle { radius: 10; color: Theme.fill } }
-                                            TextField { id: mistakeInput; Layout.preferredWidth: 180; placeholderText: "Вариант ошибки"; color: Theme.text; placeholderTextColor: Theme.muted; background: Rectangle { radius: 10; color: Theme.fill } }
-                                            PillButton { text: "+"; onClicked: { bridge.addDictionaryEntry(termInput.text, mistakeInput.text); termInput.clear(); mistakeInput.clear() } }
+                                    border.color: bridge.settings.model === modelData ? Theme.borderHi : Theme.border
+                                    Behavior on color { ColorAnimation { duration: Theme.baseMs } }
+                                    Behavior on border.color { ColorAnimation { duration: Theme.baseMs } }
+                                    readonly property string cacheText: {
+                                        var lib = bridge.modelLibrary
+                                        for (var i = 0; i < lib.length; i++) {
+                                            if (lib[i].model === modelCard.modelData)
+                                                return lib[i].message
                                         }
-                                        ListView { Layout.fillWidth: true; Layout.preferredHeight: Math.min(70, contentHeight); model: bridge.dictionary; clip: true; delegate: RowLayout { required property var modelData; required property int index; width: ListView.view.width; Text { Layout.fillWidth: true; text: modelData.term + (modelData.misheard ? " ← " + modelData.misheard : ""); color: Theme.muted; elide: Text.ElideRight; font.pixelSize: 11 } PillButton { text: "×"; onClicked: bridge.removeDictionaryEntry(index) } } }
-                                        RowLayout {
+                                        return "Ещё не скачана · будет загружена при подготовке"
+                                    }
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.margins: 16
+                                        spacing: 12
+                                        Icon { name: "models"; width: 20; height: 20 }
+                                        ColumnLayout {
                                             Layout.fillWidth: true
-                                            TextField { id: snippetInput; Layout.preferredWidth: 180; placeholderText: "Фраза"; color: Theme.text; placeholderTextColor: Theme.muted; background: Rectangle { radius: 10; color: Theme.fill } }
-                                            TextField { id: expansionInput; Layout.fillWidth: true; placeholderText: "Вставляемый текст"; color: Theme.text; placeholderTextColor: Theme.muted; background: Rectangle { radius: 10; color: Theme.fill } }
-                                            PillButton { text: "+"; onClicked: { bridge.addSnippet(snippetInput.text, expansionInput.text); snippetInput.clear(); expansionInput.clear() } }
+                                            spacing: 2
+                                            Label { Layout.fillWidth: true; text: modelCard.modelData; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
+                                            // Без fillWidth подпись задавала минимальную
+                                            // ширину колонки, и кнопки в карточках
+                                            // моделей стояли на разной высоте строки.
+                                            Label {
+                                                Layout.fillWidth: true
+                                                text: bridge.modelState.model === modelCard.modelData && bridge.modelState.message
+                                                      ? bridge.modelState.message
+                                                      : modelCard.cacheText
+                                                color: Theme.muted
+                                                font.pixelSize: Theme.fsSmall
+                                                elide: Text.ElideRight
+                                            }
+                                        }
+                                        PillButton { text: "Выбрать"; enabled: !bridge.busy; onClicked: bridge.setSetting("model", modelCard.modelData) }
+                                        PillButton {
+                                            visible: bridge.modelPreparing && bridge.modelState.model === modelCard.modelData
+                                            text: "Отмена"
+                                            onClicked: bridge.cancelModelPrepare()
+                                        }
+                                        PillButton {
+                                            visible: !(bridge.modelPreparing && bridge.modelState.model === modelCard.modelData)
+                                            text: "Загрузить"
+                                            primary: true
+                                            enabled: !bridge.busy && !bridge.modelPreparing
+                                            onClicked: { bridge.setSetting("model", modelCard.modelData); bridge.prepareSelectedModel() }
                                         }
                                     }
                                 }
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: rulesBox.implicitHeight + 36
+                                radius: Theme.radiusLg
+                                color: Theme.surface
+                                border.width: 1
+                                border.color: Theme.border
+                                ColumnLayout {
+                                    id: rulesBox
+                                    anchors.fill: parent
+                                    anchors.margins: 18
+                                    spacing: 8
+                                    Label { text: "Словарь и snippets"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
+                                    Text { Layout.fillWidth: true; text: "Термины помогают Whisper, а замены применяются только к финальному тексту диктовки. Всё остаётся на этом устройстве."; color: Theme.muted; font.pixelSize: Theme.fsSmall; wrapMode: Text.Wrap }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        TextField { id: termInput; Layout.fillWidth: true; placeholderText: "Термин"; color: Theme.text; placeholderTextColor: Theme.muted; background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
+                                        TextField { id: mistakeInput; Layout.preferredWidth: 180; placeholderText: "Вариант ошибки"; color: Theme.text; placeholderTextColor: Theme.muted; background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
+                                        PillButton { text: "+"; onClicked: { bridge.addDictionaryEntry(termInput.text, mistakeInput.text); termInput.clear(); mistakeInput.clear() } }
+                                    }
+                                    ListView { Layout.fillWidth: true; Layout.preferredHeight: Math.min(70, contentHeight); model: bridge.dictionary; clip: true; delegate: RowLayout { required property var modelData; required property int index; width: ListView.view.width; Text { Layout.fillWidth: true; text: modelData.term + (modelData.misheard ? " ← " + modelData.misheard : ""); color: Theme.muted; elide: Text.ElideRight; font.pixelSize: Theme.fsSmall } PillButton { text: "×"; onClicked: bridge.removeDictionaryEntry(index) } } }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        TextField { id: snippetInput; Layout.preferredWidth: 180; placeholderText: "Фраза"; color: Theme.text; placeholderTextColor: Theme.muted; background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
+                                        TextField { id: expansionInput; Layout.fillWidth: true; placeholderText: "Вставляемый текст"; color: Theme.text; placeholderTextColor: Theme.muted; background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
+                                        PillButton { text: "+"; onClicked: { bridge.addSnippet(snippetInput.text, expansionInput.text); snippetInput.clear(); expansionInput.clear() } }
+                                    }
+                                }
+                            }
                             }
                         }
                     }
@@ -561,33 +778,62 @@ ApplicationWindow {
                                 onTextChanged: bridge.refreshHistory(text)
                                 background: Rectangle { radius: 14; color: Theme.surface; border.width: 1; border.color: Theme.border }
                             }
-                            ListView {
+                            Item {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
-                                model: bridge.history
-                                spacing: 8
-                                clip: true
-                                delegate: Rectangle {
-                                    id: historyCard
-                                    required property var modelData
-                                    width: ListView.view.width
-                                    height: 74
-                                    radius: 16
-                                    color: historyMouse.containsMouse ? Theme.fill : Theme.surface
-                                    border.width: 1
-                                    border.color: Theme.border
-                                    MouseArea { id: historyMouse; anchors.fill: parent; hoverEnabled: true; onClicked: bridge.openSession(historyCard.modelData.id) }
-                                    RowLayout {
-                                        anchors.fill: parent
-                                        anchors.margins: 14
-                                        Icon { name: "history"; width: 16; height: 16; ink: Theme.muted }
-                                        ColumnLayout {
-                                            Layout.fillWidth: true
-                                            spacing: 3
-                                            Text { text: historyCard.modelData.title; color: Theme.text; font.pixelSize: 13; font.weight: Font.DemiBold; elide: Text.ElideRight; Layout.fillWidth: true }
-                                            Text { text: historyCard.modelData.mode + " · " + historyCard.modelData.segment_count + " фрагм."; color: Theme.muted; font.pixelSize: 11 }
+
+                                Label {
+                                    anchors.centerIn: parent
+                                    width: Math.min(parent.width - 60, 360)
+                                    visible: bridge.history.length === 0
+                                    horizontalAlignment: Text.AlignHCenter
+                                    wrapMode: Text.Wrap
+                                    text: "Сессии появятся здесь после первой диктовки, Live или разбора файла."
+                                    color: Theme.muted
+                                    font.pixelSize: Theme.fsBody
+                                }
+
+                                ListView {
+                                    anchors.fill: parent
+                                    model: bridge.history
+                                    spacing: 8
+                                    clip: true
+                                    add: Transition {
+                                        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.baseMs }
+                                        NumberAnimation {
+                                            property: "y"
+                                            from: 12
+                                            duration: Theme.slowMs
+                                            easing.type: Easing.Bezier
+                                            easing.bezierCurve: Theme.easeOut
                                         }
-                                        Icon { name: "expand"; width: 14; height: 14; ink: Theme.muted; rotation: -90 }
+                                    }
+                                    delegate: Rectangle {
+                                        id: historyCard
+                                        required property var modelData
+                                        width: ListView.view.width
+                                        height: 74
+                                        radius: Theme.radiusMd
+                                        color: historyMouse.containsMouse ? Theme.fill : Theme.surface
+                                        border.width: 1
+                                        border.color: historyMouse.containsMouse ? Theme.borderHi : Theme.border
+                                        scale: historyMouse.pressed ? 0.99 : 1
+                                        Behavior on color { ColorAnimation { duration: Theme.fastMs } }
+                                        Behavior on border.color { ColorAnimation { duration: Theme.fastMs } }
+                                        Behavior on scale { NumberAnimation { duration: Theme.fastMs } }
+                                        MouseArea { id: historyMouse; anchors.fill: parent; hoverEnabled: true; onClicked: bridge.openSession(historyCard.modelData.id) }
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.margins: 14
+                                            Icon { name: "history"; width: 16; height: 16; ink: Theme.muted }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 3
+                                                Text { text: historyCard.modelData.title; color: Theme.text; font.pixelSize: Theme.fsBody; font.weight: Font.DemiBold; elide: Text.ElideRight; Layout.fillWidth: true }
+                                                Text { text: historyCard.modelData.mode + " · " + historyCard.modelData.segment_count + " фрагм."; color: Theme.muted; font.pixelSize: Theme.fsSmall }
+                                            }
+                                            Icon { name: "expand"; width: 14; height: 14; ink: Theme.muted; rotation: -90 }
+                                        }
                                     }
                                 }
                             }
@@ -606,7 +852,7 @@ ApplicationWindow {
                                 Rectangle {
                                     Layout.fillWidth: true
                                     implicitHeight: languageBox.implicitHeight + 36
-                                    radius: 20
+                                    radius: Theme.radiusLg
                                     color: Theme.surface
                                     border.width: 1
                                     border.color: Theme.border
@@ -615,7 +861,7 @@ ApplicationWindow {
                                         anchors.fill: parent
                                         anchors.margins: 18
                                         spacing: 8
-                                        Label { text: "Язык и вывод"; color: Theme.text; font.pixelSize: 16; font.weight: Font.DemiBold }
+                                        Label { text: "Язык и вывод"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
                                         RowLayout {
                                             Layout.fillWidth: true
                                             Text { Layout.fillWidth: true; text: "Распознавание ориентировано на русский язык."; color: Theme.muted; font.pixelSize: 12; wrapMode: Text.Wrap }
@@ -627,7 +873,7 @@ ApplicationWindow {
                                 Rectangle {
                                     Layout.fillWidth: true
                                     implicitHeight: deviceBox.implicitHeight + 36
-                                    radius: 20
+                                    radius: Theme.radiusLg
                                     color: Theme.surface
                                     border.width: 1
                                     border.color: Theme.border
@@ -636,7 +882,7 @@ ApplicationWindow {
                                         anchors.fill: parent
                                         anchors.margins: 18
                                         spacing: 10
-                                        Label { text: "Источник Live и устройства"; color: Theme.text; font.pixelSize: 16; font.weight: Font.DemiBold }
+                                        Label { text: "Источник Live и устройства"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
                                         Text { Layout.fillWidth: true; text: "Диктовка всегда с микрофона. Live: микрофон, звук компьютера или Авто - оба сразу. На острове источник переключается кнопкой."; color: Theme.muted; font.pixelSize: 11; wrapMode: Text.Wrap }
                                         RowLayout {
                                             Layout.fillWidth: true
@@ -648,7 +894,7 @@ ApplicationWindow {
                                         RowLayout {
                                             Layout.fillWidth: true
                                             visible: String(bridge.settings.live_source) === "microphone" || String(bridge.settings.live_source) === "mixed"
-                                            ComboBox {
+                                            Dropdown {
                                                 id: inputChooser
                                                 Layout.fillWidth: true
                                                 model: [{ name: "Системный микрофон", id: "" }].concat(bridge.devices)
@@ -664,8 +910,6 @@ ApplicationWindow {
                                                     var device = inputChooser.model[index]
                                                     bridge.setSetting("input_device", String(device.id))
                                                 }
-                                                contentItem: Text { leftPadding: 12; text: inputChooser.displayText; color: Theme.text; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight; font.pixelSize: 12 }
-                                                background: Rectangle { radius: 12; color: Theme.fill; border.width: 1; border.color: Theme.border }
                                             }
                                             PillButton { text: "Обновить"; onClicked: bridge.refreshDevices() }
                                             PillButton { text: "Проверить Live"; primary: true; onClicked: bridge.testLiveSource() }
@@ -673,7 +917,7 @@ ApplicationWindow {
                                         RowLayout {
                                             Layout.fillWidth: true
                                             visible: String(bridge.settings.live_source) === "system" || String(bridge.settings.live_source) === "mixed"
-                                            ComboBox {
+                                            Dropdown {
                                                 id: loopbackChooser
                                                 Layout.fillWidth: true
                                                 model: [{ name: "Системный вывод Windows", id: "" }].concat(bridge.loopbacks)
@@ -689,15 +933,13 @@ ApplicationWindow {
                                                     var device = loopbackChooser.model[index]
                                                     bridge.setSetting("loopback_device", String(device.id))
                                                 }
-                                                contentItem: Text { leftPadding: 12; text: loopbackChooser.displayText; color: Theme.text; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight; font.pixelSize: 12 }
-                                                background: Rectangle { radius: 12; color: Theme.fill; border.width: 1; border.color: Theme.border }
                                             }
                                             PillButton { text: "Обновить"; onClicked: bridge.refreshLoopbacks() }
                                             PillButton { text: "Проверить Live"; primary: true; onClicked: bridge.testLiveSource() }
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            ComboBox {
+                                            Dropdown {
                                                 id: outputChooser
                                                 Layout.fillWidth: true
                                                 model: [{ name: "Системный вывод", id: "" }].concat(bridge.outputs)
@@ -713,28 +955,28 @@ ApplicationWindow {
                                                     var device = outputChooser.model[index]
                                                     bridge.setSetting("output_device", String(device.id))
                                                 }
-                                                contentItem: Text { leftPadding: 12; text: outputChooser.displayText; color: Theme.text; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight; font.pixelSize: 12 }
-                                                background: Rectangle { radius: 12; color: Theme.fill; border.width: 1; border.color: Theme.border }
                                             }
                                             PillButton { text: "Обновить"; onClicked: bridge.refreshOutputs() }
                                             PillButton { text: "Тон"; onClicked: bridge.testOutputDevice() }
                                             PillButton { text: "Loopback"; primary: String(bridge.settings.live_source) === "system" || String(bridge.settings.live_source) === "mixed"; onClicked: bridge.testSystemLoopback() }
                                         }
-                                        ProgressBar {
+                                        // Уровень проверки устройства. Шкала та же,
+                                        // что у осциллограммы, поэтому «тихо» здесь
+                                        // и «тихо» на острове выглядят одинаково.
+                                        Item {
                                             Layout.fillWidth: true
-                                            from: 0
-                                            to: 1
-                                            value: bridge.deviceTest.level
-                                            background: Rectangle { implicitHeight: 5; radius: 3; color: Theme.fill }
-                                            contentItem: Item {
-                                                implicitHeight: 5
-                                                Rectangle {
-                                                    width: parent.width * Math.min(1, bridge.deviceTest.level * 3)
-                                                    height: parent.height
-                                                    radius: 3
-                                                    color: Theme.text
-                                                    Behavior on width { NumberAnimation { duration: 100 } }
-                                                }
+                                            Layout.preferredHeight: 6
+                                            Rectangle {
+                                                anchors.fill: parent
+                                                radius: 3
+                                                color: Theme.hairline
+                                            }
+                                            Rectangle {
+                                                height: parent.height
+                                                radius: 3
+                                                width: parent.width * Theme.levelShape(bridge.deviceTest.level)
+                                                color: Theme.text
+                                                Behavior on width { NumberAnimation { duration: 110; easing.type: Easing.OutQuad } }
                                             }
                                         }
                                         Label { text: bridge.deviceTest.message || "Проверка не сохраняет запись."; color: Theme.muted; font.pixelSize: 11 }
@@ -743,7 +985,7 @@ ApplicationWindow {
                                 Rectangle {
                                     Layout.fillWidth: true
                                     implicitHeight: islandBox.implicitHeight + 36
-                                    radius: 20
+                                    radius: Theme.radiusLg
                                     color: Theme.surface
                                     border.width: 1
                                     border.color: Theme.border
@@ -752,17 +994,94 @@ ApplicationWindow {
                                         anchors.fill: parent
                                         anchors.margins: 18
                                         spacing: 8
-                                        Label { text: "Остров"; color: Theme.text; font.pixelSize: 16; font.weight: Font.DemiBold }
+                                        Label { text: "Остров"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            Label { text: "Непрозрачность"; color: Theme.muted; font.pixelSize: 12; Layout.preferredWidth: 118 }
-                                            Slider { Layout.fillWidth: true; from: 0.86; to: 1; value: Number(bridge.settings.island_opacity); onMoved: bridge.setSetting("island_opacity", value) }
+                                            Label { text: "Диктовка"; color: Theme.muted; font.pixelSize: 12; Layout.preferredWidth: 90 }
+                                            Repeater {
+                                                model: ["Ctrl+Alt+Space", "Ctrl+Shift+Space", "Ctrl+Win+Space"]
+                                                PillButton {
+                                                    required property string modelData
+                                                    text: modelData
+                                                    primary: bridge.settings.dictate_hotkey === modelData
+                                                    onClicked: bridge.setHotkeys(modelData, bridge.settings.island_hotkey)
+                                                }
+                                            }
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            Switch { text: "Пропускать клики"; checked: Boolean(bridge.settings.island_click_through); onToggled: bridge.setIslandClickThrough(checked) }
+                                            Label { text: "Остров"; color: Theme.muted; font.pixelSize: 12; Layout.preferredWidth: 90 }
+                                            Repeater {
+                                                model: ["Ctrl+Alt+O", "Ctrl+Shift+O", "Ctrl+Win+O"]
+                                                PillButton {
+                                                    required property string modelData
+                                                    text: modelData
+                                                    primary: bridge.settings.island_hotkey === modelData
+                                                    onClicked: bridge.setHotkeys(bridge.settings.dictate_hotkey, modelData)
+                                                }
+                                            }
+                                        }
+                                        ToggleSwitch {
+                                            text: "Удерживать клавишу, чтобы диктовать"
+                                            checked: Boolean(bridge.settings.dictate_hold)
+                                            onToggled: bridge.setSetting("dictate_hold", checked)
+                                        }
+                                        Label {
+                                            text: "По умолчанию повтор " + bridge.settings.dictate_hotkey + " начинает и останавливает запись. Вставка последнего текста: " + bridge.settings.paste_last_hotkey + "."
+                                            color: Theme.muted
+                                            font.pixelSize: 11
+                                            wrapMode: Text.Wrap
+                                            Layout.fillWidth: true
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Label { text: "Непрозрачность"; color: Theme.muted; font.pixelSize: 12; Layout.preferredWidth: 118 }
+                                            Slider {
+                                                id: opacitySlider
+                                                Layout.fillWidth: true
+                                                from: 0.86
+                                                to: 1
+                                                value: Number(bridge.settings.island_opacity)
+                                                onMoved: bridge.setSetting("island_opacity", value)
+                                                background: Rectangle {
+                                                    x: opacitySlider.leftPadding
+                                                    y: (opacitySlider.height - height) / 2
+                                                    width: opacitySlider.availableWidth
+                                                    height: 4
+                                                    radius: 2
+                                                    color: Theme.fill
+                                                    Rectangle {
+                                                        width: opacitySlider.position * parent.width
+                                                        height: parent.height
+                                                        radius: 2
+                                                        color: Theme.text
+                                                    }
+                                                }
+                                                handle: Rectangle {
+                                                    x: opacitySlider.leftPadding + opacitySlider.visualPosition * (opacitySlider.availableWidth - width)
+                                                    y: (opacitySlider.height - height) / 2
+                                                    width: 18
+                                                    height: 18
+                                                    radius: 9
+                                                    color: opacitySlider.pressed ? "#d6d6d2" : Theme.text
+                                                    border.width: 1
+                                                    border.color: Theme.borderHi
+                                                    scale: opacitySlider.pressed ? 1.1 : 1
+                                                    Behavior on scale {
+                                                        NumberAnimation {
+                                                            duration: Theme.fastMs
+                                                            easing.type: Easing.Bezier
+                                                            easing.bezierCurve: Theme.easeSpring
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            ToggleSwitch { text: "Пропускать клики"; checked: Boolean(bridge.settings.island_click_through); onToggled: bridge.setIslandClickThrough(checked) }
                                             Item { Layout.fillWidth: true }
-                                            Switch { text: "Запоминать позицию"; checked: Boolean(bridge.settings.island_snap); onToggled: bridge.setSetting("island_snap", checked) }
+                                            ToggleSwitch { text: "Запоминать позицию"; checked: Boolean(bridge.settings.island_snap); onToggled: bridge.setSetting("island_snap", checked) }
                                         }
                                         Label {
                                             visible: Boolean(bridge.settings.island_click_through)
@@ -777,7 +1096,7 @@ ApplicationWindow {
                                 Rectangle {
                                     Layout.fillWidth: true
                                     implicitHeight: overlayBox.implicitHeight + 36
-                                    radius: 20
+                                    radius: Theme.radiusLg
                                     color: Theme.surface
                                     border.width: 1
                                     border.color: Theme.border
@@ -786,11 +1105,11 @@ ApplicationWindow {
                                         anchors.fill: parent
                                         anchors.margins: 18
                                         spacing: 8
-                                        Label { text: "Субтитры на экране"; color: Theme.text; font.pixelSize: 16; font.weight: Font.DemiBold }
+                                        Label { text: "Субтитры на экране"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
                                         Text { Layout.fillWidth: true; text: "Отдельное окно для зала: крупный текст, без кнопок, клики проходят сквозь."; color: Theme.muted; font.pixelSize: 12; wrapMode: Text.Wrap }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            Switch { text: "Показать на экране"; checked: Boolean(bridge.settings.caption_overlay); onToggled: bridge.setSetting("caption_overlay", checked) }
+                                            ToggleSwitch { text: "Показать на экране"; checked: Boolean(bridge.settings.caption_overlay); onToggled: bridge.setSetting("caption_overlay", checked) }
                                             Item { Layout.fillWidth: true }
                                             PillButton { text: "Меньше"; primary: bridge.settings.caption_size === "sm"; onClicked: bridge.setSetting("caption_size", "sm") }
                                             PillButton { text: "Средние"; primary: bridge.settings.caption_size === "md"; onClicked: bridge.setSetting("caption_size", "md") }
@@ -801,6 +1120,39 @@ ApplicationWindow {
                                             PillButton { text: "Обычный контраст"; primary: String(bridge.settings.caption_contrast) !== "high"; onClicked: bridge.setSetting("caption_contrast", "normal") }
                                             PillButton { text: "Высокий контраст"; primary: String(bridge.settings.caption_contrast) === "high"; onClicked: bridge.setSetting("caption_contrast", "high") }
                                             Item { Layout.fillWidth: true }
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            PillButton { text: "Сверху"; primary: String(bridge.settings.caption_position) === "top"; onClicked: bridge.setSetting("caption_position", "top") }
+                                            PillButton { text: "Снизу"; primary: String(bridge.settings.caption_position) !== "top" && String(bridge.settings.caption_position) !== "floating"; onClicked: bridge.setSetting("caption_position", "bottom") }
+                                            PillButton { text: "Плавающие"; primary: String(bridge.settings.caption_position) === "floating"; onClicked: bridge.setSetting("caption_position", "floating") }
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            ToggleSwitch { text: "Скрывать в паузе"; checked: Boolean(bridge.settings.caption_autohide); onToggled: bridge.setSetting("caption_autohide", checked) }
+                                            Item { Layout.fillWidth: true }
+                                            ToggleSwitch { text: "Закрепить (клики сквозь)"; checked: Boolean(bridge.settings.caption_locked); onToggled: bridge.setSetting("caption_locked", checked) }
+                                        }
+                                        Label {
+                                            text: Boolean(bridge.settings.caption_locked)
+                                                  ? "Субтитры не перехватывают мышь. Снимите закрепление, чтобы перетащить окно зала."
+                                                  : "Перетащите окно субтитров. Положение сохранится как плавающее."
+                                            color: Theme.muted
+                                            font.pixelSize: 11
+                                            wrapMode: Text.Wrap
+                                            Layout.fillWidth: true
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Repeater {
+                                                model: Qt.application.screens
+                                                PillButton {
+                                                    required property int index
+                                                    text: index === 0 ? "Экран 1" : "Экран " + (index + 1)
+                                                    primary: Number(bridge.settings.caption_screen) === index || (Number(bridge.settings.caption_screen) < 0 && index === 0)
+                                                    onClicked: bridge.setSetting("caption_screen", index)
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -814,7 +1166,7 @@ ApplicationWindow {
                             Rectangle {
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 228
-                                radius: 20
+                                radius: Theme.radiusLg
                                 color: Theme.surface
                                 border.width: 1
                                 border.color: Theme.border
@@ -822,7 +1174,7 @@ ApplicationWindow {
                                     anchors.fill: parent
                                     anchors.margins: 18
                                     spacing: 9
-                                    Label { text: "Прямые источники"; color: Theme.text; font.pixelSize: 16; font.weight: Font.DemiBold }
+                                    Label { text: "Прямые источники"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
                                     Text { Layout.fillWidth: true; text: "Одна HTTP(S) аудио- или HLS-ссылка на строку. Формат: Название | URL. Максимум четыре источника."; color: Theme.muted; wrapMode: Text.Wrap; font.pixelSize: 12 }
                                     TextArea { id: monitorChannels; Layout.fillWidth: true; Layout.fillHeight: true; text: bridge.settings.channels; placeholderText: "Радио | https://example.org/live.m3u8"; color: Theme.text; placeholderTextColor: Theme.muted; onActiveFocusChanged: if (!activeFocus) bridge.setSetting("channels", text); background: Rectangle { radius: 12; color: Theme.fill; border.width: 1; border.color: Theme.border } }
                                 }
@@ -830,7 +1182,7 @@ ApplicationWindow {
                             Rectangle {
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 94
-                                radius: 20
+                                radius: Theme.radiusLg
                                 color: Theme.surface
                                 border.width: 1
                                 border.color: Theme.border

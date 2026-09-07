@@ -3,11 +3,16 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "Theme.js" as Theme
 
+// Live-сцена. Главное здесь - текущая фраза, поэтому статус, время и
+// кнопки собраны в две тонкие полосы, а середина отдана тексту.
 Rectangle {
     id: root
+
     property bool embedded: false
+    property bool showTape: embedded
+
     color: Theme.surface
-    radius: embedded ? 24 : 28
+    radius: embedded ? Theme.radiusXl : 28
     border.width: 1
     border.color: Theme.border
     clip: true
@@ -15,172 +20,219 @@ Rectangle {
     signal requestIsland()
     signal requestApp()
 
-    readonly property var currentSegment: bridge.segments.length ? bridge.segments[bridge.segments.length - 1] : null
-    readonly property var previousSegment: bridge.segments.length >= 2 ? bridge.segments[bridge.segments.length - 2] : null
-    readonly property string caption: bridge.displayCaption
-    readonly property bool usesSegmentWords: bridge.partialCaption.length === 0
-                                            && currentSegment !== null
-                                            && String(currentSegment.text) === caption
-    readonly property var captionWords: usesSegmentWords && currentSegment.words ? currentSegment.words : []
-    readonly property string captionKey: currentSegment ? String(currentSegment.id) : ""
-    readonly property string sourceLabel: bridge.liveSourceLabel
+    readonly property var segments: bridge.segments
+    readonly property string previousText: {
+        var items = bridge.segments
+        if (bridge.partialCaption.length > 0 && items.length)
+            return String(items[items.length - 1].text)
+        if (items.length >= 2)
+            return String(items[items.length - 2].text)
+        return ""
+    }
     readonly property bool overlayOn: Boolean(bridge.settings.caption_overlay)
+    readonly property string stageHint: bridge.liveActive
+        ? bridge.liveStatusText
+        : "Нажмите «Слушать» - фраза появится здесь"
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 20
-        spacing: 16
+        anchors.margins: 18
+        spacing: 14
 
+        // Полоса состояния. Одна строка вместо прежних двух: заголовок и
+        // индикатор больше не повторяют друг друга.
         RowLayout {
             Layout.fillWidth: true
-            Layout.preferredHeight: 36
-            spacing: 10
+            Layout.preferredHeight: 28
+            spacing: 9
+
+            StatusDot { active: bridge.recording }
+
             Label {
-                text: "Live"
-                color: Theme.text
-                font.pixelSize: 15
+                text: bridge.liveActive ? bridge.liveStatusText
+                      : bridge.busy ? "Завершаем" : "Live не запущен"
+                color: bridge.recording ? Theme.text : Theme.muted
+                font.pixelSize: Theme.fsSmall
                 font.weight: Font.DemiBold
                 font.family: Theme.fontFamily
+                Behavior on color { ColorAnimation { duration: Theme.slowMs } }
             }
+
+            Item { Layout.fillWidth: true }
+
+            Label {
+                opacity: bridge.recording || bridge.busy ? 1 : 0
+                text: bridge.elapsed
+                color: Theme.muted
+                font.family: Theme.monoFamily
+                font.pixelSize: Theme.fsSmall
+                Behavior on opacity { NumberAnimation { duration: Theme.baseMs } }
+            }
+
             PillButton {
+                compact: true
                 text: bridge.liveSourceLabel
                 enabled: !bridge.recording && !bridge.busy
                 onClicked: bridge.cycleLiveSource()
                 ToolTip.visible: hovered
                 ToolTip.text: "Микрофон, звук компьютера или оба сразу"
             }
-            Item { Layout.fillWidth: true }
-            Label {
-                visible: bridge.recording || bridge.busy
-                text: bridge.elapsed
-                color: Theme.muted
-                font.family: Theme.monoFamily
-                font.pixelSize: 11
+
+            IconButton {
+                iconName: "overlay"
+                ink: root.overlayOn ? Theme.text : Theme.muted
+                onClicked: bridge.setSetting("caption_overlay", !root.overlayOn)
+                ToolTip.visible: hovered
+                ToolTip.text: root.overlayOn ? "Скрыть субтитры зала" : "Показать субтитры зала"
             }
-            PillButton {
-                text: bridge.recording ? "Стоп" : "Слушать"
-                primary: true
-                enabled: !bridge.busy || bridge.recording
-                onClicked: bridge.toggleRecording()
+
+            IconButton {
+                iconName: "copy"
+                enabled: bridge.text.length > 0
+                onClicked: bridge.copyText()
+                ToolTip.visible: hovered
+                ToolTip.text: "Скопировать расшифровку"
             }
-            PillButton {
-                visible: bridge.busy
-                text: "Отмена"
-                onClicked: bridge.cancel()
+
+            IconButton {
+                visible: !root.embedded
+                iconName: "expand"
+                onClicked: root.requestApp()
+                ToolTip.visible: hovered
+                ToolTip.text: "Открыть окно приложения"
+            }
+
+            IconButton {
+                visible: !root.embedded
+                iconName: "collapse"
+                onClicked: root.requestIsland()
+                ToolTip.visible: hovered
+                ToolTip.text: "Свернуть в остров"
             }
         }
 
-        Item {
+        CaptionStage {
             Layout.fillWidth: true
             Layout.fillHeight: true
-
-            Column {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.verticalCenterOffset: -12
-                spacing: 10
-
-                Text {
-                    visible: root.previousSegment !== null
-                    width: parent.width
-                    text: root.previousSegment ? root.previousSegment.text : ""
-                    color: Theme.muted
-                    font.pixelSize: 15
-                    font.family: Theme.fontFamily
-                    elide: Text.ElideRight
-                    maximumLineCount: 1
-                    wrapMode: Text.NoWrap
-                    horizontalAlignment: Text.AlignHCenter
-                }
-
-                CaptionText {
-                    width: parent.width
-                    visible: root.caption.length > 0
-                    text: root.caption
-                    words: root.captionWords
-                    segmentKey: root.captionKey
-                    pixelSize: 32
-                    maxLines: 3
-                    weight: Font.DemiBold
-                    align: Text.AlignHCenter
-                }
-
-                Text {
-                    visible: root.caption.length === 0
-                    width: parent.width
-                    text: bridge.liveActive
-                          ? bridge.livePhase === "starting" ? "Готовим модель…"
-                          : bridge.livePhase === "backlog" ? "Модель не успевает за звуком"
-                          : "Слушаю"
-                          : "Запустите Live, текст появится после первой фразы"
-                    color: Theme.muted
-                    font.pixelSize: 18
-                    font.family: Theme.fontFamily
-                    wrapMode: Text.Wrap
-                    horizontalAlignment: Text.AlignHCenter
-                }
-            }
+            previous: root.previousText
+            confirmed: bridge.confirmedCaption
+            pending: bridge.partialCaption
+            placeholder: root.stageHint
+            pixelSize: root.embedded ? 30 : 34
+            maxLines: 3
+            align: Text.AlignHCenter
         }
 
-        Waveform {
-            visible: bridge.recording
-            Layout.fillWidth: true
-            Layout.preferredHeight: 20
-            bars: 28
-            barH: 20
-        }
-
+        // Лента последних завершённых фраз. Новая строка приезжает снизу,
+        // остальные съезжают: видно, что текст накапливается.
         ListView {
             id: tape
+            visible: root.showTape
+            property bool followsLive: true
             Layout.fillWidth: true
-            Layout.preferredHeight: 88
+            Layout.preferredHeight: root.showTape ? 84 : 0
             clip: true
-            spacing: 6
+            spacing: 2
             model: bridge.segments
             boundsBehavior: Flickable.StopAtBounds
-            delegate: Text {
+            onMovementStarted: followsLive = false
+
+            delegate: Item {
                 required property var modelData
                 required property int index
                 width: tape.width
-                text: modelData.text
-                color: index === tape.count - 1 ? Theme.text : Theme.muted
-                font.pixelSize: 13
-                font.family: Theme.fontFamily
-                elide: Text.ElideRight
-                maximumLineCount: 1
+                height: 26
+                opacity: Math.max(0.3, 1.0 - (tape.count - 1 - index) * 0.22)
+
+                Text {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: parent.modelData.text
+                    color: parent.index === tape.count - 1 ? Theme.text : Theme.muted
+                    font.pixelSize: parent.index === tape.count - 1 ? 13 : 12
+                    font.family: Theme.fontFamily
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideRight
+                    maximumLineCount: 1
+                }
             }
+
+            add: Transition {
+                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.baseMs }
+                NumberAnimation {
+                    property: "y"
+                    from: 18
+                    duration: Theme.slowMs
+                    easing.type: Easing.Bezier
+                    easing.bezierCurve: Theme.easeOut
+                }
+            }
+            displaced: Transition {
+                NumberAnimation {
+                    properties: "x,y"
+                    duration: Theme.slowMs
+                    easing.type: Easing.Bezier
+                    easing.bezierCurve: Theme.easeOut
+                }
+            }
+
             Connections {
                 target: bridge
                 function onSegmentsChanged() {
-                    if (tape.count > 0)
+                    if (tape.followsLive && tape.count > 0)
                         tape.positionViewAtEnd()
                 }
             }
         }
 
-        RowLayout {
+        PillButton {
+            visible: root.showTape && !tape.followsLive && tape.count > 0
+            compact: true
+            Layout.alignment: Qt.AlignHCenter
+            text: "К текущему тексту"
+            onClicked: {
+                tape.followsLive = true
+                tape.positionViewAtEnd()
+            }
+        }
+
+        // Управление. Уровень стоит прямо над кнопкой: видно, слышит ли
+        // приложение источник, до того как нажали «Слушать».
+        ColumnLayout {
             Layout.fillWidth: true
-            spacing: 8
-            PillButton {
-                text: "Копировать"
-                enabled: bridge.text.length > 0
-                onClicked: bridge.copyText()
+            spacing: 10
+
+            Waveform {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.preferredHeight: 20
+                bars: 48
+                barH: 20
             }
-            PillButton {
-                text: "На экран"
-                primary: root.overlayOn
-                onClicked: bridge.setSetting("caption_overlay", !root.overlayOn)
-            }
-            Item { Layout.fillWidth: true }
-            PillButton {
-                visible: !root.embedded
-                text: "В приложение"
-                onClicked: root.requestApp()
-            }
-            PillButton {
-                text: "Остров"
-                onClicked: root.requestIsland()
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Item { Layout.fillWidth: true }
+
+                PillButton {
+                    text: bridge.recording ? "Стоп" : bridge.busy ? "Останавливаем" : "Слушать"
+                    primary: true
+                    enabled: !bridge.busy || bridge.recording
+                    onClicked: bridge.toggleRecording()
+                }
+
+                PillButton {
+                    visible: bridge.busy
+                    compact: true
+                    text: bridge.recording ? "Отменить" : "Остановить сейчас"
+                    onClicked: bridge.forceStop()
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Остановить без сохранения незавершённой фразы"
+                }
+
+                Item { Layout.fillWidth: true }
             }
         }
     }
