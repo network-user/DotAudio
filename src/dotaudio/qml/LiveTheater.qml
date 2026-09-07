@@ -87,6 +87,7 @@ Rectangle {
                     elide: Text.ElideRight
                     maximumLineCount: 1
                     wrapMode: Text.NoWrap
+                    horizontalAlignment: Text.AlignHCenter
                 }
 
                 CaptionText {
@@ -98,6 +99,7 @@ Rectangle {
                     pixelSize: 32
                     maxLines: 3
                     weight: Font.DemiBold
+                    align: Text.AlignHCenter
                 }
 
                 Text {
@@ -105,9 +107,10 @@ Rectangle {
                     width: parent.width
                     text: "Запустите Live, текст появится после первой фразы"
                     color: Theme.muted
-                    font.pixelSize: 15
+                    font.pixelSize: 18
                     font.family: Theme.fontFamily
                     wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
                 }
             }
         }
