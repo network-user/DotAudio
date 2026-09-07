@@ -84,16 +84,16 @@ Rectangle {
             }
         }
 
-        PillButton {
+        Label {
             visible: root.livePage && (root.phase === "ready" || root.phase === "listen" || root.phase === "quiet")
             text: bridge.liveSourceLabel
-            enabled: !bridge.recording && !bridge.busy
-            implicitHeight: 26
-            leftPadding: 10
-            rightPadding: 10
-            onClicked: bridge.cycleLiveSource()
-            ToolTip.visible: hovered
-            ToolTip.text: "Микрофон, звук компьютера или оба сразу. Нажмите, чтобы сменить."
+            color: Theme.muted
+            font.pixelSize: 11
+            font.family: Theme.fontFamily
+            TapHandler {
+                enabled: !bridge.recording && !bridge.busy
+                onTapped: bridge.cycleLiveSource()
+            }
         }
 
         Label {
