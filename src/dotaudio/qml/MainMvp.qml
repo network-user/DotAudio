@@ -25,6 +25,7 @@ ApplicationWindow {
     flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
     opacity: shellMode === "island" ? Math.max(0.9, Number(bridge.settings.island_opacity)) : 1
     font.family: Theme.fontFamily
+    font.hintingPreference: Font.PreferDefaultHinting
 
     readonly property string islandPhase: {
         if (islandModesOpen && !bridge.recording && !bridge.busy)
@@ -47,12 +48,12 @@ ApplicationWindow {
         switch (islandPhase) {
         case "listen":
         case "quiet":
-        case "process": return 304
+        case "process": return bridge.page === "live" ? 360 : 304
         case "caption":
         case "result": return 540
         case "error": return 380
         case "modePick": return 352
-        default: return 216
+        default: return bridge.page === "live" ? 320 : 248
         }
     }
     readonly property int islandH: {
@@ -64,7 +65,7 @@ ApplicationWindow {
         case "result": return 100
         case "error": return 68
         case "modePick": return 56
-        default: return 48
+        default: return 52
         }
     }
     readonly property int islandR: {
@@ -629,15 +630,17 @@ ApplicationWindow {
                                         anchors.margins: 18
                                         spacing: 10
                                         Label { text: "Источник Live и устройства"; color: Theme.text; font.pixelSize: 16; font.weight: Font.DemiBold }
+                                        Text { Layout.fillWidth: true; text: "Диктовка всегда с микрофона. Live: микрофон, звук компьютера или Авто - оба сразу. На острове источник переключается кнопкой."; color: Theme.muted; font.pixelSize: 11; wrapMode: Text.Wrap }
                                         RowLayout {
                                             Layout.fillWidth: true
                                             Label { text: "Источник Live"; color: Theme.muted; font.pixelSize: 12; Layout.fillWidth: true }
                                             PillButton { text: "Микрофон"; primary: String(bridge.settings.live_source) === "microphone"; onClicked: bridge.setSetting("live_source", "microphone") }
-                                            PillButton { text: "Звук системы"; primary: String(bridge.settings.live_source) !== "microphone"; onClicked: bridge.setSetting("live_source", "system") }
+                                            PillButton { text: "Звук системы"; primary: String(bridge.settings.live_source) === "system"; onClicked: bridge.setSetting("live_source", "system") }
+                                            PillButton { text: "Авто"; primary: String(bridge.settings.live_source) === "mixed"; onClicked: bridge.setSetting("live_source", "mixed"); ToolTip.visible: hovered; ToolTip.text: "Микрофон и звук компьютера одновременно" }
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            visible: String(bridge.settings.live_source) === "microphone"
+                                            visible: String(bridge.settings.live_source) === "microphone" || String(bridge.settings.live_source) === "mixed"
                                             ComboBox {
                                                 id: inputChooser
                                                 Layout.fillWidth: true
@@ -662,7 +665,7 @@ ApplicationWindow {
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            visible: String(bridge.settings.live_source) !== "microphone"
+                                            visible: String(bridge.settings.live_source) === "system" || String(bridge.settings.live_source) === "mixed"
                                             ComboBox {
                                                 id: loopbackChooser
                                                 Layout.fillWidth: true
@@ -708,7 +711,7 @@ ApplicationWindow {
                                             }
                                             PillButton { text: "Обновить"; onClicked: bridge.refreshOutputs() }
                                             PillButton { text: "Тон"; onClicked: bridge.testOutputDevice() }
-                                            PillButton { text: "Loopback"; primary: String(bridge.settings.live_source) !== "microphone"; onClicked: bridge.testSystemLoopback() }
+                                            PillButton { text: "Loopback"; primary: String(bridge.settings.live_source) === "system" || String(bridge.settings.live_source) === "mixed"; onClicked: bridge.testSystemLoopback() }
                                         }
                                         ProgressBar {
                                             Layout.fillWidth: true

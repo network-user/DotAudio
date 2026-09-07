@@ -23,6 +23,19 @@ ErrorCallback = Callable[[str], None]
 _QUEUE_LIMIT = 24
 _SAMPLE_RATE = 16000
 _BLOCK_FRAMES = 1600
+LIVE_SOURCES = ("system", "mixed", "microphone")
+LIVE_SOURCE_LABELS = {
+    "microphone": "Микрофон",
+    "system": "Звук системы",
+    "mixed": "Авто",
+}
+
+
+def _coerce_device(raw: Any) -> int | str | None:
+    text = "" if raw is None else str(raw)
+    if text.isdigit():
+        return int(text)
+    return text or None
 
 
 def source_for_mode(mode: str, settings: Mapping[str, Any]) -> tuple[str, int | str | None]:
@@ -30,21 +43,44 @@ def source_for_mode(mode: str, settings: Mapping[str, Any]) -> tuple[str, int | 
 
     Dictation always uses the microphone.  Live defaults to system loopback
     even when a leftover ``source=microphone`` setting remains from older
-    builds: computer playback never reaches a USB mic in a headset.
+    builds.  ``mixed`` listens to microphone and system audio together.
     """
 
     if mode == "live":
         kind = str(settings.get("live_source") or "system")
-        if kind not in {"microphone", "system"}:
+        if kind not in LIVE_SOURCES:
             kind = "system"
+        if kind == "mixed":
+            return kind, None
         raw = settings.get("input_device") if kind == "microphone" else settings.get("loopback_device")
-    else:
-        kind = "microphone"
-        raw = settings.get("input_device")
-    text = "" if raw is None else str(raw)
-    if text.isdigit():
-        return kind, int(text)
-    return kind, text or None
+        return kind, _coerce_device(raw)
+    return "microphone", _coerce_device(settings.get("input_device"))
+
+
+def next_live_source(current: str) -> str:
+    kind = current if current in LIVE_SOURCES else "system"
+    return LIVE_SOURCES[(LIVE_SOURCES.index(kind) + 1) % len(LIVE_SOURCES)]
+
+
+def live_source_label(kind: str) -> str:
+    return LIVE_SOURCE_LABELS.get(kind, LIVE_SOURCE_LABELS["system"])
+
+
+def mix_audio_blocks(left: np.ndarray | None, right: np.ndarray | None) -> np.ndarray:
+    """Sum two mono blocks and clip.  A missing side is treated as silence."""
+
+    if left is None and right is None:
+        return np.empty(0, dtype=np.float32)
+    if left is None:
+        return np.ascontiguousarray(right, dtype=np.float32)
+    if right is None:
+        return np.ascontiguousarray(left, dtype=np.float32)
+    left = np.asarray(left, dtype=np.float32).reshape(-1)
+    right = np.asarray(right, dtype=np.float32).reshape(-1)
+    n = min(left.size, right.size)
+    if n == 0:
+        return np.empty(0, dtype=np.float32)
+    return np.clip(left[:n] + right[:n], -1.0, 1.0).astype(np.float32, copy=False)
 
 
 def _ensure_windows_com() -> None:
@@ -330,6 +366,158 @@ class AudioCapture(_CallbackDispatcher):
         return soundcard.get_microphone(identifier, include_loopback=True)
 
 
+class MixedCapture:
+    """Mix microphone and system loopback into one 16 kHz mono stream.
+
+    If only one side opens, Auto keeps that side instead of aborting Live.
+    """
+
+    def __init__(
+        self,
+        microphone_device: int | str | None = None,
+        loopback_device: int | str | None = None,
+        on_audio: AudioCallback | None = None,
+        on_level: LevelCallback | None = None,
+        on_error: ErrorCallback | None = None,
+    ) -> None:
+        self._on_audio = on_audio
+        self._on_level = on_level
+        self._on_error = on_error
+        self._stop = Event()
+        self._mic_q: Queue[np.ndarray] = Queue(maxsize=8)
+        self._sys_q: Queue[np.ndarray] = Queue(maxsize=8)
+        self._mixer: Thread | None = None
+        self._mic = AudioCapture(
+            kind="microphone",
+            device=microphone_device,
+            on_audio=lambda audio: self._feed(self._mic_q, audio),
+            on_error=lambda message: self._child_error("microphone", message),
+        )
+        self._sys = AudioCapture(
+            kind="system",
+            device=loopback_device,
+            on_audio=lambda audio: self._feed(self._sys_q, audio),
+            on_error=lambda message: self._child_error("system", message),
+        )
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self._stop.clear()
+        errors: list[str] = []
+        for capture in (self._mic, self._sys):
+            try:
+                capture.start()
+            except Exception as exc:
+                errors.append(str(exc))
+        if not self._mic.running and not self._sys.running:
+            raise RuntimeError(
+                " ".join(errors) or "Не удалось открыть микрофон и системный звук."
+            )
+        self._mixer = Thread(target=self._mix_loop, name="DotAudioMixedCapture", daemon=True)
+        self._mixer.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._mic.stop()
+        self._sys.stop()
+        thread, self._mixer = self._mixer, None
+        if thread is not None and thread is not current_thread():
+            thread.join(timeout=1.5)
+
+    @property
+    def running(self) -> bool:
+        return (self._mic.running or self._sys.running) and not self._stop.is_set()
+
+    def _feed(self, queue: Queue[np.ndarray], audio: np.ndarray) -> None:
+        if self._stop.is_set():
+            return
+        try:
+            queue.put_nowait(audio)
+            return
+        except Full:
+            pass
+        try:
+            queue.get_nowait()
+        except Empty:
+            pass
+        try:
+            queue.put_nowait(audio)
+        except Full:
+            return
+
+    def _child_error(self, source: str, message: str) -> None:
+        if self._stop.is_set():
+            return
+        other = self._sys if source == "microphone" else self._mic
+        if other.running:
+            return
+        if self._on_error is not None:
+            self._on_error(message)
+
+    def _take(self, queue: Queue[np.ndarray], timeout: float) -> np.ndarray | None:
+        try:
+            return queue.get(timeout=timeout)
+        except Empty:
+            return None
+
+    def _publish(self, mixed: np.ndarray) -> None:
+        if not mixed.size:
+            return
+        if self._on_audio is not None:
+            self._on_audio(mixed)
+        if self._on_level is not None:
+            level = float(np.sqrt(np.mean(np.square(mixed, dtype=np.float32))))
+            self._on_level(level)
+
+    def _mix_loop(self) -> None:
+        mic_hold: np.ndarray | None = None
+        sys_hold: np.ndarray | None = None
+        waited = 0.0
+        while not self._stop.is_set():
+            if mic_hold is None:
+                mic_hold = self._take(self._mic_q, 0.02)
+            if sys_hold is None:
+                sys_hold = self._take(self._sys_q, 0.0)
+            both = mic_hold is not None and sys_hold is not None
+            one = (mic_hold is None) != (sys_hold is None)
+            single = not self._mic.running or not self._sys.running
+            if both or (one and (single or waited >= 0.08)):
+                self._publish(mix_audio_blocks(mic_hold, sys_hold))
+                mic_hold = sys_hold = None
+                waited = 0.0
+                continue
+            if one:
+                waited += 0.02
+            else:
+                waited = 0.0
+
+
+def open_live_capture(
+    kind: str,
+    settings: Mapping[str, Any],
+    *,
+    on_audio: AudioCallback | None = None,
+    on_level: LevelCallback | None = None,
+    on_error: ErrorCallback | None = None,
+) -> AudioCapture | MixedCapture:
+    """Build the capture object Live should start for ``kind``."""
+
+    callbacks = {"on_audio": on_audio, "on_level": on_level, "on_error": on_error}
+    if kind == "mixed":
+        return MixedCapture(
+            microphone_device=_coerce_device(settings.get("input_device")),
+            loopback_device=_coerce_device(settings.get("loopback_device")),
+            **callbacks,
+        )
+    if kind not in {"microphone", "system"}:
+        kind = "system"
+    device = _coerce_device(
+        settings.get("input_device") if kind == "microphone" else settings.get("loopback_device")
+    )
+    return AudioCapture(kind=kind, device=device, **callbacks)
+
+
 class StreamCapture(_CallbackDispatcher):
     """Decode an http(s) stream to 16 kHz mono PCM with FFmpeg."""
 
@@ -585,10 +773,16 @@ def play_output_tone(device: int | str | None, duration: float = 0.35) -> None:
 
 __all__ = [
     "AudioCapture",
+    "LIVE_SOURCES",
+    "MixedCapture",
     "StreamCapture",
     "list_input_devices",
     "list_loopback_devices",
     "list_output_devices",
+    "live_source_label",
+    "mix_audio_blocks",
+    "next_live_source",
+    "open_live_capture",
     "playback_device_for_loopback",
     "play_output_tone",
     "source_for_mode",

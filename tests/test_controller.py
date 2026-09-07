@@ -1,9 +1,11 @@
+from dotaudio.capture import next_live_source
 from dotaudio.controller import DEFAULTS, HOTKEY_OPTIONS, STATUS_LABELS, Controller
 
 
 def test_live_source_defaults_to_system_audio() -> None:
     assert DEFAULTS["live_source"] == "system"
     assert DEFAULTS["source"] == "microphone"
+    assert next_live_source(DEFAULTS["live_source"]) == "mixed"
 
 
 def test_caption_overlay_settings_are_local_and_sized() -> None:

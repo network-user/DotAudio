@@ -15,6 +15,9 @@ from dotaudio.capture import (
     list_input_devices,
     list_loopback_devices,
     list_output_devices,
+    live_source_label,
+    next_live_source,
+    open_live_capture,
     play_output_tone,
     playback_device_for_loopback,
     source_for_mode,
@@ -242,6 +245,16 @@ class Controller(QObject):
     def canRedoEdit(self): return bool(self._edit_redo)
 
     @Property(str, notify=changed)
+    def liveSourceLabel(self):
+        return live_source_label(str(self._settings.get("live_source") or "system"))
+
+    @Slot()
+    def cycleLiveSource(self):
+        if self._jobs:
+            return
+        self.setSetting("live_source", next_live_source(str(self._settings.get("live_source") or "system")))
+
+    @Property(str, notify=changed)
     def sessionTitle(self): return self._session_title
 
     @Property(str, notify=changed)
@@ -273,7 +286,7 @@ class Controller(QObject):
             "model": ("tiny", "base", "small", "medium", "large-v3", "turbo"),
             "device": ("auto", "cpu", "cuda"), "language": ("auto", "ru", "en", "de", "es", "fr", "zh"),
             "task": ("transcribe", "translate"), "backend": ("local", "remote"),
-            "source": ("microphone", "system"), "live_source": ("microphone", "system"),
+            "source": ("microphone", "system"), "live_source": ("microphone", "system", "mixed"),
             "profile": ("fast", "balanced", "quality"),
             "caption_size": ("sm", "md", "lg"),
             "caption_contrast": ("normal", "high"),
@@ -284,7 +297,7 @@ class Controller(QObject):
             value = bool(value)
         self._settings[name] = value
         if name == "live_source":
-            self._settings["source"] = value
+            self._settings["source"] = value if value in ("microphone", "system") else "system"
         elif name == "source":
             self._settings["live_source"] = value
         if name == "profile":
@@ -580,8 +593,8 @@ class Controller(QObject):
         """Play a quiet tone and verify that the selected output loops back."""
         if self._jobs or self._testing_device:
             return
-        if self._settings["live_source"] != "system":
-            self._notice = "Для проверки loopback выберите «Звук системы» как источник Live."
+        if self._settings["live_source"] not in {"system", "mixed"}:
+            self._notice = "Для проверки loopback выберите «Звук системы» или «Авто» как источник Live."
             self.changed.emit()
             return
         raw_loopback = str(self._settings["loopback_device"])
@@ -633,10 +646,11 @@ class Controller(QObject):
     def _test_capture(self, kind: str):
         if self._jobs or self._testing_device:
             return
-        setting = "input_device" if kind == "microphone" else "loopback_device"
-        raw_device = str(self._settings[setting])
-        device = int(raw_device) if raw_device.isdigit() else raw_device or None
-        source_name = "микрофон" if kind == "microphone" else "звук системы"
+        source_name = {
+            "microphone": "микрофон",
+            "system": "звук системы",
+            "mixed": "микрофон и звук системы",
+        }.get(kind, "источник")
         self._testing_device = True
         self._device_test = {
             "phase": "starting",
@@ -654,9 +668,9 @@ class Controller(QObject):
                 levels.append(float(level))
                 self.deviceTestLevelArrived.emit(level)
 
-            capture = AudioCapture(
-                kind=kind,
-                device=device,
+            capture = open_live_capture(
+                kind,
+                self._settings,
                 on_level=on_level,
                 on_error=errors.append,
             )
@@ -676,10 +690,10 @@ class Controller(QObject):
             elif not started:
                 self.deviceTestFinished.emit("error", f"Источник «{source_name}» остановился до завершения проверки.")
             elif max(levels, default=0.0) < 0.001:
-                hint = (
-                    "Выберите в списке именно устройство, через которое сейчас играет звук."
-                    if kind == "system" else "Проверьте разрешение Windows для микрофона и уровень входа."
-                )
+                hint = {
+                    "system": "Выберите в списке именно устройство, через которое сейчас играет звук.",
+                    "mixed": "Проверьте микрофон и выход, через который играет звук.",
+                }.get(kind, "Проверьте разрешение Windows для микрофона и уровень входа.")
                 self.deviceTestFinished.emit("silent", f"Источник «{source_name}» открыт, но сигнал нулевой. {hint}")
             else:
                 self.deviceTestFinished.emit("ready", f"Источник «{source_name}» отвечает. Тестовая запись не сохранена.")
@@ -789,8 +803,12 @@ class Controller(QObject):
         self._status = "Слушаю · модель загрузится при первой фразе"
         self._last_status = ""
         self._record_log("info", f"Запущен режим: {mode}.")
-        kind, device = source_for_mode(mode, self._settings)
-        sources = [("Микрофон" if kind == "microphone" else "Звук компьютера", "")]
+        kind, _device = source_for_mode(mode, self._settings)
+        sources = [({
+            "microphone": "Микрофон",
+            "system": "Звук компьютера",
+            "mixed": "Микрофон и звук компьютера",
+        }.get(kind, "Микрофон"), "")]
         if mode == "monitor":
             sources = []
             for line in str(self._settings["channels"]).splitlines():
@@ -823,7 +841,7 @@ class Controller(QObject):
                 if url:
                     capture = StreamCapture(url, **args)
                 else:
-                    capture = AudioCapture(kind=kind, device=device, **args)
+                    capture = open_live_capture(kind, self._settings, **args)
                 # Device startup and WASAPI initialization must not block the QML thread.
                 def start(live=live, capture=capture, sid=sid):
                     try:

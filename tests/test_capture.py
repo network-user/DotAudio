@@ -13,6 +13,9 @@ from dotaudio.capture import (
     list_input_devices,
     list_loopback_devices,
     list_output_devices,
+    mix_audio_blocks,
+    next_live_source,
+    open_live_capture,
     play_output_tone,
     playback_device_for_loopback,
     source_for_mode,
@@ -155,6 +158,33 @@ def test_dictation_ignores_live_system_source() -> None:
     )
     assert kind == "microphone"
     assert device == 4
+
+
+def test_live_mixed_source_uses_both_devices() -> None:
+    kind, device = source_for_mode(
+        "live",
+        {"live_source": "mixed", "input_device": "2", "loopback_device": "headphones"},
+    )
+    assert kind == "mixed"
+    assert device is None
+    capture = open_live_capture("mixed", {"input_device": "2", "loopback_device": "headphones"})
+    assert capture._mic.device == 2
+    assert capture._sys.device == "headphones"
+
+
+def test_live_source_cycles_system_mixed_microphone() -> None:
+    assert next_live_source("system") == "mixed"
+    assert next_live_source("mixed") == "microphone"
+    assert next_live_source("microphone") == "system"
+    assert next_live_source("unknown") == "mixed"
+
+
+def test_mix_audio_blocks_sums_and_clips() -> None:
+    left = np.array([0.2, 0.8], dtype=np.float32)
+    right = np.array([0.3, 0.8], dtype=np.float32)
+    mixed = mix_audio_blocks(left, right)
+    assert np.allclose(mixed, [0.5, 1.0])
+    assert np.allclose(mix_audio_blocks(left, None), left)
 
 
 def test_live_can_still_use_microphone() -> None:

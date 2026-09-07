@@ -59,17 +59,41 @@ Rectangle {
             Layout.preferredHeight: root.recSize
         }
 
-        Label {
+        Icon {
             visible: root.phase === "ready"
-            text: root.livePage ? "Live" : "Диктовка"
-            color: Theme.text
-            font.pixelSize: 12
-            font.weight: Font.DemiBold
-            font.family: Theme.fontFamily
+            name: root.livePage ? "live" : "dictation"
+            ink: Theme.text
+            width: 16
+            height: 16
             TapHandler {
                 enabled: !bridge.recording && !bridge.busy
                 onTapped: root.requestModePick()
             }
+        }
+        Label {
+            visible: root.phase === "ready"
+            text: root.livePage ? "Live" : "Диктовка"
+            color: Theme.text
+            font.pixelSize: 13
+            font.weight: Font.DemiBold
+            font.family: Theme.fontFamily
+            Layout.fillWidth: false
+            TapHandler {
+                enabled: !bridge.recording && !bridge.busy
+                onTapped: root.requestModePick()
+            }
+        }
+
+        PillButton {
+            visible: root.livePage && (root.phase === "ready" || root.phase === "listen" || root.phase === "quiet")
+            text: bridge.liveSourceLabel
+            enabled: !bridge.recording && !bridge.busy
+            implicitHeight: 26
+            leftPadding: 10
+            rightPadding: 10
+            onClicked: bridge.cycleLiveSource()
+            ToolTip.visible: hovered
+            ToolTip.text: "Микрофон, звук компьютера или оба сразу. Нажмите, чтобы сменить."
         }
 
         Label {

@@ -19,7 +19,7 @@ Rectangle {
     readonly property var previousSegment: bridge.segments.length >= 2 ? bridge.segments[bridge.segments.length - 2] : null
     readonly property var captionWords: currentSegment && currentSegment.words ? currentSegment.words : []
     readonly property string captionKey: currentSegment ? String(currentSegment.id) : ""
-    readonly property string sourceLabel: String(bridge.settings.live_source) === "microphone" ? "Микрофон" : "Звук системы"
+    readonly property string sourceLabel: bridge.liveSourceLabel
     readonly property bool overlayOn: Boolean(bridge.settings.caption_overlay)
 
     ColumnLayout {
@@ -38,11 +38,12 @@ Rectangle {
                 font.weight: Font.DemiBold
                 font.family: Theme.fontFamily
             }
-            Label {
-                text: root.sourceLabel
-                color: Theme.muted
-                font.pixelSize: 11
-                font.family: Theme.fontFamily
+            PillButton {
+                text: bridge.liveSourceLabel
+                enabled: !bridge.recording && !bridge.busy
+                onClicked: bridge.cycleLiveSource()
+                ToolTip.visible: hovered
+                ToolTip.text: "Микрофон, звук компьютера или оба сразу"
             }
             Item { Layout.fillWidth: true }
             Label {
