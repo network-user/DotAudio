@@ -7,12 +7,23 @@ from pathlib import Path
 
 from platformdirs import user_data_path
 from PySide6.QtCore import QTimer, QUrl
-from PySide6.QtGui import QColor, QFont, QPalette
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtWidgets import QApplication
 
 from dotaudio.controller import Controller
 from dotaudio.desktop import Desktop
+
+
+def _register_ui_fonts():
+    """Load Segoe UI from Windows so offscreen and custom Qt plugins can render text."""
+    font_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+    if not font_dir.is_dir():
+        return
+    for name in ("segoeui.ttf", "segoeuib.ttf", "segoeuil.ttf", "segoeuiz.ttf", "segoeuisl.ttf", "consola.ttf"):
+        path = font_dir / name
+        if path.is_file():
+            QFontDatabase.addApplicationFont(str(path))
 
 
 def main():
@@ -25,6 +36,7 @@ def main():
     app = QApplication(sys.argv[:1])
     app.setApplicationName("DotAudio")
     app.setOrganizationName("DotCore")
+    _register_ui_fonts()
     app.setFont(QFont("Segoe UI", 10))
     palette = QPalette()
     for role, color in ((QPalette.Window, "#111214"), (QPalette.WindowText, "#eeeeef"),
@@ -41,7 +53,11 @@ def main():
     if not engine.rootObjects():
         desktop.close()
         return 1
-    controller.set_window(engine.rootObjects()[0])
+    window = engine.rootObjects()[0]
+    controller.set_window(window)
+    shell = os.environ.get("DOTAUDIO_SHELL", "")
+    if shell in ("island", "theater", "app"):
+        window.setProperty("shellMode", shell)
     controller.shutdownReady.connect(app.quit)
     app.aboutToQuit.connect(desktop.close)
     app.aboutToQuit.connect(controller.shutdown)
