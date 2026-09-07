@@ -10,6 +10,7 @@ import pytest
 from dotaudio.capture import (
     AudioCapture,
     StreamCapture,
+    describe_capture_error,
     list_input_devices,
     list_loopback_devices,
     list_output_devices,
@@ -114,12 +115,20 @@ def test_capture_error_explains_how_to_recover() -> None:
     assert "driver failed" in message
 
 
+def test_capture_error_names_permission_busy_and_missing_device() -> None:
+    assert "Конфиденциальность" in describe_capture_error("microphone", PermissionError("access is denied"))
+    assert "занят" in describe_capture_error("microphone", RuntimeError("device unavailable"))
+    assert "недоступен" in describe_capture_error("microphone", RuntimeError("Invalid device"))
+    assert "не найден" in describe_capture_error("microphone", RuntimeError("no default input device"))
+    assert "наушники" in describe_capture_error("system", RuntimeError("output device not found for loopback"))
+
+
 def test_start_propagates_microphone_open_failure(monkeypatch) -> None:
     def fail_stream(**_kwargs):
         raise RuntimeError("driver busy")
 
     monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(InputStream=fail_stream))
-    with pytest.raises(RuntimeError, match="Не удалось открыть микрофон"):
+    with pytest.raises(RuntimeError, match="Микрофон занят"):
         AudioCapture(kind="microphone").start()
 
 

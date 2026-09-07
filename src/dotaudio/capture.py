@@ -31,6 +31,48 @@ LIVE_SOURCE_LABELS = {
 }
 
 
+def describe_capture_error(kind: str, error: Exception | str) -> str:
+    """Map driver exceptions to a named recovery hint.  Details stay attached."""
+
+    detail = str(error)
+    text = detail.casefold()
+    if kind == "microphone":
+        if any(token in text for token in ("denied", "permission", "access is denied", "not authorized")):
+            return (
+                "Нет доступа к микрофону. Откройте Параметры Windows → "
+                "Конфиденциальность → Микрофон и разрешите DotAudio."
+            )
+        if any(token in text for token in ("invalid device", "device not found", "no such device", "-9996")):
+            return (
+                "Выбранный микрофон недоступен. Подключите его или выберите "
+                "другое устройство в разделе «Диктовка»."
+            )
+        if any(token in text for token in ("busy", "in use", "already open", "device unavailable", "-9985")):
+            return (
+                "Микрофон занят другой программой или отключён. Закройте "
+                "другие приложения со звуком и повторите запись."
+            )
+        if any(token in text for token in ("no default", "no device", "host error", "no input")):
+            return (
+                "Микрофон не найден. Подключите устройство входа и проверьте "
+                "звук Windows."
+            )
+        return (
+            "Не удалось открыть микрофон. Выберите другое устройство в "
+            "разделе «Диктовка» и проверьте разрешение Windows для микрофона. "
+            f"Детали драйвера: {detail}"
+        )
+    if any(token in text for token in ("not found", "invalid", "no speaker", "no output")):
+        return (
+            "Устройство вывода для системного звука недоступно. Выберите "
+            "наушники или колонки в настройках Live."
+        )
+    return (
+        "Не удалось открыть системный звук. Проверьте устройство вывода "
+        f"и драйвер, затем попробуйте микрофон. Детали драйвера: {detail}"
+    )
+
+
 def _coerce_device(raw: Any) -> int | str | None:
     text = "" if raw is None else str(raw)
     if text.isdigit():
@@ -257,17 +299,7 @@ class AudioCapture(_CallbackDispatcher):
         return self._system_thread is not None and self._system_thread.is_alive()
 
     def _start_error(self, error: Exception) -> str:
-        if self.kind == "microphone":
-            prefix = (
-                "Не удалось открыть микрофон. Выберите другое устройство в "
-                "разделе «Диктовка» и проверьте разрешение Windows для микрофона."
-            )
-        else:
-            prefix = (
-                "Не удалось открыть системный звук. Проверьте устройство вывода "
-                "и драйвер, затем попробуйте микрофон."
-            )
-        return f"{prefix} Детали драйвера: {error}"
+        return describe_capture_error(self.kind, error)
 
     def _start_microphone(self) -> None:
         import sounddevice as sd
@@ -776,6 +808,7 @@ __all__ = [
     "LIVE_SOURCES",
     "MixedCapture",
     "StreamCapture",
+    "describe_capture_error",
     "list_input_devices",
     "list_loopback_devices",
     "list_output_devices",
