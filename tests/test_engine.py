@@ -60,6 +60,19 @@ def test_cached_model_skips_loading_status(monkeypatch) -> None:
     assert "loading_model" not in statuses
 
 
+def test_release_cached_model_frees_the_idle_instance(monkeypatch) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=lambda *_args, **_kwargs: object()),
+    )
+    engine = Engine()
+    engine.prepare(RecognitionConfig(device="cpu"))
+
+    assert engine.release_cached_model() is True
+    assert engine.release_cached_model() is False
+
+
 def test_initial_prompt_keeps_local_dictionary_terms_bounded() -> None:
     prompt = Engine._initial_prompt("ru", "DotAudio; CTranslate2")
     assert prompt is not None
@@ -109,6 +122,32 @@ def test_auto_device_retries_cuda_runtime_error_on_cpu(monkeypatch) -> None:
         {"start": 0.0, "end": 1.0, "text": "ready"}
     ]
     assert attempts == [("cuda", "float16"), ("cpu", "int8")]
+
+
+def test_auto_device_reuses_cpu_after_cuda_runtime_failure(monkeypatch) -> None:
+    created: list[str] = []
+
+    class FakeModel:
+        def __init__(self, device: str) -> None:
+            self.device = device
+
+        def transcribe(self, _source, **_kwargs):
+            if self.device == "cuda":
+                raise RuntimeError("cublas runtime failure")
+            return iter([_Segment(0, 1, "ready")]), object()
+
+    def model(_name: str, *, device: str, compute_type: str):
+        del compute_type
+        created.append(device)
+        return FakeModel(device)
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=model))
+    engine = Engine()
+    config = RecognitionConfig(device="auto", live_preview=True)
+
+    assert engine.transcribe(np.zeros(1600), config)[0]["text"] == "ready"
+    assert engine.transcribe(np.zeros(1600), config)[0]["text"] == "ready"
+    assert created == ["cuda", "cpu"]
 
 
 def test_remote_backend_posts_form_and_returns_segments(monkeypatch) -> None:
@@ -169,6 +208,151 @@ def test_media_recipe_keeps_sung_words_and_word_timings(monkeypatch) -> None:
     assert Engine().transcribe(np.zeros(1600), RecognitionConfig(device="cpu", media_mode=True)) == [
         {"start": 0.0, "end": 1.0, "text": "привет", "words": [{"text": "привет", "start": 0.1, "end": 0.5}]}
     ]
+
+
+class _Extractor:
+    sampling_rate = 16000
+    hop_length = 160
+    nb_max_frames = 3000
+
+    def __call__(self, audio, padding=160):
+        del padding
+        return np.zeros((80, len(audio) // self.hop_length), dtype=np.float32)
+
+
+class _Decoder:
+    is_multilingual = True
+
+    def __init__(self) -> None:
+        self.features = None
+        self.kwargs: dict = {}
+
+    def generate(self, features, prompts, **kwargs):
+        del prompts
+        self.features = features
+        self.kwargs = kwargs
+        return [SimpleNamespace(sequences_ids=[[10, 11, 50257]])]
+
+
+class _LiveModel:
+    """A model exposing the CTranslate2 internals the live window relies on."""
+
+    def __init__(self) -> None:
+        self.feature_extractor = _Extractor()
+        self.model = _Decoder()
+        self.hf_tokenizer = object()
+        self.hotwords = "unset"
+
+    def get_prompt(self, _tokenizer, _previous, without_timestamps=False, hotwords=None):
+        assert without_timestamps is True
+        self.hotwords = hotwords
+        return [50258, 50259, 50360, 50364]
+
+    def transcribe(self, *_args, **_kwargs):
+        raise AssertionError("the live window must not reach the padded 30 s path")
+
+
+class _Tokenizer:
+    eot = 50257
+    sot_sequence = (50258, 50259, 50360)
+    no_timestamps = 50364
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        pass
+
+    def decode(self, tokens):
+        assert tokens == [10, 11]
+        return "  живой текст  "
+
+
+def _install_live_stack(monkeypatch, model):
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=lambda *_a, **_k: model)
+    )
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper.tokenizer", SimpleNamespace(Tokenizer=_Tokenizer)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "ctranslate2",
+        SimpleNamespace(StorageView=SimpleNamespace(from_array=lambda array: array)),
+    )
+
+
+def test_live_window_sizes_the_encoder_to_the_phrase(monkeypatch) -> None:
+    model = _LiveModel()
+    _install_live_stack(monkeypatch, model)
+    config = RecognitionConfig(device="cpu", live_stream=True)
+
+    result = Engine().transcribe(np.zeros(4 * 16000, dtype=np.float32), config)
+
+    assert result == [{"start": 0.0, "end": 4.0, "text": "живой текст"}]
+    # Four seconds of speech plus the two second silence margin, instead of the
+    # 3000 frames Whisper would otherwise pad to.
+    assert model.model.features.shape[-1] == 600
+    assert model.model.kwargs["beam_size"] == 1
+    assert model.model.kwargs["no_repeat_ngram_size"] == 3
+
+
+def test_live_window_bounds_the_token_budget_and_the_dictionary_hint(monkeypatch) -> None:
+    model = _LiveModel()
+    _install_live_stack(monkeypatch, model)
+    config = RecognitionConfig(device="cpu", live_preview=True, initial_prompt="ток " * 200)
+
+    Engine().transcribe(np.zeros(16000, dtype=np.float32), config)
+
+    # A one second window cannot legitimately produce hundreds of tokens; the
+    # cap is what stops a looping decoder from blocking the next caption.
+    assert model.model.kwargs["max_length"] == 4 + 20
+    assert len(model.hotwords) <= 150
+
+
+def test_live_window_falls_back_once_when_internals_are_missing(monkeypatch) -> None:
+    class PlainModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def transcribe(self, _source, **kwargs):
+            self.calls += 1
+            assert kwargs["beam_size"] == 1
+            return iter([_Segment(0, 1, "запасной путь")]), object()
+
+    model = PlainModel()
+    _install_live_stack(monkeypatch, model)
+    config = RecognitionConfig(device="cpu", live_stream=True)
+    engine = Engine()
+    statuses: list[str] = []
+
+    assert engine.transcribe(np.zeros(16000), config, on_status=statuses.append)[0][
+        "text"
+    ] == "запасной путь"
+    engine.transcribe(np.zeros(16000), config)
+
+    assert model.calls == 2
+    assert statuses.count("live_window_unavailable") == 1
+
+
+def test_live_window_drops_a_phrase_the_decoder_started_over() -> None:
+    assert Engine._drop_restart(
+        "Сегодня мы говорим о рас. Сегодня мы говорить о рас Сегодня мы поговорим"
+    ) == "Сегодня мы говорим о рас."
+    # The restart usually comes back in a different grammatical form, so the
+    # comparison is on stems rather than on whole words.
+    assert Engine._drop_restart(
+        "Живые субтитры должны появляться почти мгновенно. Живое субтитры должны появ"
+    ) == "Живые субтитры должны появляться почти мгновенно."
+    assert Engine._drop_restart(
+        "Это главная задача. Это главные задачи. Это главное задач"
+    ) == "Это главная задача."
+    # Text that simply moves forward is left alone, including a caption too
+    # short to judge.
+    assert Engine._drop_restart(
+        "Живые субтитры должны появляться почти мгновенно"
+    ) == "Живые субтитры должны появляться почти мгновенно"
+    assert Engine._drop_restart(
+        "Сегодня мы говорим о распознавании русской речи в реальном времени."
+    ) == "Сегодня мы говорим о распознавании русской речи в реальном времени."
+    assert Engine._drop_restart("Привет.") == "Привет."
 
 
 def test_live_preview_recipe_uses_greedy_decoding(monkeypatch) -> None:

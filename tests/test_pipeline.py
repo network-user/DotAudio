@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+import sys
 from threading import Event
+from types import SimpleNamespace
 
 import numpy as np
 
 from dotaudio.engine import RecognitionConfig
-from dotaudio.pipeline import SAMPLE_RATE, LiveSession, SpeechBuffer
+from dotaudio.pipeline import (
+    LIVE_PHRASE_SECONDS,
+    LIVE_PREVIEW_INTERVAL_SECONDS,
+    LIVE_PREVIEW_WINDOW_SECONDS,
+    LIVE_SILENCE_SECONDS,
+    LIVE_SPEECH_THRESHOLD,
+    SAMPLE_RATE,
+    LiveSession,
+    SpeechBuffer,
+    VoiceActivity,
+    open_voice_activity,
+)
 
 
 def test_speech_buffer_keeps_preroll_and_flushes_after_silence() -> None:
@@ -19,12 +32,45 @@ def test_speech_buffer_keeps_preroll_and_flushes_after_silence() -> None:
     assert len(audio) == SAMPLE_RATE // 4 + SAMPLE_RATE // 10 + SAMPLE_RATE // 5
 
 
+def test_speech_buffer_keeps_quiet_speech_after_a_louder_start() -> None:
+    buffer = SpeechBuffer(max_seconds=5, silence_seconds=1, threshold=0.2)
+    assert buffer.feed(np.full(SAMPLE_RATE // 10, 0.3, dtype=np.float32)) is None
+    assert buffer.feed(np.full(SAMPLE_RATE // 10, 0.12, dtype=np.float32)) is None
+    assert buffer.size > 0
+
+
 def test_speech_buffer_flushes_at_maximum_chunk_length() -> None:
     buffer = SpeechBuffer(max_seconds=0.2, silence_seconds=1, threshold=0.1)
     assert buffer.feed(np.full(SAMPLE_RATE // 10, 0.4, dtype=np.float32)) is None
     chunk = buffer.feed(np.full(SAMPLE_RATE // 10, 0.4, dtype=np.float32))
     assert chunk is not None
     assert len(chunk[1]) == SAMPLE_RATE // 5
+
+
+def test_speech_buffer_cuts_a_long_phrase_at_the_last_pause() -> None:
+    buffer = SpeechBuffer(max_seconds=1.0, silence_seconds=1.0, threshold=0.1)
+    buffer.feed(np.full(int(SAMPLE_RATE * 0.4), 0.4, dtype=np.float32))
+    buffer.feed(np.zeros(int(SAMPLE_RATE * 0.2), dtype=np.float32))
+    chunk = buffer.feed(np.full(int(SAMPLE_RATE * 0.5), 0.4, dtype=np.float32))
+
+    assert chunk is not None
+    start, audio = chunk
+    assert start == 0.0
+    assert len(audio) == int(SAMPLE_RATE * 0.4)
+    # The pause and the speech after it open the next phrase instead of being
+    # lost or cut mid-word at the limit.
+    assert buffer.size == int(SAMPLE_RATE * 0.7)
+    assert buffer.start == int(SAMPLE_RATE * 0.4)
+
+
+def test_speech_buffer_at_the_limit_falls_back_to_a_plain_cut() -> None:
+    buffer = SpeechBuffer(max_seconds=0.2, silence_seconds=1.0, threshold=0.1)
+    buffer.feed(np.full(int(SAMPLE_RATE * 0.1), 0.4, dtype=np.float32))
+    chunk = buffer.feed(np.full(int(SAMPLE_RATE * 0.1), 0.4, dtype=np.float32))
+
+    assert chunk is not None
+    assert len(chunk[1]) == int(SAMPLE_RATE * 0.2)
+    assert buffer.size == 0
 
 
 class _Capture:
@@ -195,14 +241,15 @@ def test_live_session_coalesces_preview_and_prioritises_final() -> None:
     engine.first_release.set()
     assert engine.second_started.wait(2)
 
-    # This endpoints the utterance while a preview is running.  The pending
-    # preview is discarded and the final transcription runs exactly once.
+    # This endpoints the utterance while the second preview is running.  The
+    # first completed preview remains visible, while the in-flight second one
+    # is invalidated by the final transcription.
     session.feed(np.zeros(SAMPLE_RATE // 2, dtype=np.float32))
     session.stop()
     engine.second_release.set()
     assert completed.wait(2)
     assert engine.calls == [SAMPLE_RATE // 10, SAMPLE_RATE * 3 // 10, SAMPLE_RATE * 8 // 10]
-    assert partials == []
+    assert len(partials) == 1
     assert [segment["text"] for segment in finals] == ["текст"]
 
 
@@ -329,12 +376,242 @@ def test_catch_up_preview_uses_a_rolling_window() -> None:
     assert max(engine.lengths) <= int(SAMPLE_RATE * 0.4) + 1
 
 
-def test_catch_up_defaults_keep_a_one_second_preview_window() -> None:
+def test_catch_up_defaults_keep_whole_phrases_for_the_model() -> None:
     session = LiveSession(
         _Engine(), RecognitionConfig(), lambda _segment: None, lambda _status: None,
         lambda _error, _cancelled: None, lambda _partial: None, catch_up=True,
     )
-    assert session.buffer.limit == int(1.5 * SAMPLE_RATE)
-    assert session.buffer.silence_limit == int(0.24 * SAMPLE_RATE)
-    assert session._preview_window_samples == int(1.05 * SAMPLE_RATE)
-    assert session._preview_interval_samples == int(0.35 * SAMPLE_RATE)
+    assert session.buffer.limit == int(LIVE_PHRASE_SECONDS * SAMPLE_RATE)
+    assert session.buffer.silence_limit == int(LIVE_SILENCE_SECONDS * SAMPLE_RATE)
+    assert session.buffer.threshold == LIVE_SPEECH_THRESHOLD
+    assert session._preview_window_samples == int(LIVE_PREVIEW_WINDOW_SECONDS * SAMPLE_RATE)
+    assert session._preview_interval_samples == int(LIVE_PREVIEW_INTERVAL_SECONDS * SAMPLE_RATE)
+
+
+def test_preview_interval_follows_a_slow_machine() -> None:
+    session = LiveSession(
+        _Engine(), RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: None, lambda _partial: None, catch_up=True,
+    )
+    assert session._preview_interval() == session._preview_interval_samples
+
+    session._note_decode(2.0)
+
+    # Where a window takes two seconds to decode, asking twice a second only
+    # queues snapshots that are stale before inference starts.
+    assert session._preview_interval() == int(2.0 * 1.5 * SAMPLE_RATE)
+
+
+def test_dictation_keeps_its_own_preview_cadence() -> None:
+    session = LiveSession(
+        _Engine(), RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: None, lambda _partial: None,
+    )
+    session._note_decode(2.0)
+
+    assert session._preview_window_samples == int(1.8 * SAMPLE_RATE)
+    assert session._preview_interval() == int(0.8 * SAMPLE_RATE)
+
+
+def test_preview_keeps_an_agreed_prefix_across_hypotheses() -> None:
+    class Engine:
+        def __init__(self) -> None:
+            self.n = 0
+            self.second = Event()
+
+        def transcribe(self, audio, config, _cancel, on_segment, _on_status):
+            if not config.live_preview:
+                return []
+            self.n += 1
+            text = "раз два три" if self.n == 1 else "раз два четыре"
+            on_segment({"start": 0.0, "end": len(audio) / SAMPLE_RATE, "text": text})
+            if self.n == 1:
+                self.first.set()
+            if self.n >= 2:
+                self.second.set()
+            return []
+
+    engine = Engine()
+    engine.first = Event()
+    completed = Event()
+    partials: list[dict] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: completed.set(), partials.append,
+        preview_min_seconds=0.05, preview_interval_seconds=0.05,
+    )
+    session.start(_Capture())
+    session.feed(np.full(SAMPLE_RATE // 10, 0.4, dtype=np.float32))
+    assert engine.first.wait(2)
+    session.feed(np.full(SAMPLE_RATE // 10, 0.4, dtype=np.float32))
+    assert engine.second.wait(2)
+    session.stop(cancel=True)
+    assert completed.wait(2)
+    assert partials[0]["stable_text"] == ""
+    assert any(item["stable_text"] == "раз два" for item in partials)
+
+
+def test_preview_skips_a_snapshot_replaced_before_inference() -> None:
+    class Engine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def transcribe(self, *_args):
+            self.calls += 1
+            return []
+
+    engine = Engine()
+    session = LiveSession(
+        engine, RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: None, lambda _partial: None, catch_up=True,
+    )
+    session._preview_generation = 2
+    session._preview = (0.1, _speech(), 0.0, 2)
+
+    session._transcribe_preview(0.0, _speech(), 0.0, 1)
+
+    assert engine.calls == 0
+
+
+def test_inflight_preview_emits_when_a_newer_snapshot_arrives() -> None:
+    class SlowEngine:
+        def __init__(self) -> None:
+            self.started = Event()
+            self.release = Event()
+
+        def transcribe(self, audio, config, _cancel, on_segment, _on_status):
+            if not config.live_preview:
+                return []
+            self.started.set()
+            assert self.release.wait(2)
+            on_segment({
+                "start": 0.0,
+                "end": len(audio) / SAMPLE_RATE,
+                "text": "первый результат",
+            })
+            return []
+
+    engine = SlowEngine()
+    completed = Event()
+    partial_ready = Event()
+    partials: list[dict] = []
+
+    def on_partial(segment: dict) -> None:
+        partials.append(segment)
+        partial_ready.set()
+
+    session = LiveSession(
+        engine, RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: completed.set(), on_partial, catch_up=True,
+        preview_min_seconds=0.05, preview_interval_seconds=0.05,
+    )
+    session.start(_Capture())
+    session.feed(_speech(0.1))
+    assert engine.started.wait(2)
+
+    # A newer rolling window arrives while native inference is still running.
+    # The completed result must remain visible instead of being discarded.
+    session.feed(_speech(0.1))
+    engine.release.set()
+
+    assert partial_ready.wait(2)
+    assert partials[0]["text"] == "первый результат"
+    session.stop(cancel=True)
+    assert completed.wait(2)
+
+
+def test_catch_up_runs_a_final_even_when_a_newer_preview_waits() -> None:
+    class Engine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def transcribe(self, *_args):
+            self.calls += 1
+            return []
+
+    engine = Engine()
+    statuses: list[str] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), lambda _segment: None, statuses.append,
+        lambda _error, _cancelled: None, lambda _partial: None, catch_up=True,
+    )
+    session._preview_generation = 1
+    session._preview = (1.0, _speech(), 0.0, 1)
+
+    session._transcribe_final(0.0, _speech())
+
+    # Continuous speech produces a preview before every final.  Yielding to it
+    # would postpone the phrase that goes into history for as long as the user
+    # keeps talking, so the final is decoded and the queue stays empty.
+    assert engine.calls == 1
+    assert session.queue.empty()
+    assert statuses == ["live_no_text"]
+
+
+class _FakeVadSession:
+    """Stands in for the Silero ONNX session: one score per frame."""
+
+    def __init__(self, scores) -> None:
+        self.scores = list(scores)
+        self.batches: list[np.ndarray] = []
+
+    def run(self, _outputs, inputs):
+        self.batches.append(inputs["input"].copy())
+        score = self.scores.pop(0) if self.scores else 0.0
+        return np.array([[score]], dtype=np.float32), inputs["h"], inputs["c"]
+
+
+def test_voice_activity_scores_every_frame_with_the_previous_context() -> None:
+    session = _FakeVadSession([0.9, 0.9])
+    detector = VoiceActivity(session)
+    audio = np.arange(VoiceActivity.FRAME * 2, dtype=np.float32)
+
+    assert detector(audio) is True
+    assert len(session.batches) == 2
+    assert session.batches[0].shape == (1, VoiceActivity.FRAME + VoiceActivity.CONTEXT)
+    assert np.array_equal(session.batches[0][0, : VoiceActivity.CONTEXT], np.zeros(64))
+    # The second frame is prefixed with the tail of the first one, so a word
+    # split across two capture blocks is still scored as one stream.
+    assert np.array_equal(
+        session.batches[1][0, : VoiceActivity.CONTEXT],
+        audio[VoiceActivity.FRAME - VoiceActivity.CONTEXT : VoiceActivity.FRAME],
+    )
+
+
+def test_voice_activity_holds_a_phrase_through_a_dip() -> None:
+    session = _FakeVadSession([0.9, 0.4, 0.2])
+    detector = VoiceActivity(session)
+    frame = np.zeros(VoiceActivity.FRAME, dtype=np.float32)
+
+    assert detector(frame) is True
+    assert detector(frame) is True
+    assert detector(frame) is False
+
+
+def test_voice_activity_keeps_its_answer_for_a_partial_frame() -> None:
+    session = _FakeVadSession([0.9])
+    detector = VoiceActivity(session)
+
+    assert detector(np.zeros(VoiceActivity.FRAME, dtype=np.float32)) is True
+    assert detector(np.zeros(10, dtype=np.float32)) is True
+    assert len(session.batches) == 1
+
+
+def test_speech_buffer_follows_the_detector_and_not_loudness() -> None:
+    answers = iter([True, False])
+    buffer = SpeechBuffer(
+        max_seconds=5, silence_seconds=0.05, threshold=0.5,
+        detector=lambda _audio: next(answers),
+    )
+
+    assert buffer.feed(np.full(SAMPLE_RATE // 10, 0.001, dtype=np.float32)) is None
+    assert buffer.size > 0
+    # Loud audio that the detector rejects ends the phrase instead of extending
+    # it: a fan or music is not speech, whatever its level.
+    assert buffer.feed(np.full(SAMPLE_RATE // 10, 0.9, dtype=np.float32)) is not None
+
+
+def test_open_voice_activity_returns_nothing_without_the_model(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "faster_whisper.vad", SimpleNamespace())
+
+    assert open_voice_activity() is None

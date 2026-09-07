@@ -14,20 +14,122 @@ import numpy as np
 from dotaudio.engine import Engine, RecognitionConfig
 
 SAMPLE_RATE = 16000
+LIVE_SPEECH_THRESHOLD = 0.0015
+
+# Live endpointing.  A phrase is allowed to run longer than it used to: the
+# rolling preview already shows the text, and Whisper reads a whole phrase far
+# better than a 1.5 s fragment of one.
+LIVE_PHRASE_SECONDS = 7.0
+LIVE_SILENCE_SECONDS = 0.5
+# Below roughly two seconds of audio Whisper returns phonetic guesses, so an
+# earlier preview would only flash wrong words at the user.
+LIVE_PREVIEW_MIN_SECONDS = 1.2
+LIVE_PREVIEW_INTERVAL_SECONDS = 0.5
+LIVE_PREVIEW_WINDOW_SECONDS = 6.0
+# Previews may not use the whole machine.  Asking for a new one before the
+# previous decode has had time to finish only grows the backlog, so the
+# interval follows the measured decode time on slower hardware.
+LIVE_PREVIEW_DUTY = 1.5
+# A pause at least this long is treated as a place where a phrase may be cut.
+PHRASE_SPLIT_SECONDS = 0.12
+
+DICTATION_PREVIEW_MIN_SECONDS = 0.8
+DICTATION_PREVIEW_INTERVAL_SECONDS = 0.8
+DICTATION_PREVIEW_WINDOW_SECONDS = 1.8
+
+
+class VoiceActivity:
+    """Streaming Silero VAD: one speech decision per 32 ms frame.
+
+    A loudness threshold cannot answer the question Live actually asks.
+    Measured on this machine, speech through WASAPI loopback sits near RMS
+    0.0006 while fan and white noise reach 0.02, so any single threshold either
+    drops the speech or accepts the noise.  The model separates them, and at
+    ~0.09 ms per frame it costs a fraction of a percent of one core.
+
+    The recurrent state is carried between calls, so a long utterance is scored
+    as one stream rather than as unrelated chunks.
+    """
+
+    FRAME = 512
+    CONTEXT = 64
+
+    def __init__(self, session, threshold=0.5, release=0.35):
+        self.session = session
+        self.threshold = threshold
+        # Speech dips below the trigger between words.  Releasing at a lower
+        # score keeps one phrase together instead of cutting it into pieces.
+        self.release = release
+        self.speaking = False
+        self._h = np.zeros((1, 1, 128), dtype=np.float32)
+        self._c = np.zeros((1, 1, 128), dtype=np.float32)
+        self._context = np.zeros((1, self.CONTEXT), dtype=np.float32)
+        self._pending = np.zeros(0, dtype=np.float32)
+
+    def __call__(self, audio):
+        """Return whether the chunk carries speech.
+
+        A chunk shorter than one frame keeps the previous answer: capture block
+        sizes are a device detail and must not toggle endpointing on their own.
+        """
+
+        samples = np.concatenate((self._pending, np.asarray(audio, dtype=np.float32).reshape(-1)))
+        usable = len(samples) - len(samples) % self.FRAME
+        self._pending = samples[usable:]
+        for start in range(0, usable, self.FRAME):
+            frame = samples[start : start + self.FRAME].reshape(1, -1)
+            batch = np.ascontiguousarray(np.concatenate((self._context, frame), axis=1))
+            output, self._h, self._c = self.session.run(
+                None, {"input": batch, "h": self._h, "c": self._c}
+            )
+            self._context = frame[:, -self.CONTEXT :]
+            score = float(np.asarray(output).reshape(-1)[0])
+            self.speaking = score >= (self.release if self.speaking else self.threshold)
+        return self.speaking
+
+
+def open_voice_activity():
+    """Build the streaming detector, or ``None`` when the model is unavailable.
+
+    The ONNX model ships with faster-whisper, so this never reaches the network.
+    """
+
+    try:
+        from faster_whisper.vad import get_vad_model
+
+        return VoiceActivity(get_vad_model().session)
+    except Exception:
+        # Live must still start with energy endpointing on a machine where
+        # onnxruntime cannot load.
+        return None
 
 
 class SpeechBuffer:
-    """Energy endpointing with pre-roll; Whisper VAD filters each utterance again."""
+    """Endpointing with pre-roll; Whisper VAD filters each utterance again."""
 
-    def __init__(self, max_seconds=4.0, silence_seconds=0.45, threshold=0.004):
+    def __init__(
+        self,
+        max_seconds=4.0,
+        silence_seconds=0.45,
+        threshold=0.004,
+        hold_threshold=None,
+        detector=None,
+    ):
         self.limit = int(max_seconds * SAMPLE_RATE)
         self.silence_limit = int(silence_seconds * SAMPLE_RATE)
         self.threshold = threshold
+        self.hold_threshold = threshold * 0.55 if hold_threshold is None else hold_threshold
+        self.detector = detector
+        # A phrase that reaches the length limit is cut back to the last pause
+        # instead of in the middle of a word.  Without this the caption ends on
+        # "без видеокар" and the next one opens with the leftover syllable.
+        self.split_limit = int(PHRASE_SPLIT_SECONDS * SAMPLE_RATE)
         self.position = 0
         self.start = 0
         self.frames = []
         self.size = 0
         self.quiet = 0
+        self.split = 0
         self.pre = deque()
         self.pre_size = 0
 
@@ -35,7 +137,12 @@ class SpeechBuffer:
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         if not len(audio):
             return None
-        speaking = float(np.sqrt(np.mean(audio * audio))) >= self.threshold
+        if self.detector is not None:
+            speaking = self.detector(audio)
+        else:
+            rms = float(np.sqrt(np.mean(audio * audio)))
+            gate = self.threshold if not self.frames else self.hold_threshold
+            speaking = rms >= gate
         if not self.frames and not speaking:
             self.pre.append(audio.copy())
             self.pre_size += len(audio)
@@ -52,18 +159,54 @@ class SpeechBuffer:
         self.frames.append(audio.copy())
         self.size += len(audio)
         self.position += len(audio)
-        self.quiet = 0 if speaking else self.quiet + len(audio)
-        if self.size >= self.limit or self.quiet >= self.silence_limit:
+        if speaking:
+            self.quiet = 0
+        else:
+            self.quiet += len(audio)
+            if self.quiet >= self.split_limit:
+                self.split = self.size - self.quiet
+        if self.quiet >= self.silence_limit:
             return self.flush()
+        if self.size >= self.limit:
+            return self.flush_at_limit()
         return None
 
     def flush(self):
         if not self.frames:
             return None
         result = (self.start / SAMPLE_RATE, np.concatenate(self.frames))
-        self.frames = []
-        self.size = self.quiet = 0
+        self._reset()
         return result
+
+    def flush_at_limit(self):
+        """Emit up to the last pause and keep the rest as the next phrase.
+
+        Speech that runs past the phrase limit is normal: the limit exists to
+        bound memory and latency, not because the speaker stopped.  Cutting at
+        the last pause keeps whole words on both sides of the boundary.
+        """
+
+        if not self.frames:
+            return None
+        audio = np.concatenate(self.frames)
+        split = self.split
+        if not 0 < split < len(audio):
+            return self.flush()
+        head, tail = audio[:split], audio[split:]
+        start = self.start
+        quiet = self.quiet
+        self._reset()
+        # The trailing pause belongs to the audio that is kept, so the next
+        # phrase is still endpointed by the silence the speaker is making now.
+        self.start = start + split
+        self.frames = [tail]
+        self.size = len(tail)
+        self.quiet = min(quiet, len(tail))
+        return (start / SAMPLE_RATE, head)
+
+    def _reset(self):
+        self.frames = []
+        self.size = self.quiet = self.split = 0
 
     def snapshot(self):
         """Return the active utterance without changing endpointing state."""
@@ -96,9 +239,10 @@ class LiveSession:
         on_partial: Callable[[dict[str, Any]], None] | None = None,
         *,
         catch_up: bool = False,
-        preview_min_seconds: float = 0.8,
-        preview_interval_seconds: float = 0.8,
-        preview_window_seconds: float = 1.8,
+        detector: Callable[[np.ndarray], bool] | None = None,
+        preview_min_seconds: float | None = None,
+        preview_interval_seconds: float | None = None,
+        preview_window_seconds: float | None = None,
     ):
         self.engine, self.config = engine, config
         self.on_segment, self.on_status, self.on_done = on_segment, on_status, on_done
@@ -106,15 +250,28 @@ class LiveSession:
         self.catch_up = catch_up
         self.preview_config = replace(config, live_preview=True, live_stream=False)
         if catch_up:
-            # ~1 s captions need a short rolling window, not a 4 s phrase wait.
-            # Tiny/base greedy decode of ~1 s audio is the practical budget.
-            self.buffer = SpeechBuffer(max_seconds=1.5, silence_seconds=0.24, threshold=0.004)
-            preview_min_seconds = min(preview_min_seconds, 0.4)
-            preview_interval_seconds = min(preview_interval_seconds, 0.35)
-            preview_window_seconds = min(preview_window_seconds, 1.05)
+            # Whisper reads a whole phrase much better than a fragment of one,
+            # and the rolling preview covers the wait.  The energy threshold
+            # stays as the fallback for machines without the VAD model; it is
+            # kept in sync with the UI signal threshold, so the interface no
+            # longer claims to hear audio that endpointing then discards.
+            self.buffer = SpeechBuffer(
+                max_seconds=LIVE_PHRASE_SECONDS,
+                silence_seconds=LIVE_SILENCE_SECONDS,
+                threshold=LIVE_SPEECH_THRESHOLD,
+                detector=detector,
+            )
+            preview_min_seconds = preview_min_seconds or LIVE_PREVIEW_MIN_SECONDS
+            preview_interval_seconds = preview_interval_seconds or LIVE_PREVIEW_INTERVAL_SECONDS
+            preview_window_seconds = preview_window_seconds or LIVE_PREVIEW_WINDOW_SECONDS
             self.queue = Queue(maxsize=1)
         else:
             self.buffer = SpeechBuffer(max_seconds=4.0, silence_seconds=0.45, threshold=0.004)
+            preview_min_seconds = preview_min_seconds or DICTATION_PREVIEW_MIN_SECONDS
+            preview_interval_seconds = (
+                preview_interval_seconds or DICTATION_PREVIEW_INTERVAL_SECONDS
+            )
+            preview_window_seconds = preview_window_seconds or DICTATION_PREVIEW_WINDOW_SECONDS
             self.queue = Queue(maxsize=2)
         self.cancel = Event()
         self.closed = Event()
@@ -125,16 +282,35 @@ class LiveSession:
         self._wake = Event()
         self._preview: tuple[float, np.ndarray, float, int] | None = None
         self._preview_generation = 0
+        self._preview_invalidated_through = 0
         self._preview_min_samples = max(1, int(preview_min_seconds * SAMPLE_RATE))
         self._preview_interval_samples = max(1, int(preview_interval_seconds * SAMPLE_RATE))
         self._preview_window_samples = max(
             self._preview_min_samples, int(preview_window_seconds * SAMPLE_RATE)
         )
         self._last_preview_position = -self._preview_interval_samples
+        # How long this machine actually needs per window.  Written by the
+        # worker thread and read by capture as a single float, which is enough
+        # to pace previews without another lock on the audio callback.
+        self._decode_seconds = 0.0
         self._last_preview_text = ""
+        self._stable_prefix = ""
+        self._last_preview_offset = None
         self._worker_started = False
         self._done_emitted = False
         self.thread = Thread(target=self._run, name="dotaudio-recognize", daemon=True)
+
+    def use_detector(self, detector):
+        """Attach voice activity before capture starts.
+
+        Loading the VAD model costs a few hundred milliseconds, so the caller
+        does it on the thread that prepares the model rather than on the UI
+        thread.  After ``start`` the buffer is owned by the audio callback.
+        """
+
+        with self._input_lock:
+            if self.capture is None:
+                self.buffer.detector = detector
 
     def _mark_done(self):
         if self._done_emitted:
@@ -184,7 +360,10 @@ class LiveSession:
 
     def _enqueue_final(self, chunk):
         # A final result supersedes any preview waiting for the same utterance.
-        self._clear_preview()
+        # A queued final has not produced text yet. In Live retain a result
+        # already decoding across this boundary, or slow inference can emit
+        # nothing indefinitely. Stop/cancel still invalidate in-flight work.
+        self._clear_preview(invalidate=not self.catch_up)
         if self.catch_up:
             dropped = self._put_or_replace_final(chunk)
             if dropped:
@@ -226,11 +405,14 @@ class LiveSession:
     def _schedule_preview(self):
         if self.on_partial is None:
             return
-        if not self.queue.empty():
+        # In Live mode a queued final is persistence work, not a reason to
+        # stop refreshing the caption.  If decoding falls behind, the user
+        # must still see the newest rolling window instead of a frozen phrase.
+        if not self.catch_up and not self.queue.empty():
             return
         if self.buffer.size < self._preview_min_samples:
             return
-        if self.buffer.position - self._last_preview_position < self._preview_interval_samples:
+        if self.buffer.position - self._last_preview_position < self._preview_interval():
             return
         snapshot = self.buffer.snapshot()
         if snapshot is None:
@@ -248,9 +430,32 @@ class LiveSession:
             self._preview = (offset, audio.copy(), monotonic(), self._preview_generation)
         self._wake.set()
 
-    def _clear_preview(self):
+    def _preview_interval(self):
+        """Space previews by the configured cadence or by the machine's speed.
+
+        On hardware that decodes a window in well under the interval this is
+        the configured value.  Where a window takes longer, asking at the same
+        rate would queue work that is stale before it starts.
+        """
+
+        if not self.catch_up:
+            return self._preview_interval_samples
+        measured = int(self._decode_seconds * LIVE_PREVIEW_DUTY * SAMPLE_RATE)
+        return max(self._preview_interval_samples, measured)
+
+    def _note_decode(self, seconds):
+        """Follow the measured decode time, favouring the recent past."""
+
+        if self._decode_seconds <= 0.0:
+            self._decode_seconds = seconds
+        else:
+            self._decode_seconds += (seconds - self._decode_seconds) * 0.3
+
+    def _clear_preview(self, *, invalidate=True):
         with self._preview_lock:
             self._preview_generation += 1
+            if invalidate:
+                self._preview_invalidated_through = self._preview_generation
             self._preview = None
 
     def stop(self, cancel=False):
@@ -278,6 +483,8 @@ class LiveSession:
             self.on_done(self.failed, self.cancel.is_set())
 
     def _next_task(self):
+        # Finals must make progress even while capture keeps replacing previews.
+        # Catch-up already bounds this queue to the newest unstarted phrase.
         try:
             offset, audio = self.queue.get_nowait()
             return "final", (offset, audio)
@@ -293,6 +500,9 @@ class LiveSession:
     def _has_work(self):
         if not self.queue.empty():
             return True
+        return self._has_preview()
+
+    def _has_preview(self):
         with self._preview_lock:
             return self._preview is not None
 
@@ -300,6 +510,21 @@ class LiveSession:
         with self._preview_lock:
             return (
                 generation == self._preview_generation
+                and not self.cancel.is_set()
+                and not self.closed.is_set()
+            )
+
+    def _preview_can_emit(self, generation):
+        """Allow an in-flight preview to finish when only a newer one arrived.
+
+        A rolling replacement should affect the next decoder turn, not erase
+        useful text from a decode that already started. Stop and cancel
+        explicitly invalidate all older generations.
+        """
+
+        with self._preview_lock:
+            return (
+                generation > self._preview_invalidated_through
                 and not self.cancel.is_set()
                 and not self.closed.is_set()
             )
@@ -323,23 +548,38 @@ class LiveSession:
         return " ".join(new_words[:count])
 
     def _transcribe_preview(self, offset, audio, requested_at, generation):
+        # A capture callback can replace the snapshot after _next_task() has
+        # selected it but before native inference starts.  Do not spend a
+        # decoder turn on that already obsolete window: the latest snapshot is
+        # what keeps the on-screen caption close to the current sound.
+        if not self._preview_is_current(generation):
+            return
         received: list[dict[str, Any]] = []
 
         def collect(segment):
             received.append(dict(segment))
 
+        started = monotonic()
         result = self.engine.transcribe(
             audio, self.preview_config, self.cancel, collect, self.on_status
         )
+        self._note_decode(monotonic() - started)
         if not received and result:
             received.extend(dict(segment) for segment in result)
-        if not self._preview_is_current(generation):
+        if not self._preview_can_emit(generation):
             return
         text = self._text(received)
         if not text:
             return
-        stable_text = self._common_word_prefix(self._last_preview_text, text)
+        if offset != self._last_preview_offset:
+            self._last_preview_text = ""
+            self._stable_prefix = ""
+            self._last_preview_offset = offset
+        agreed = self._common_word_prefix(self._last_preview_text, text)
         self._last_preview_text = text
+        if agreed.startswith(self._stable_prefix):
+            self._stable_prefix = agreed
+        stable_text = self._stable_prefix
         final_end = offset + len(audio) / SAMPLE_RATE
         try:
             self.on_partial({
@@ -355,16 +595,26 @@ class LiveSession:
 
     def _transcribe_final(self, offset, audio):
         self._last_preview_text = ""
+        self._stable_prefix = ""
+        self._last_preview_offset = None
+        emitted = False
 
         def emit(segment):
+            nonlocal emitted
             if not self.cancel.is_set():
+                emitted = True
                 self.on_segment({
                     **segment,
                     "start": segment["start"] + offset,
                     "end": segment["end"] + offset,
+                    "audio_end": offset + len(audio) / SAMPLE_RATE,
                 })
 
+        started = monotonic()
         self.engine.transcribe(audio, self.config, self.cancel, emit, self.on_status)
+        self._note_decode(monotonic() - started)
+        if self.catch_up and not emitted and not self.cancel.is_set():
+            self.on_status("live_no_text")
 
     def _run(self):
         error = ""

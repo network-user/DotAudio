@@ -25,12 +25,24 @@ from dotaudio.capture import (
 from dotaudio.desktop import MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, Hotkey
 from dotaudio.engine import Engine, RecognitionConfig
 from dotaudio.karaoke import export_ass, render_video
-from dotaudio.pipeline import LiveSession
+from dotaudio.pipeline import (
+    LIVE_SPEECH_THRESHOLD,
+    SAMPLE_RATE,
+    LiveSession,
+    open_voice_activity,
+)
 from dotaudio.storage import Store
-from dotaudio.transcripts import export_transcript, match_keywords, regroup_for_subtitles
+from dotaudio.transcripts import (
+    apply_keyword_cooldown,
+    export_transcript,
+    match_keywords,
+    regroup_for_subtitles,
+)
+
+MODEL_BY_PROFILE = {"fast": "base", "balanced": "small", "quality": "large-v3"}
 
 DEFAULTS = {
-    "model": "base", "device": "auto", "language": "ru", "task": "transcribe",
+    "model": "small", "device": "auto", "language": "ru", "task": "transcribe",
     "backend": "local", "server_url": "http://127.0.0.1:8765", "source": "microphone",
     "live_source": "system",
     "input_device": "", "auto_paste": True, "keywords": "Whisper, искусственный интеллект",
@@ -38,6 +50,8 @@ DEFAULTS = {
     "island_opacity": 0.94, "island_click_through": False, "island_snap": True,
     "island_x": -1, "island_y": 32,
     "caption_overlay": True, "caption_size": "md", "caption_contrast": "normal",
+    "caption_position": "bottom", "caption_x": -1, "caption_y": -1,
+    "caption_screen": -1, "caption_autohide": False, "caption_locked": True,
     "dictate_hotkey": "Ctrl+Alt+Space", "island_hotkey": "Ctrl+Alt+O",
     "paste_last_hotkey": "Shift+Alt+Z", "dictate_hold": False,
     # Kept in local settings so terminology and snippets never leave the PC.
@@ -46,6 +60,8 @@ DEFAULTS = {
 
 LIVE_SETTINGS = {
     "caption_overlay", "caption_size", "caption_contrast",
+    "caption_position", "caption_x", "caption_y", "caption_screen",
+    "caption_autohide", "caption_locked",
     "island_opacity", "island_snap",
 }
 
@@ -70,7 +86,11 @@ STATUS_LABELS = {
     "model_ready": "Модель подготовлена",
     "remote_model_managed_by_server": "Модель подготовит удалённый сервер",
     "live_backlog": "Догоняем живой звук…",
+    "live_no_text": "Звук есть, но речь не распознана. Проверьте источник и язык.",
 }
+
+
+MODEL_IDLE_RELEASE_MS = 10 * 60 * 1000
 
 
 class Controller(QObject):
@@ -85,6 +105,7 @@ class Controller(QObject):
     jobFinished = Signal(str, str, bool)
     statusArrived = Signal(str)
     levelArrived = Signal(float)
+    captureStarted = Signal(str, float)
     devicesArrived = Signal(object)
     logArrived = Signal(str, str)
     modelProgressArrived = Signal(str, str)
@@ -118,12 +139,17 @@ class Controller(QObject):
         self._notice = ""
         self._level = 0.0
         self._last_signal_at = 0.0
+        self._input_state = "Ожидает запуска"
         self._segments, self._history, self._hits, self._devices = [], [], [], []
         self._partial_caption = ""
+        self._partial_end = 0.0
+        self._final_end = 0.0
         self._confirmed_caption = ""
         self._caption_revision = 0
         self._live_phase = "idle"
         self._live_latency_ms = 0.0
+        self._live_diagnostic = ""
+        self._capture_started_at = None
         self._session_id, self._media_url, self._query = "", "", ""
         self._session_title = ""
         self._session_mode = ""
@@ -149,6 +175,12 @@ class Controller(QObject):
         self._rendering = False
         self._last_transcript = ""
         self._hold_active = False
+        self._keyword_cool: dict[str, float] = {}
+        self._prepare_cancel = threading.Event()
+        self._model_prepare_done = threading.Event()
+        self._prepared_model = ""
+        self._model_prepare_error = ""
+        self._model_library = [Engine.disk_status(name) for name in ("tiny", "base", "small", "medium", "large-v3", "turbo")]
         self._edit_undo: list[tuple[int, str, str]] = []
         self._edit_redo: list[tuple[int, str, str]] = []
         self.segmentArrived.connect(self._on_segment)
@@ -156,6 +188,7 @@ class Controller(QObject):
         self.jobFinished.connect(self._on_finished)
         self.statusArrived.connect(self._set_status)
         self.levelArrived.connect(self._set_level)
+        self.captureStarted.connect(self._on_capture_started)
         self.devicesArrived.connect(self._set_devices)
         self.logArrived.connect(self._on_log)
         self.modelProgressArrived.connect(self._on_model_progress)
@@ -174,6 +207,9 @@ class Controller(QObject):
         self._cancel_release = QTimer(self)
         self._cancel_release.setSingleShot(True)
         self._cancel_release.timeout.connect(self._release_cancelled_jobs)
+        self._idle_model_release = QTimer(self)
+        self._idle_model_release.setSingleShot(True)
+        self._idle_model_release.timeout.connect(self._release_idle_model)
         self._hold_timer = QTimer(self)
         self._hold_timer.setInterval(50)
         self._hold_timer.timeout.connect(self._poll_hold)
@@ -198,14 +234,14 @@ class Controller(QObject):
     @Property(str, notify=changed)
     def elapsed(self): return self._elapsed
 
-    @Property(float, notify=changed)
+    @Property(float, notify=levelChanged)
     def level(self): return self._level
 
     @Property(str, notify=changed)
     def inputState(self):
         if self._state != "recording":
             return "Ожидает запуска"
-        if self._level >= 0.001:
+        if self._level >= LIVE_SPEECH_THRESHOLD:
             return "Сигнал есть"
         if time.monotonic() - self._last_signal_at < 1.5:
             return "Тишина"
@@ -246,6 +282,9 @@ class Controller(QObject):
 
     @Property("QVariantMap", notify=changed)
     def modelState(self): return self._model_state
+
+    @Property("QVariantList", notify=changed)
+    def modelLibrary(self): return self._model_library
 
     @Property(bool, notify=changed)
     def modelPreparing(self): return self._model_preparing
@@ -306,6 +345,20 @@ class Controller(QObject):
     @Property(float, notify=liveStateChanged)
     def liveLatencyMs(self): return self._live_latency_ms
 
+    @Property(str, notify=changed)
+    def liveStatusText(self):
+        if self._live_phase == "starting":
+            return "Готовим модель…"
+        if self._live_phase == "stopping":
+            return "Завершаем последние фразы…"
+        if self._live_diagnostic:
+            return STATUS_LABELS[self._live_diagnostic]
+        if self._live_phase == "decoding":
+            return "Распознаём речь…"
+        if self._level >= LIVE_SPEECH_THRESHOLD:
+            return "Звук поступает · собираем фразу"
+        return "Слушаем · ожидаем речь"
+
     @Property(str, notify=captionChanged)
     def partialCaption(self): return self._partial_caption
 
@@ -346,18 +399,31 @@ class Controller(QObject):
             "profile": ("fast", "balanced", "quality"),
             "caption_size": ("sm", "md", "lg"),
             "caption_contrast": ("normal", "high"),
+            "caption_position": ("top", "bottom", "floating"),
         }
         if name in choices and value not in choices[name]:
             return
-        if name in ("caption_overlay", "auto_paste", "dictate_hold", "island_click_through", "island_snap"):
+        if name in (
+            "caption_overlay", "auto_paste", "dictate_hold", "island_click_through",
+            "island_snap", "caption_autohide", "caption_locked",
+        ):
             value = bool(value)
+        if name in ("caption_x", "caption_y", "caption_screen"):
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                return
         self._settings[name] = value
         if name == "live_source":
             self._settings["source"] = value if value in ("microphone", "system") else "system"
         elif name == "source":
             self._settings["live_source"] = value
         if name == "profile":
-            self._settings["model"] = {"fast": "tiny", "balanced": "base", "quality": "large-v3"}[value]
+            # Measured on this CPU with the live window: base decodes a four
+            # second phrase in about 130 ms and small in about 360 ms, so the
+            # everyday profile can afford the model that actually writes
+            # Russian.  On tiny "русской речи" comes back as "меру с каиричев".
+            self._settings["model"] = MODEL_BY_PROFILE[value]
         self.store.save_settings(self._settings)
         if name == "model":
             self._model_state = {
@@ -495,8 +561,13 @@ class Controller(QObject):
                     self._live_phase = "decoding"
                 elif value == "live_backlog":
                     self._live_phase = "backlog"
+                    self._live_diagnostic = value
+                elif value == "live_no_text":
+                    self._live_phase = "no_text"
+                    self._live_diagnostic = value
                 elif value == "completed" and self.recording:
-                    self._live_phase = "listening"
+                    if not self._live_diagnostic:
+                        self._live_phase = "listening"
             if value != self._last_status:
                 self._last_status = value
                 self._record_log("info", label)
@@ -527,6 +598,10 @@ class Controller(QObject):
 
     def _on_model_finished(self, model, device, error):
         self._model_preparing = False
+        self._prepared_model = "" if error else model
+        self._model_prepare_error = str(error or "")
+        self._model_prepare_done.set()
+        self._model_library = [Engine.disk_status(name) for name in ("tiny", "base", "small", "medium", "large-v3", "turbo")]
         if error:
             self._model_state = {"phase": "error", "model": model, "message": error}
             self._record_log("error", error)
@@ -535,16 +610,31 @@ class Controller(QObject):
             message = f"Модель {model} готова {placement}."
             self._model_state = {"phase": "ready", "model": model, "message": message}
             self._record_log("success", message)
+            self._arm_idle_model_release()
         self.changed.emit()
 
     def _set_level(self, value):
         self._level = max(0.0, min(1.0, value)) if self.recording else 0.0
-        if self._level >= 0.001:
+        if self._level >= LIVE_SPEECH_THRESHOLD:
             self._last_signal_at = time.monotonic()
-            if self.liveActive and self._live_phase == "listening":
-                self._live_phase = "speech"
-                self.liveStateChanged.emit()
         self.levelChanged.emit()
+        # Уровень приходит примерно десять раз в секунду. Общий ``changed``
+        # пересчитывал бы все привязки интерфейса на каждый блок звука и
+        # заставлял статус мигать между двумя формулировками, поэтому он
+        # уходит только когда меняется словесное состояние входа.
+        state = self.inputState
+        if state != self._input_state:
+            self._input_state = state
+            self.changed.emit()
+
+    def _on_capture_started(self, sid, started_at):
+        job = self._jobs.get(sid)
+        if job is None or job.get("mode") != "live" or sid != self._session_id:
+            return
+        self._capture_started_at = started_at
+        self._started = started_at
+        self._last_signal_at = started_at
+        self._elapsed = "00:00"
         self.changed.emit()
 
     def _set_devices(self, value):
@@ -807,16 +897,46 @@ class Controller(QObject):
 
     def _tick(self):
         if self._jobs:
+            if self.liveActive and self._capture_started_at is None:
+                return
             seconds = int(time.monotonic() - self._started)
             self._elapsed = f"{seconds // 60:02}:{seconds % 60:02}"
             self.changed.emit()
+
+    def _arm_idle_model_release(self):
+        """Unload the heavy ASR instance after a quiet period, not its files."""
+
+        if not self._jobs and not self._model_preparing:
+            self._idle_model_release.start(MODEL_IDLE_RELEASE_MS)
+
+    def _release_idle_model(self):
+        if self._jobs or self._model_preparing:
+            return
+        if not self.engine.release_cached_model():
+            return
+        self._prepared_model = ""
+        self._model_state = {
+            "phase": "idle",
+            "model": self._settings["model"],
+            "message": "Модель выгружена после 10 минут простоя.",
+        }
+        self._record_log("info", "Модель выгружена из памяти после простоя.")
+        self.changed.emit()
 
     @Slot()
     def prepareSelectedModel(self):
         if self._jobs or self._model_preparing:
             return
-        config = self._config()
+        self._idle_model_release.stop()
+        # Prepare the model for the first live window as well as for the final
+        # decode.  This warms the decoder in the worker before the user starts
+        # speaking, so the first caption does not pay the cold-start cost.
+        config = self._config(live_stream=True)
         model = config.model
+        self._prepare_cancel = threading.Event()
+        self._model_prepare_done.clear()
+        self._prepared_model = ""
+        self._model_prepare_error = ""
         self._model_preparing = True
         self._model_state = {
             "phase": "downloading",
@@ -829,13 +949,32 @@ class Controller(QObject):
         def prepare():
             try:
                 self.modelProgressArrived.emit(model, "Загружаем или проверяем файлы модели…")
+                if self._prepare_cancel.is_set():
+                    self.modelFinished.emit(model, "", "Подготовка отменена")
+                    return
                 device = self.engine.prepare(config, lambda status: self.statusArrived.emit(status))
+                if self._prepare_cancel.is_set():
+                    self.modelFinished.emit(model, "", "Подготовка отменена")
+                    return
             except Exception as exc:
                 self.modelFinished.emit(model, "", str(exc))
             else:
                 self.modelFinished.emit(model, device, "")
 
         threading.Thread(target=prepare, name="dotaudio-model-prepare", daemon=True).start()
+
+    @Slot()
+    def cancelModelPrepare(self):
+        if not self._model_preparing:
+            return
+        self._prepare_cancel.set()
+        self._model_state = {
+            "phase": "idle",
+            "model": self._settings["model"],
+            "message": "Отменяем подготовку модели…",
+        }
+        self._record_log("warning", "Подготовка модели отменена.")
+        self.changed.emit()
 
     @Slot()
     def hotkeyRecord(self):
@@ -893,11 +1032,14 @@ class Controller(QObject):
             return
         if self._jobs:
             return
+        self._idle_model_release.stop()
         if not hotkey:
             self.desktop.target = 0
         self._notice = ""
         self._segments = []
         self._partial_caption = ""
+        self._partial_end = 0.0
+        self._final_end = 0.0
         self._confirmed_caption = ""
         self._caption_revision += 1
         self._edit_undo = []
@@ -921,6 +1063,8 @@ class Controller(QObject):
             self._settings["caption_overlay"] = True
             self._live_phase = "starting"
             self._live_latency_ms = 0.0
+            self._live_diagnostic = ""
+            self._capture_started_at = None
         self._state = "recording"
         self._status = "Готовим модель для Live…" if mode == "live" else "Слушаю · модель загрузится при первой фразе"
         self._last_status = ""
@@ -967,7 +1111,15 @@ class Controller(QObject):
                         return
                     live.failed = error
                     threading.Thread(target=live.stop, kwargs={"cancel": True}, daemon=True).start()
-                args = {"on_audio": live.feed, "on_level": self.levelArrived.emit, "on_error": audio_error}
+                capture_clock = {"started": False}
+
+                def on_audio(audio, sid=sid, live=live, clock=capture_clock, mode=mode):
+                    if mode == "live" and not clock["started"] and len(audio):
+                        clock["started"] = True
+                        self.captureStarted.emit(sid, time.monotonic() - len(audio) / SAMPLE_RATE)
+                    live.feed(audio)
+
+                args = {"on_audio": on_audio, "on_level": self.levelArrived.emit, "on_error": audio_error}
                 if url:
                     capture = StreamCapture(url, **args)
                 else:
@@ -976,7 +1128,19 @@ class Controller(QObject):
                 def start(live=live, capture=capture, sid=sid, config=config, mode=mode):
                     try:
                         if mode == "live":
-                            self.engine.prepare(config, self.statusArrived.emit)
+                            live.use_detector(open_voice_activity())
+                            if self._prepared_model == config.model:
+                                self.statusArrived.emit("model_ready")
+                            elif self._model_preparing:
+                                # Startup preparation owns model loading.  Do
+                                # not race it with a second WhisperModel
+                                # construction when Live is started early.
+                                self._model_prepare_done.wait()
+                                if self._model_prepare_error:
+                                    raise RuntimeError(self._model_prepare_error)
+                                self.statusArrived.emit("model_ready")
+                            else:
+                                self.engine.prepare(config, self.statusArrived.emit)
                         if live.cancel.is_set() or live.closed.is_set():
                             live.stop(cancel=True)
                             return
@@ -1008,9 +1172,23 @@ class Controller(QObject):
 
     @Slot()
     def forceStop(self):
-        """Abort immediately and release the island if native decode ignores cancel."""
+        """Stop now, without waiting for a cooperative native decoder."""
 
+        if not self._jobs:
+            return
+        self._notice = (
+            "Обработка остановлена принудительно. "
+            "Нераспознанный хвост записи не сохранён."
+        )
+        self._record_log("warning", "Запрошена принудительная остановка.")
         self.cancel()
+        # ``cancel`` gives normal cancellation up to 1.5 seconds for native
+        # CTranslate2 code to return.  The explicit emergency action must not
+        # keep the island and controls busy for that grace period.  The worker
+        # still owns its native call, but its late jobFinished signal is ignored
+        # because the session below is already closed in the controller.
+        self._cancel_release.stop()
+        self._release_cancelled_jobs()
 
     def _release_cancelled_jobs(self):
         """Unblock the UI when CTranslate2 has not returned after cancel."""
@@ -1057,6 +1235,7 @@ class Controller(QObject):
             self._notice = "Выберите поддерживаемый аудио- или видеофайл."
             self.changed.emit()
             return
+        self._idle_model_release.stop()
         sid = self.store.create_session(media.name, "media", str(media), self._settings["model"])
         self._session_id = sid
         self._segments = []
@@ -1094,19 +1273,33 @@ class Controller(QObject):
             self._segments = [*self._segments, {**segment, "id": identifiers[0]}]
             self.segmentsChanged.emit()
         if job["mode"] == "live" and sid == self._session_id:
-            self._confirmed_caption = str(segment.get("text", "")).strip()
-            self._partial_caption = ""
-            self._caption_revision += 1
+            segment_end = float(segment.get("end", 0.0))
+            self._final_end = max(self._final_end, float(segment.get("audio_end", segment_end)))
+            self._live_diagnostic = ""
+            # The recogniser can finish an older phrase while the pipeline has
+            # already shown a preview of the next one.  Persist every final,
+            # but never make the visible caption jump backwards in time.
+            replaces_preview = self._final_end >= self._partial_end
+            if replaces_preview:
+                self._confirmed_caption = str(segment.get("text", "")).strip()
+                self._partial_caption = ""
+                self._partial_end = 0.0
+                self._caption_revision += 1
             self._live_latency_ms = max(
                 0.0,
-                (time.monotonic() - self._started - float(segment.get("end", 0.0))) * 1000,
+                (time.monotonic() - self._started - segment_end) * 1000,
             )
-            self._live_phase = "listening" if self.recording else "stopping"
-            self.captionChanged.emit()
+            if replaces_preview:
+                self._live_phase = "listening" if self.recording else "stopping"
+                self.captionChanged.emit()
             self.liveStateChanged.emit()
         if job["mode"] == "monitor":
             keywords = [w.strip() for w in str(self._settings["keywords"]).split(",") if w.strip()]
-            matches = match_keywords(segment["text"], keywords)
+            matches = apply_keyword_cooldown(
+                match_keywords(segment["text"], keywords),
+                self._keyword_cool,
+                time.monotonic(),
+            )
             if matches:
                 self._hits.insert(0, {**segment, "source": job["name"], "matches": ", ".join(matches), "session_id": sid})
                 self._hits = self._hits[:200]
@@ -1130,6 +1323,9 @@ class Controller(QObject):
         text = str(segment.get("text", "")).strip()
         if not text:
             return
+        end = float(segment.get("end", 0.0))
+        if end < self._partial_end or end <= self._final_end:
+            return
         stable = str(segment.get("stable_text", "")).strip()
         if stable and text.startswith(stable):
             self._confirmed_caption = stable
@@ -1138,8 +1334,9 @@ class Controller(QObject):
             self._confirmed_caption = ""
             self._partial_caption = text
         self._caption_revision += 1
+        self._live_diagnostic = ""
         self._live_phase = "speech"
-        end = float(segment.get("end", 0.0))
+        self._partial_end = end
         self._live_latency_ms = max(0.0, (time.monotonic() - self._started - end) * 1000)
         self.captionChanged.emit()
         self.liveStateChanged.emit()
@@ -1169,8 +1366,11 @@ class Controller(QObject):
         if not self._jobs:
             self._state = "idle"
             self._level = 0
+            self._input_state = self.inputState
+            self.levelChanged.emit()
             if job["mode"] == "live":
                 self._partial_caption = ""
+                self._partial_end = 0.0
                 self._live_phase = "error" if error else "idle"
                 self._caption_revision += 1
                 self.captionChanged.emit()
@@ -1178,6 +1378,7 @@ class Controller(QObject):
             self._status = "Остановлено" if cancelled else "Ошибка обработки" if error else "Готово · история сохранена"
             if not error:
                 self._record_log("success", self._status)
+            self._arm_idle_model_release()
         self.refreshHistory(self._query)
         self.changed.emit()
         if self._closing and not self._jobs:
