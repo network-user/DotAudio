@@ -20,7 +20,11 @@ Rectangle {
 
     readonly property bool livePage: bridge.page === "live"
     readonly property var currentSegment: bridge.segments.length ? bridge.segments[bridge.segments.length - 1] : null
-    readonly property var captionWords: currentSegment && currentSegment.words ? currentSegment.words : []
+    readonly property string caption: bridge.liveActive ? bridge.displayCaption : bridge.caption
+    readonly property bool usesSegmentWords: !bridge.liveActive || (bridge.partialCaption.length === 0
+                                            && currentSegment !== null
+                                            && String(currentSegment.text) === caption)
+    readonly property var captionWords: usesSegmentWords && currentSegment && currentSegment.words ? currentSegment.words : []
     readonly property string captionKey: currentSegment ? String(currentSegment.id) : ""
     readonly property int recSize: phase === "ready" ? 28 : 32
 
@@ -163,7 +167,7 @@ Rectangle {
             CaptionText {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                text: bridge.caption
+                text: root.caption
                 words: root.captionWords
                 segmentKey: root.captionKey
                 pixelSize: 15

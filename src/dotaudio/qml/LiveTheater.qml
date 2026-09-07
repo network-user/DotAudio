@@ -17,7 +17,11 @@ Rectangle {
 
     readonly property var currentSegment: bridge.segments.length ? bridge.segments[bridge.segments.length - 1] : null
     readonly property var previousSegment: bridge.segments.length >= 2 ? bridge.segments[bridge.segments.length - 2] : null
-    readonly property var captionWords: currentSegment && currentSegment.words ? currentSegment.words : []
+    readonly property string caption: bridge.displayCaption
+    readonly property bool usesSegmentWords: bridge.partialCaption.length === 0
+                                            && currentSegment !== null
+                                            && String(currentSegment.text) === caption
+    readonly property var captionWords: usesSegmentWords && currentSegment.words ? currentSegment.words : []
     readonly property string captionKey: currentSegment ? String(currentSegment.id) : ""
     readonly property string sourceLabel: bridge.liveSourceLabel
     readonly property bool overlayOn: Boolean(bridge.settings.caption_overlay)
@@ -92,8 +96,8 @@ Rectangle {
 
                 CaptionText {
                     width: parent.width
-                    visible: bridge.caption.length > 0
-                    text: bridge.caption
+                    visible: root.caption.length > 0
+                    text: root.caption
                     words: root.captionWords
                     segmentKey: root.captionKey
                     pixelSize: 32
@@ -103,9 +107,13 @@ Rectangle {
                 }
 
                 Text {
-                    visible: bridge.caption.length === 0
+                    visible: root.caption.length === 0
                     width: parent.width
-                    text: "Запустите Live, текст появится после первой фразы"
+                    text: bridge.liveActive
+                          ? bridge.livePhase === "starting" ? "Готовим модель…"
+                          : bridge.livePhase === "backlog" ? "Модель не успевает за звуком"
+                          : "Слушаю"
+                          : "Запустите Live, текст появится после первой фразы"
                     color: Theme.muted
                     font.pixelSize: 18
                     font.family: Theme.fontFamily
@@ -144,7 +152,7 @@ Rectangle {
             }
             Connections {
                 target: bridge
-                function onChanged() {
+                function onSegmentsChanged() {
                     if (tape.count > 0)
                         tape.positionViewAtEnd()
                 }

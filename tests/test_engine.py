@@ -149,3 +149,21 @@ def test_media_recipe_keeps_sung_words_and_word_timings(monkeypatch) -> None:
     assert Engine().transcribe(np.zeros(1600), RecognitionConfig(device="cpu", media_mode=True)) == [
         {"start": 0.0, "end": 1.0, "text": "привет", "words": [{"text": "привет", "start": 0.1, "end": 0.5}]}
     ]
+
+
+def test_live_preview_recipe_uses_greedy_decoding(monkeypatch) -> None:
+    class FakeModel:
+        def transcribe(self, _source, **kwargs):
+            assert kwargs["beam_size"] == 1
+            assert kwargs["word_timestamps"] is False
+            return iter([_Segment(0, 1, "черновик")]), object()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=lambda *_args, **_kwargs: FakeModel()),
+    )
+    result = Engine().transcribe(
+        np.zeros(1600), RecognitionConfig(device="cpu", live_preview=True)
+    )
+    assert result[0]["text"] == "черновик"

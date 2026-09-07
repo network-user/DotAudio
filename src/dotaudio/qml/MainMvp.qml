@@ -32,6 +32,14 @@ ApplicationWindow {
             return "modePick"
         if (bridge.notice.length > 0 && !bridge.recording && !bridge.busy)
             return "error"
+        if (bridge.liveActive && bridge.displayCaption.length)
+            return "caption"
+        if (bridge.liveActive && bridge.livePhase === "quiet")
+            return "quiet"
+        if (bridge.liveActive && (bridge.livePhase === "process" || bridge.livePhase === "decoding"))
+            return "process"
+        if (bridge.liveActive)
+            return "listen"
         if (bridge.recording && bridge.caption.length)
             return "caption"
         if (bridge.recording && quietHeld && bridge.inputState === "Нет входного сигнала")

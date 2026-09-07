@@ -37,7 +37,7 @@ DEFAULTS = {
     "channels": "", "profile": "balanced", "output_device": "", "loopback_device": "",
     "island_opacity": 0.94, "island_click_through": False, "island_snap": True,
     "island_x": -1, "island_y": 32,
-    "caption_overlay": False, "caption_size": "md", "caption_contrast": "normal",
+    "caption_overlay": True, "caption_size": "md", "caption_contrast": "normal",
     "dictate_hotkey": "Ctrl+Alt+Space", "island_hotkey": "Ctrl+Alt+O",
     # Kept in local settings so terminology and snippets never leave the PC.
     "dictionary": [], "snippets": [],
@@ -67,13 +67,19 @@ STATUS_LABELS = {
     "cancelled": "Обработка отменена",
     "model_ready": "Модель подготовлена",
     "remote_model_managed_by_server": "Модель подготовит удалённый сервер",
+    "live_backlog": "Модель отстаёт от живого звука…",
 }
 
 
 class Controller(QObject):
     changed = Signal()
+    captionChanged = Signal()
+    segmentsChanged = Signal()
+    levelChanged = Signal()
+    liveStateChanged = Signal()
     islandRequested = Signal()
     segmentArrived = Signal(str, object)
+    partialArrived = Signal(str, object)
     jobFinished = Signal(str, str, bool)
     statusArrived = Signal(str)
     levelArrived = Signal(float)
@@ -107,6 +113,11 @@ class Controller(QObject):
         self._level = 0.0
         self._last_signal_at = 0.0
         self._segments, self._history, self._hits, self._devices = [], [], [], []
+        self._partial_caption = ""
+        self._confirmed_caption = ""
+        self._caption_revision = 0
+        self._live_phase = "idle"
+        self._live_latency_ms = 0.0
         self._session_id, self._media_url, self._query = "", "", ""
         self._session_title = ""
         self._session_mode = ""
@@ -133,6 +144,7 @@ class Controller(QObject):
         self._edit_undo: list[tuple[int, str, str]] = []
         self._edit_redo: list[tuple[int, str, str]] = []
         self.segmentArrived.connect(self._on_segment)
+        self.partialArrived.connect(self._on_partial)
         self.jobFinished.connect(self._on_finished)
         self.statusArrived.connect(self._set_status)
         self.levelArrived.connect(self._set_level)
@@ -264,7 +276,33 @@ class Controller(QObject):
     def text(self): return " ".join(s["text"].strip() for s in self._segments)
 
     @Property(str, notify=changed)
-    def caption(self): return self._segments[-1]["text"] if self._segments else ""
+    def caption(self):
+        if self.liveActive:
+            return self.displayCaption
+        return self._segments[-1]["text"] if self._segments else ""
+
+    @Property(bool, notify=liveStateChanged)
+    def liveActive(self):
+        return any(job.get("mode") == "live" for job in self._jobs.values())
+
+    @Property(str, notify=liveStateChanged)
+    def livePhase(self): return self._live_phase
+
+    @Property(float, notify=liveStateChanged)
+    def liveLatencyMs(self): return self._live_latency_ms
+
+    @Property(str, notify=captionChanged)
+    def partialCaption(self): return self._partial_caption
+
+    @Property(str, notify=captionChanged)
+    def confirmedCaption(self): return self._confirmed_caption
+
+    @Property(str, notify=captionChanged)
+    def displayCaption(self):
+        return " ".join(part for part in (self._confirmed_caption, self._partial_caption) if part).strip()
+
+    @Property(int, notify=captionChanged)
+    def captionRevision(self): return self._caption_revision
 
     @Property(bool, constant=True)
     def hotkeysAvailable(self): return self.desktop.available
@@ -423,10 +461,20 @@ class Controller(QObject):
         if self._jobs:
             label = STATUS_LABELS.get(value, value)
             self._status = label
+            if self.liveActive:
+                if value in {"loading_model", "model_ready"}:
+                    self._live_phase = "starting" if value == "loading_model" else "listening"
+                elif value.startswith("transcribing_"):
+                    self._live_phase = "decoding"
+                elif value == "live_backlog":
+                    self._live_phase = "backlog"
+                elif value == "completed" and self.recording:
+                    self._live_phase = "listening"
             if value != self._last_status:
                 self._last_status = value
                 self._record_log("info", label)
-            self.changed.emit()
+            self.liveStateChanged.emit()
+        self.changed.emit()
 
     def _record_log(self, tone, message):
         entry = {
@@ -466,6 +514,10 @@ class Controller(QObject):
         self._level = max(0.0, min(1.0, value)) if self.recording else 0.0
         if self._level >= 0.001:
             self._last_signal_at = time.monotonic()
+            if self.liveActive and self._live_phase == "listening":
+                self._live_phase = "speech"
+                self.liveStateChanged.emit()
+        self.levelChanged.emit()
         self.changed.emit()
 
     def _set_devices(self, value):
@@ -784,6 +836,9 @@ class Controller(QObject):
             self.desktop.target = 0
         self._notice = ""
         self._segments = []
+        self._partial_caption = ""
+        self._confirmed_caption = ""
+        self._caption_revision += 1
         self._edit_undo = []
         self._edit_redo = []
         self._media_url = ""
@@ -799,8 +854,14 @@ class Controller(QObject):
             "live": "Живые субтитры",
             "monitor": "Мониторинг эфира",
         }[mode]
+        if mode == "live":
+            # Live is an overlay-first mode.  The user can hide it during a
+            # session, but each new Live session starts with captions visible.
+            self._settings["caption_overlay"] = True
+            self._live_phase = "starting"
+            self._live_latency_ms = 0.0
         self._state = "recording"
-        self._status = "Слушаю · модель загрузится при первой фразе"
+        self._status = "Готовим модель для Live…" if mode == "live" else "Слушаю · модель загрузится при первой фразе"
         self._last_status = ""
         self._record_log("info", f"Запущен режим: {mode}.")
         kind, _device = source_for_mode(mode, self._settings)
@@ -825,10 +886,12 @@ class Controller(QObject):
             self._session_id = sid
             if sid == self._session_id:
                 self._session_title = name
-            live = LiveSession(self.engine, self._config(),
+            config = self._config()
+            live = LiveSession(self.engine, config,
                                lambda segment, sid=sid: self.segmentArrived.emit(sid, segment),
                                self.statusArrived.emit,
-                               lambda error, cancelled, sid=sid: self.jobFinished.emit(sid, error, cancelled))
+                               lambda error, cancelled, sid=sid: self.jobFinished.emit(sid, error, cancelled),
+                               on_partial=lambda segment, sid=sid: self.partialArrived.emit(sid, segment))
             self._jobs[sid] = {"live": live, "mode": mode, "name": name, "hotkey": hotkey}
             try:
                 def audio_error(error, sid=sid, live=live):
@@ -843,14 +906,18 @@ class Controller(QObject):
                 else:
                     capture = open_live_capture(kind, self._settings, **args)
                 # Device startup and WASAPI initialization must not block the QML thread.
-                def start(live=live, capture=capture, sid=sid):
+                def start(live=live, capture=capture, sid=sid, config=config, mode=mode):
                     try:
+                        if mode == "live":
+                            self.engine.prepare(config, self.statusArrived.emit)
                         live.start(capture)
                     except Exception as exc:
                         self.jobFinished.emit(sid, str(exc), False)
                 threading.Thread(target=start, daemon=True).start()
             except Exception as exc:
                 self.jobFinished.emit(sid, str(exc), False)
+        self.captionChanged.emit()
+        self.liveStateChanged.emit()
         self.changed.emit()
 
     @Slot()
@@ -934,6 +1001,18 @@ class Controller(QObject):
         job = self._jobs[sid]
         if sid == self._session_id:
             self._segments = [*self._segments, {**segment, "id": identifiers[0]}]
+            self.segmentsChanged.emit()
+        if job["mode"] == "live" and sid == self._session_id:
+            self._confirmed_caption = str(segment.get("text", "")).strip()
+            self._partial_caption = ""
+            self._caption_revision += 1
+            self._live_latency_ms = max(
+                0.0,
+                (time.monotonic() - self._started - float(segment.get("end", 0.0))) * 1000,
+            )
+            self._live_phase = "listening" if self.recording else "stopping"
+            self.captionChanged.emit()
+            self.liveStateChanged.emit()
         if job["mode"] == "monitor":
             keywords = [w.strip() for w in str(self._settings["keywords"]).split(",") if w.strip()]
             matches = match_keywords(segment["text"], keywords)
@@ -944,6 +1023,35 @@ class Controller(QObject):
         elif sid == self._session_id:
             self._record_log("success", f"Добавлен сегмент {len(self._segments)}: {segment['text'][:80]}")
         self._status = "Слушаю" if self.recording else "Распознаём…"
+        self.changed.emit()
+
+    def _on_partial(self, sid, segment):
+        """Accept a disposable Live preview without persisting it.
+
+        The worker emits full phrase snapshots.  A future stabiliser may add a
+        ``stable_text`` prefix; until then the complete snapshot is explicitly
+        treated as provisional by the QML view.
+        """
+
+        job = self._jobs.get(sid)
+        if job is None or job.get("mode") != "live" or sid != self._session_id:
+            return
+        text = str(segment.get("text", "")).strip()
+        if not text:
+            return
+        stable = str(segment.get("stable_text", "")).strip()
+        if stable and text.startswith(stable):
+            self._confirmed_caption = stable
+            self._partial_caption = text[len(stable):].strip()
+        else:
+            self._confirmed_caption = ""
+            self._partial_caption = text
+        self._caption_revision += 1
+        self._live_phase = "speech"
+        end = float(segment.get("end", 0.0))
+        self._live_latency_ms = max(0.0, (time.monotonic() - self._started - end) * 1000)
+        self.captionChanged.emit()
+        self.liveStateChanged.emit()
         self.changed.emit()
 
     def _on_finished(self, sid, error, cancelled):
@@ -969,6 +1077,12 @@ class Controller(QObject):
         if not self._jobs:
             self._state = "idle"
             self._level = 0
+            if job["mode"] == "live":
+                self._partial_caption = ""
+                self._live_phase = "error" if error else "idle"
+                self._caption_revision += 1
+                self.captionChanged.emit()
+                self.liveStateChanged.emit()
             self._status = "Остановлено" if cancelled else "Ошибка обработки" if error else "Готово · история сохранена"
             if not error:
                 self._record_log("success", self._status)

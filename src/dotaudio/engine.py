@@ -39,6 +39,9 @@ class RecognitionConfig:
     server_url: str = "http://127.0.0.1:8765"
     profile: str = "balanced"
     media_mode: bool = False
+    # Preview requests are short, disposable snapshots used only by Live UI.
+    # They deliberately favour cadence over the final transcript's accuracy.
+    live_preview: bool = False
     # Domain terms are supplied by the user-facing dictionary.  They remain a
     # hint to the recognizer, never a replacement for the spoken audio.
     initial_prompt: str = ""
@@ -191,6 +194,8 @@ class Engine:
             "balanced": {"beam": 5, "patience": 1.0},
             "quality": {"beam": 8, "patience": 1.5},
         }[config.profile]
+        if config.live_preview:
+            profile = {"beam": 1, "patience": 1.0}
         # Music commonly has speech-like instrumental fragments.  DotSound
         # keeps VAD off for this case; spoken live input benefits from it.
         use_vad = not config.media_mode
