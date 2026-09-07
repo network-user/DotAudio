@@ -9,6 +9,8 @@ import unicodedata
 from collections.abc import Iterable
 from typing import Any
 
+_SENTENCE_END = re.compile(r"[.!?…](?:[\"'»)]*)$")
+
 
 def _normalise(value: str) -> str:
     return unicodedata.normalize("NFC", value).casefold().replace("ё", "е")
@@ -28,6 +30,138 @@ def _segment_values(segment: dict[str, Any]) -> tuple[float, float, str]:
     if start < 0 or end < start:
         raise ValueError("segment timestamps are invalid")
     return start, end, text
+
+
+def _word_units(
+    segment: dict[str, Any], start: float, end: float
+) -> list[dict[str, Any]] | None:
+    """Return validated word units, or ``None`` when timings are unusable.
+
+    A subtitle must never receive guessed word timings.  Missing or malformed
+    optional word data therefore makes the caller retain the source segment as
+    one atomic cue instead of interpolating timings from its text.
+    """
+    raw_words = segment.get("words")
+    if not isinstance(raw_words, list) or not raw_words:
+        return None
+
+    result: list[dict[str, Any]] = []
+    previous_start = start
+    for raw_word in raw_words:
+        if not isinstance(raw_word, dict):
+            return None
+        text = raw_word.get("text")
+        if not isinstance(text, str) or not (text := text.strip()):
+            return None
+        try:
+            word_start = float(raw_word["start"])
+            word_end = float(raw_word["end"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if (
+            not math.isfinite(word_start)
+            or not math.isfinite(word_end)
+            or word_start < start
+            or word_end < word_start
+            or word_end > end
+            or word_start < previous_start
+        ):
+            return None
+        result.append(
+            {
+                "start": word_start,
+                "end": word_end,
+                "text": text,
+                "word": {"start": word_start, "end": word_end, "text": text},
+            }
+        )
+        previous_start = word_start
+    return result
+
+
+def _cue_values(units: list[dict[str, Any]]) -> tuple[float, float, str]:
+    start = float(units[0]["start"])
+    end = max(float(unit["end"]) for unit in units)
+    text = " ".join(str(unit["text"]) for unit in units)
+    return start, end, text
+
+
+def _ends_sentence(unit: dict[str, Any]) -> bool:
+    return bool(_SENTENCE_END.search(str(unit["text"])))
+
+
+def regroup_for_subtitles(
+    segments: Iterable[dict[str, Any]],
+    *,
+    max_chars: int = 42,
+    max_duration: float = 6.0,
+) -> list[dict[str, Any]]:
+    """Regroup transcript segments into readable, timestamp-safe subtitle cues.
+
+    Word timestamps are used to split long source segments and are copied to
+    the resulting cue.  If a source lacks complete, ordered word timings, it
+    remains atomic: deriving timings from text would misrepresent the audio.
+    Cues prefer a sentence-ending punctuation boundary when a size limit is
+    reached.  An individual word or atomic source segment may exceed a limit
+    because dropping or inventing text is less safe than preserving it.
+    """
+    if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars < 1:
+        raise ValueError("max_chars must be a positive integer")
+    try:
+        duration_limit = float(max_duration)
+    except (TypeError, ValueError) as error:
+        raise ValueError("max_duration must be a positive finite value") from error
+    if not math.isfinite(duration_limit) or duration_limit <= 0:
+        raise ValueError("max_duration must be a positive finite value")
+
+    units: list[dict[str, Any]] = []
+    for segment in segments:
+        start, end, text = _segment_values(segment)
+        if not (text := text.strip()):
+            continue
+        word_units = _word_units(segment, start, end)
+        if word_units is not None:
+            units.extend(word_units)
+        else:
+            units.append({"start": start, "end": end, "text": text})
+
+    result: list[dict[str, Any]] = []
+
+    def append_cue(cue_units: list[dict[str, Any]]) -> None:
+        start, end, text = _cue_values(cue_units)
+        cue: dict[str, Any] = {"start": start, "end": end, "text": text}
+        if all("word" in unit for unit in cue_units):
+            cue["words"] = [unit["word"] for unit in cue_units]
+        result.append(cue)
+
+    current: list[dict[str, Any]] = []
+    for unit in units:
+        while current:
+            start, end, text = _cue_values([*current, unit])
+            fits = len(text) <= max_chars and end - start <= duration_limit
+            if fits:
+                break
+
+            punctuation_index = next(
+                (
+                    index
+                    for index in range(len(current) - 1, -1, -1)
+                    if _ends_sentence(current[index])
+                ),
+                None,
+            )
+            if punctuation_index is None:
+                append_cue(current)
+                current = []
+            else:
+                append_cue(current[: punctuation_index + 1])
+                current = current[punctuation_index + 1 :]
+
+        current.append(unit)
+
+    if current:
+        append_cue(current)
+    return result
 
 
 def timestamp(seconds: float, separator: str = ",") -> str:
