@@ -53,7 +53,7 @@ ApplicationWindow {
         case "result": return 540
         case "error": return 380
         case "modePick": return 352
-        default: return bridge.page === "live" ? 320 : 248
+        default: return bridge.page === "live" ? 268 : 228
         }
     }
     readonly property int islandH: {
