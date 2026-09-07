@@ -19,7 +19,7 @@ Rectangle {
     readonly property var previousSegment: bridge.segments.length >= 2 ? bridge.segments[bridge.segments.length - 2] : null
     readonly property var captionWords: currentSegment && currentSegment.words ? currentSegment.words : []
     readonly property string captionKey: currentSegment ? String(currentSegment.id) : ""
-    readonly property string sourceLabel: bridge.settings.source === "system" ? "Звук системы" : "Микрофон"
+    readonly property string sourceLabel: String(bridge.settings.live_source) === "microphone" ? "Микрофон" : "Звук системы"
     readonly property bool overlayOn: Boolean(bridge.settings.caption_overlay)
 
     ColumnLayout {

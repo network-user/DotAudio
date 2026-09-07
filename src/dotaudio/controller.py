@@ -34,9 +34,15 @@ DEFAULTS = {
     "channels": "", "profile": "balanced", "output_device": "", "loopback_device": "",
     "island_opacity": 0.94, "island_click_through": False, "island_snap": True,
     "island_x": -1, "island_y": 32,
+    "caption_overlay": False, "caption_size": "md", "caption_contrast": "normal",
     "dictate_hotkey": "Ctrl+Alt+Space", "island_hotkey": "Ctrl+Alt+O",
     # Kept in local settings so terminology and snippets never leave the PC.
     "dictionary": [], "snippets": [],
+}
+
+LIVE_SETTINGS = {
+    "caption_overlay", "caption_size", "caption_contrast",
+    "island_opacity", "island_snap",
 }
 
 HOTKEY_OPTIONS = {
@@ -259,7 +265,9 @@ class Controller(QObject):
 
     @Slot(str, "QVariant")
     def setSetting(self, name, value):
-        if name not in DEFAULTS or self._jobs:
+        if name not in DEFAULTS:
+            return
+        if self._jobs and name not in LIVE_SETTINGS:
             return
         choices = {
             "model": ("tiny", "base", "small", "medium", "large-v3", "turbo"),
@@ -267,9 +275,13 @@ class Controller(QObject):
             "task": ("transcribe", "translate"), "backend": ("local", "remote"),
             "source": ("microphone", "system"), "live_source": ("microphone", "system"),
             "profile": ("fast", "balanced", "quality"),
+            "caption_size": ("sm", "md", "lg"),
+            "caption_contrast": ("normal", "high"),
         }
         if name in choices and value not in choices[name]:
             return
+        if name == "caption_overlay":
+            value = bool(value)
         self._settings[name] = value
         if name == "live_source":
             self._settings["source"] = value

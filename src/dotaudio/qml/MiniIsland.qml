@@ -215,6 +215,9 @@ Rectangle {
 
     component RecordControl: Button {
         id: rec
+        implicitWidth: 32
+        implicitHeight: 32
+        padding: 0
         hoverEnabled: true
         enabled: !bridge.busy || bridge.recording
         onClicked: bridge.toggleRecording()

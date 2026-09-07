@@ -6,6 +6,12 @@ def test_live_source_defaults_to_system_audio() -> None:
     assert DEFAULTS["source"] == "microphone"
 
 
+def test_caption_overlay_settings_are_local_and_sized() -> None:
+    assert DEFAULTS["caption_overlay"] is False
+    assert DEFAULTS["caption_size"] == "md"
+    assert DEFAULTS["caption_contrast"] == "normal"
+
+
 def test_engine_statuses_have_russian_labels() -> None:
     assert STATUS_LABELS["loading_model"].startswith("Загружаем")
     assert STATUS_LABELS["transcribing_cpu"].startswith("Распознаём")

@@ -20,8 +20,10 @@ Window {
     readonly property bool highContrast: String(bridge.settings.caption_contrast) === "high"
 
     onVisibleChanged: {
-        if (visible)
+        if (visible) {
             overlay.raise()
+            bridge.applyClickThrough(overlay.winId(), true)
+        }
     }
 
     Rectangle {
