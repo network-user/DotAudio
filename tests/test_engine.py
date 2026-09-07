@@ -40,6 +40,14 @@ def test_local_engine_caches_model_and_normalises_segments(monkeypatch) -> None:
     assert created == [("base", "cpu", "int8")]
 
 
+def test_initial_prompt_keeps_local_dictionary_terms_bounded() -> None:
+    prompt = Engine._initial_prompt("ru", "DotAudio; CTranslate2")
+    assert prompt is not None
+    assert "DotAudio" in prompt
+    assert Engine._initial_prompt("en", "") is None
+    assert len(Engine._initial_prompt("en", "x" * 1000) or "") == 700
+
+
 def test_local_engine_cancellation_stops_between_segments(monkeypatch) -> None:
     cancel = Event()
 

@@ -39,6 +39,9 @@ class RecognitionConfig:
     server_url: str = "http://127.0.0.1:8765"
     profile: str = "balanced"
     media_mode: bool = False
+    # Domain terms are supplied by the user-facing dictionary.  They remain a
+    # hint to the recognizer, never a replacement for the spoken audio.
+    initial_prompt: str = ""
 
 
 class Engine:
@@ -201,10 +204,7 @@ class Engine:
             # Word alignment is needed for offline karaoke, but it adds work
             # that live phrase captions do not need.
             "word_timestamps": config.media_mode,
-            "initial_prompt": (
-                "Русская речь. Сохраняй имена, термины и пунктуацию."
-                if language == "ru" else None
-            ),
+            "initial_prompt": self._initial_prompt(language, config.initial_prompt),
         }
         if use_vad:
             kwargs["vad_parameters"] = {
@@ -245,6 +245,15 @@ class Engine:
                 self._emit_segment(on_segment, segment)
         self._status(on_status, "completed")
         return result
+
+    @staticmethod
+    def _initial_prompt(language: str | None, user_terms: str) -> str | None:
+        """Build a bounded ASR hint without turning it into hidden rewriting."""
+
+        base = "Русская речь. Сохраняй имена, термины и пунктуацию." if language == "ru" else ""
+        terms = " ".join(str(user_terms).split())[:700]
+        prompt = " ".join(part for part in (base, terms) if part)
+        return prompt or None
 
     @staticmethod
     def _word_timings(raw: Any) -> list[dict[str, float | str]]:
