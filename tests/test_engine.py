@@ -223,23 +223,25 @@ class _Extractor:
 class _Decoder:
     is_multilingual = True
 
-    def __init__(self) -> None:
+    def __init__(self, score: float | None = -0.2) -> None:
         self.features = None
         self.kwargs: dict = {}
+        self.score = score
 
     def generate(self, features, prompts, **kwargs):
         del prompts
         self.features = features
         self.kwargs = kwargs
-        return [SimpleNamespace(sequences_ids=[[10, 11, 50257]])]
+        scores = [] if self.score is None else [self.score]
+        return [SimpleNamespace(sequences_ids=[[10, 11, 50257]], scores=scores)]
 
 
 class _LiveModel:
     """A model exposing the CTranslate2 internals the live window relies on."""
 
-    def __init__(self) -> None:
+    def __init__(self, score: float | None = -0.2) -> None:
         self.feature_extractor = _Extractor()
-        self.model = _Decoder()
+        self.model = _Decoder(score)
         self.hf_tokenizer = object()
         self.hotwords = "unset"
 
@@ -305,6 +307,33 @@ def test_live_window_bounds_the_token_budget_and_the_dictionary_hint(monkeypatch
     # cap is what stops a looping decoder from blocking the next caption.
     assert model.model.kwargs["max_length"] == 4 + 20
     assert len(model.hotwords) <= 150
+
+
+def test_live_window_reports_nothing_when_the_decoder_is_guessing(monkeypatch) -> None:
+    # Music and the tail of a cut phrase still make the decoder produce words.
+    # Measured on real audio, speech stays above -0.72 and those guesses below
+    # -1.07, which is the check the ordinary faster-whisper call also applies.
+    model = _LiveModel(score=-1.5)
+    _install_live_stack(monkeypatch, model)
+    config = RecognitionConfig(device="cpu", live_stream=True)
+    segments: list[dict] = []
+
+    result = Engine().transcribe(
+        np.zeros(16000, dtype=np.float32), config, on_segment=segments.append
+    )
+
+    assert result == []
+    assert segments == []
+
+
+def test_live_window_keeps_text_when_the_build_returns_no_score(monkeypatch) -> None:
+    model = _LiveModel(score=None)
+    _install_live_stack(monkeypatch, model)
+    config = RecognitionConfig(device="cpu", live_stream=True)
+
+    result = Engine().transcribe(np.zeros(16000, dtype=np.float32), config)
+
+    assert result[0]["text"] == "живой текст"
 
 
 def test_live_window_falls_back_once_when_internals_are_missing(monkeypatch) -> None:

@@ -37,6 +37,13 @@ LIVE_TAIL_SECONDS = 2.0
 LIVE_TOKENS_PER_SECOND = 12
 LIVE_MAX_TOKENS = 200
 LIVE_HINT_CHARS = 150
+# Mean token log probability below which the window is not reported as speech.
+# The ordinary faster-whisper call applies this check by default; the fast live
+# path bypasses that call, so it applies the same threshold itself.  Measured on
+# real audio, sung and spoken: speech windows from 1.2 s upwards score between
+# -0.18 and -0.72, while the words the decoder invents over music and over the
+# tail of a phrase score -1.07 and lower.
+LIVE_MIN_LOGPROB = -1.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -385,6 +392,7 @@ class Engine:
                     # last phrase until the token budget runs out.
                     no_repeat_ngram_size=3,
                     suppress_blank=True,
+                    return_scores=True,
                 )[0]
         except (AttributeError, ImportError, KeyError, TypeError):
             # The window is assembled from faster-whisper and CTranslate2
@@ -404,6 +412,12 @@ class Engine:
         # window contains voice is decided before it reaches the decoder.
         tokens = [token for token in result.sequences_ids[0] if token < tokenizer.eot]
         text = self._drop_restart(tokenizer.decode(tokens).strip())
+        if text and not self._confident(result):
+            # Music and the tail of a cut phrase still produce words: "75",
+            # "Велосипед", "Cutie".  They are reported as nothing rather than as
+            # a caption, and the caller says so through live_no_text.
+            self._status(on_status, "completed")
+            return []
         if not text:
             self._status(on_status, "completed")
             return []
@@ -411,6 +425,21 @@ class Engine:
         self._emit_segment(on_segment, segment)
         self._status(on_status, "completed")
         return [segment]
+
+    @staticmethod
+    def _confident(result: Any) -> bool:
+        """Whether the decoder believes the window it just transcribed.
+
+        CTranslate2 normalises the sequence score by length, so it is the mean
+        log probability per token, the same quantity faster-whisper rejects a
+        segment on.  A build that does not return scores is trusted, because
+        losing the check is better than losing every caption.
+        """
+
+        scores = getattr(result, "scores", None)
+        if not scores:
+            return True
+        return float(scores[0]) >= LIVE_MIN_LOGPROB
 
     @staticmethod
     def _drop_restart(text: str) -> str:

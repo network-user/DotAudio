@@ -32,6 +32,11 @@ LIVE_PREVIEW_WINDOW_SECONDS = 6.0
 LIVE_PREVIEW_DUTY = 1.5
 # A pause at least this long is treated as a place where a phrase may be cut.
 PHRASE_SPLIT_SECONDS = 0.12
+# Two phrases waiting to be recognised are joined instead of one being thrown
+# away, as long as they are the same stretch of sound and the join stays short
+# enough to decode in one window.
+FINAL_MERGE_GAP_SECONDS = 0.5
+FINAL_MERGE_LIMIT_SECONDS = 15.0
 
 DICTATION_PREVIEW_MIN_SECONDS = 0.8
 DICTATION_PREVIEW_INTERVAL_SECONDS = 0.8
@@ -381,7 +386,16 @@ class LiveSession:
         self._wake.set()
 
     def _put_or_replace_final(self, chunk):
-        """Keep the newest unstarted phrase.  In-flight audio is not dropped."""
+        """Keep the newest unstarted phrase, joined to the one it displaces.
+
+        A speaker who does not pause produces finals faster than a slow machine
+        decodes them, and the phrase that was waiting used to be discarded.
+        Measured on a 7.7 s clip, that lost the entire spoken sentence to a half
+        second of trailing sound.  Neighbouring phrases are the same utterance
+        cut by the length limit, so joining them keeps every word and gives the
+        decoder more context than either half had.  Audio is only dropped when
+        the join would grow past what one window can decode.
+        """
 
         dropped = False
         while True:
@@ -390,10 +404,27 @@ class LiveSession:
                 return dropped
             except Full:
                 try:
-                    self.queue.get_nowait()
+                    waiting = self.queue.get_nowait()
                 except Empty:
                     continue
-                dropped = True
+                merged = self._merge_finals(waiting, chunk)
+                if merged is None:
+                    dropped = True
+                else:
+                    chunk = merged
+
+    @staticmethod
+    def _merge_finals(waiting, arriving):
+        """Join two queued phrases, or return None if they must stay apart."""
+
+        start, audio = waiting
+        next_start, next_audio = arriving
+        gap = next_start - (start + len(audio) / SAMPLE_RATE)
+        if not -FINAL_MERGE_GAP_SECONDS <= gap <= FINAL_MERGE_GAP_SECONDS:
+            return None
+        if len(audio) + len(next_audio) > int(FINAL_MERGE_LIMIT_SECONDS * SAMPLE_RATE):
+            return None
+        return (start, np.concatenate((audio, next_audio)))
 
     def _discard_queued_finals(self):
         while True:
@@ -464,11 +495,11 @@ class LiveSession:
         with self._input_lock:
             capture = self.capture
             if not self.closed.is_set() and not cancel:
+                # Stop means "keep what I said".  A phrase still waiting here is
+                # the end of that speech, so the tail joins it instead of
+                # replacing it; the queue holds one phrase, so this cannot turn
+                # into a long drain.  Cancel still throws the backlog away.
                 tail = self.buffer.flush()
-                if self.catch_up and tail:
-                    # The open phrase is the current sound.  Drop unstarted
-                    # finals so Stop does not drain a stale backlog.
-                    self._discard_queued_finals()
                 if tail:
                     self._enqueue_final(tail)
             else:

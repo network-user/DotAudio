@@ -8,6 +8,7 @@ import numpy as np
 
 from dotaudio.engine import RecognitionConfig
 from dotaudio.pipeline import (
+    FINAL_MERGE_LIMIT_SECONDS,
     LIVE_PHRASE_SECONDS,
     LIVE_PREVIEW_INTERVAL_SECONDS,
     LIVE_PREVIEW_WINDOW_SECONDS,
@@ -298,23 +299,26 @@ def test_live_session_without_catch_up_stops_when_the_queue_is_full() -> None:
     assert errors[0][0].startswith("Модель не успевает")
 
 
-def test_catch_up_drops_stale_finals_instead_of_stopping() -> None:
-    class SlowEngine:
-        def __init__(self) -> None:
-            self.started = Event()
-            self.release = Event()
-            self.lengths: list[int] = []
+class _SlowEngine:
+    """Hold the first phrase until released, so the rest queues up behind it."""
 
-        def transcribe(self, audio, _config, cancel, on_segment, _on_status):
-            self.lengths.append(len(audio))
-            if len(self.lengths) == 1:
-                self.started.set()
-                assert self.release.wait(2)
-            if not cancel.is_set():
-                on_segment({"start": 0.0, "end": len(audio) / SAMPLE_RATE, "text": "сейчас"})
-            return []
+    def __init__(self) -> None:
+        self.started = Event()
+        self.release = Event()
+        self.lengths: list[int] = []
 
-    engine = SlowEngine()
+    def transcribe(self, audio, _config, cancel, on_segment, _on_status):
+        self.lengths.append(len(audio))
+        if len(self.lengths) == 1:
+            self.started.set()
+            assert self.release.wait(2)
+        if not cancel.is_set():
+            on_segment({"start": 0.0, "end": len(audio) / SAMPLE_RATE, "text": "сейчас"})
+        return []
+
+
+def test_catch_up_joins_waiting_phrases_instead_of_dropping_one() -> None:
+    engine = _SlowEngine()
     completed = Event()
     finals: list[dict] = []
     statuses: list[str] = []
@@ -337,13 +341,65 @@ def test_catch_up_drops_stale_finals_instead_of_stopping() -> None:
     assert completed.wait(2)
     assert session.failed == ""
     assert errors == [("", False)]
-    assert "live_backlog" in statuses
-    # In-flight first phrase plus the newest queued phrase. The middle
-    # utterance is dropped so captions stay on the current sound.
+    # The two phrases that waited behind the slow one are the same stretch of
+    # sound, so they are recognised together rather than one of them being lost.
+    assert "live_backlog" not in statuses
     assert len(engine.lengths) == 2
-    assert engine.lengths[0] == int(SAMPLE_RATE * 0.2) + int(SAMPLE_RATE * 0.5)
-    assert engine.lengths[1] == int(SAMPLE_RATE * 0.4) + int(SAMPLE_RATE * 0.5)
+    assert engine.lengths[0] == int(SAMPLE_RATE * 0.7)
+    assert engine.lengths[1] == int(SAMPLE_RATE * 1.7)
     assert finals[-1]["text"] == "сейчас"
+
+
+def test_catch_up_drops_audio_only_when_the_join_grows_past_one_window() -> None:
+    engine = _SlowEngine()
+    completed = Event()
+    statuses: list[str] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), lambda _segment: None, statuses.append,
+        lambda _error, _cancelled: completed.set(), catch_up=True,
+    )
+    session.start(_Capture())
+    session.feed(_speech(0.2))
+    session.feed(_silence())
+    assert engine.started.wait(2)
+    for _ in range(4):
+        session.feed(_speech(FINAL_MERGE_LIMIT_SECONDS / 2))
+        session.feed(_silence())
+    session.stop()
+    engine.release.set()
+    assert completed.wait(2)
+    assert "live_backlog" in statuses
+    assert max(engine.lengths) <= int(FINAL_MERGE_LIMIT_SECONDS * SAMPLE_RATE)
+
+
+def test_catch_up_keeps_a_phrase_that_stop_finds_still_waiting() -> None:
+    engine = _SlowEngine()
+    completed = Event()
+    finals: list[dict] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), finals.append, lambda _status: None,
+        lambda _error, _cancelled: completed.set(), catch_up=True,
+    )
+    session.start(_Capture())
+    session.feed(_speech(0.2))
+    session.feed(_silence())
+    assert engine.started.wait(2)
+    session.feed(_speech(0.3))
+    session.feed(_silence())
+    # Stop asks to keep what was said. The phrase queued behind the slow decode
+    # is part of that, so it is recognised and not thrown away with the tail.
+    session.stop()
+    engine.release.set()
+    assert completed.wait(2)
+    assert len(engine.lengths) == 2
+    assert engine.lengths[1] == int(SAMPLE_RATE * 0.8)
+    assert len(finals) == 2
+
+
+def test_finals_from_different_utterances_are_not_joined() -> None:
+    early = (0.0, np.zeros(SAMPLE_RATE, dtype=np.float32))
+    much_later = (30.0, np.zeros(SAMPLE_RATE, dtype=np.float32))
+    assert LiveSession._merge_finals(early, much_later) is None
 
 
 def test_catch_up_preview_uses_a_rolling_window() -> None:
