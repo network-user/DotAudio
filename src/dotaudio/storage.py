@@ -13,6 +13,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+SCHEMA_VERSION = 3
+RECOVERED_SESSION_STATUS = "interrupted"
+
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -73,8 +76,50 @@ class Store:
     def _initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._schema_lock, self._connect() as connection:
-            connection.executescript(
-                """
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    "database schema is newer than this version of DotAudio"
+                )
+
+            migrations = (
+                self._create_initial_schema,
+                self._add_word_timestamps,
+                self._add_history_indexes,
+            )
+            for target_version in range(version + 1, SCHEMA_VERSION + 1):
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    migrations[target_version - 1](connection)
+                    connection.execute(f"PRAGMA user_version = {target_version}")
+                except Exception:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
+
+            # A process cannot safely resume capture or inference after it has exited.
+            # Keep already persisted text, but make the interrupted state visible in history.
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET status = ?, finished_at = COALESCE(finished_at, ?)
+                    WHERE status = 'active'
+                    """,
+                    (RECOVERED_SESSION_STATUS, _utc_now()),
+                )
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
+
+    @staticmethod
+    def _create_initial_schema(connection: sqlite3.Connection) -> None:
+        statements = (
+            """
                 CREATE TABLE IF NOT EXISTS sessions (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
@@ -84,7 +129,9 @@ class Store:
                     created_at TEXT NOT NULL,
                     finished_at TEXT,
                     status TEXT NOT NULL DEFAULT 'active'
-                );
+                )
+            """,
+            """
 
                 CREATE TABLE IF NOT EXISTS segments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,22 +139,41 @@ class Store:
                     start REAL NOT NULL,
                     end REAL NOT NULL,
                     text TEXT NOT NULL,
-                    original_text TEXT NOT NULL,
-                    words_json TEXT NOT NULL DEFAULT '[]'
-                );
-
-                CREATE INDEX IF NOT EXISTS ix_segments_session_order
-                    ON segments(session_id, start, id);
+                    original_text TEXT NOT NULL
+                )
+            """,
+            """
 
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
-                );
-                """
+                )
+            """,
+        )
+        for statement in statements:
+            connection.execute(statement)
+
+    @staticmethod
+    def _add_word_timestamps(connection: sqlite3.Connection) -> None:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(segments)")}
+        if "words_json" not in columns:
+            connection.execute(
+                "ALTER TABLE segments ADD COLUMN words_json TEXT NOT NULL DEFAULT '[]'"
             )
-            columns = {row[1] for row in connection.execute("PRAGMA table_info(segments)")}
-            if "words_json" not in columns:
-                connection.execute("ALTER TABLE segments ADD COLUMN words_json TEXT NOT NULL DEFAULT '[]'")
+
+    @staticmethod
+    def _add_history_indexes(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_segments_session_order "
+            "ON segments(session_id, start, id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_sessions_history_order "
+            "ON sessions(created_at DESC, id DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_sessions_status ON sessions(status)"
+        )
 
     def create_session(
         self,
@@ -178,10 +244,27 @@ class Store:
             result["segments"].append(item)
         return result
 
-    def list_sessions(self, query: str = "") -> list[dict[str, Any]]:
+    def list_sessions(
+        self,
+        query: str = "",
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return history newest first, optionally selecting one page.
+
+        Omitting ``limit`` and ``offset`` preserves the original all-history API.
+        """
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 0
+        ):
+            raise ValueError("limit must be a non-negative integer or None")
+
         folded_query = _unicode_fold(query.strip())
         where = ""
-        params: tuple[str, ...] = ()
+        params: list[str | int] = []
         if folded_query:
             pattern = f"%{folded_query}%"
             where = """
@@ -195,7 +278,14 @@ class Store:
                          AND unicode_fold(searched.text) LIKE ?
                    )
             """
-            params = (pattern, pattern, pattern, pattern, pattern)
+            params = [pattern, pattern, pattern, pattern, pattern]
+        pagination = ""
+        if limit is not None:
+            pagination = "LIMIT ? OFFSET ?"
+            params.extend((limit, offset))
+        elif offset:
+            pagination = "LIMIT -1 OFFSET ?"
+            params.append(offset)
         with self._connect() as connection:
             rows = connection.execute(
                 f"""
@@ -220,6 +310,7 @@ class Store:
                 FROM sessions s
                 {where}
                 ORDER BY s.created_at DESC, s.id DESC
+                {pagination}
                 """,
                 params,
             ).fetchall()
