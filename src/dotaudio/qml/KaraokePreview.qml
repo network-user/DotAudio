@@ -10,8 +10,8 @@ Rectangle {
     property var activeCue: cueAt(playbackSeconds)
 
     radius: 20
-    color: "#e81c1c1e"
-    border.color: "#20ffffff"
+    color: "#e814161a"
+    border.color: "#22ffffff"
     border.width: 1
 
     function cueAt(position) {
@@ -30,7 +30,7 @@ Rectangle {
 
         Label {
             text: root.activeCue && root.activeCue.words ? "KARAOKE · ПО СЛОВАМ" : "KARAOKE · ФРАЗА"
-            color: "#64d2ff"
+            color: "#a6a7ab"
             font.pixelSize: 9
             font.bold: true
             font.letterSpacing: 1.1
@@ -46,7 +46,7 @@ Rectangle {
                     property bool active: root.playbackSeconds >= Number(modelData.start)
                                           && root.playbackSeconds < Number(modelData.end)
                     text: modelData.text
-                    color: active ? "#ffffff" : root.playbackSeconds >= Number(modelData.end) ? "#64d2ff" : "#8e8e93"
+                    color: active ? "#f3f3f1" : root.playbackSeconds >= Number(modelData.end) ? "#d1d1d6" : "#a6a7ab"
                     font.pixelSize: active ? 24 : 19
                     font.weight: active ? Font.DemiBold : Font.Normal
                     scale: active ? 1.04 : 1

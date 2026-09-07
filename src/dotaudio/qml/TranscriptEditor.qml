@@ -10,10 +10,10 @@ Rectangle {
     property bool followLatest: !editable
     property string emptyMessage: "Расшифровка появится после первой завершённой фразы."
     property int observedSegmentCount: 0
-    color: "#151517"
+    color: "#14161a"
     radius: 20
     border.width: 1
-    border.color: "#0cffffff"
+    border.color: "#22ffffff"
 
     function timecode(seconds) {
         var total = Math.max(0, Math.round(Number(seconds) * 1000))
@@ -68,8 +68,8 @@ Rectangle {
             width: transcript.width
             implicitHeight: editor.implicitHeight + 22
             radius: 15
-            color: active ? "#1b2a3c" : segmentMouse.containsMouse ? "#242426" : "#1c1c1e"
-            border.color: active ? "#660a84ff" : "#0cffffff"
+            color: active ? "#1b1d21" : segmentMouse.containsMouse ? "#1b1d21" : "#14161a"
+            border.color: active ? "#33ffffff" : "#22ffffff"
             border.width: 1
             Behavior on color { ColorAnimation { duration: 140 } }
             Behavior on border.color { ColorAnimation { duration: 140 } }
