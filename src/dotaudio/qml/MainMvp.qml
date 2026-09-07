@@ -15,7 +15,7 @@ ApplicationWindow {
     property bool quietHeld: false
     property real islandCenterX: -1
     property real islandTopY: 32
-    property var pageKeys: ["live", "dictation", "media", "models", "history", "settings", "monitor"]
+    property var pageKeys: ["live", "dictation", "media", "models", "history", "settings"]
     width: shellMode === "app" ? 1220 : shellMode === "theater" ? 740 : islandW
     height: shellMode === "app" ? 790 : shellMode === "theater" ? 420 : islandH
     minimumWidth: shellMode === "app" ? 1000 : 180
@@ -265,7 +265,6 @@ ApplicationWindow {
                             { key: "live", icon: "live", title: "Live", detail: "Субтитры" },
                             { key: "dictation", icon: "dictation", title: "Диктовка", detail: "Голос в текст" },
                             { key: "media", icon: "media", title: "Караоке", detail: "Аудио и видео" },
-                            { key: "monitor", icon: "live", title: "Эфиры", detail: "Ключевые события" },
                             { key: "models", icon: "models", title: "Модели", detail: "Whisper" },
                             { key: "history", icon: "history", title: "История", detail: "Сессии" },
                             { key: "settings", icon: "settings", title: "Среда", detail: "Устройства" }
