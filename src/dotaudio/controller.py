@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 from datetime import datetime
@@ -16,20 +17,35 @@ from dotaudio.capture import (
     list_output_devices,
     play_output_tone,
     playback_device_for_loopback,
+    source_for_mode,
 )
+from dotaudio.desktop import MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, Hotkey
 from dotaudio.engine import Engine, RecognitionConfig
 from dotaudio.karaoke import export_ass, render_video
 from dotaudio.pipeline import LiveSession
 from dotaudio.storage import Store
-from dotaudio.transcripts import export_transcript, match_keywords
+from dotaudio.transcripts import export_transcript, match_keywords, regroup_for_subtitles
 
 DEFAULTS = {
     "model": "base", "device": "auto", "language": "ru", "task": "transcribe",
     "backend": "local", "server_url": "http://127.0.0.1:8765", "source": "microphone",
+    "live_source": "system",
     "input_device": "", "auto_paste": True, "keywords": "Whisper, искусственный интеллект",
     "channels": "", "profile": "balanced", "output_device": "", "loopback_device": "",
     "island_opacity": 0.94, "island_click_through": False, "island_snap": True,
     "island_x": -1, "island_y": 32,
+    "dictate_hotkey": "Ctrl+Alt+Space", "island_hotkey": "Ctrl+Alt+O",
+    # Kept in local settings so terminology and snippets never leave the PC.
+    "dictionary": [], "snippets": [],
+}
+
+HOTKEY_OPTIONS = {
+    "Ctrl+Alt+Space": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x20),
+    "Ctrl+Shift+Space": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, 0x20),
+    "Ctrl+Win+Space": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_WIN, 0x20),
+    "Ctrl+Alt+O": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x4F),
+    "Ctrl+Shift+O": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, 0x4F),
+    "Ctrl+Win+O": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_WIN, 0x4F),
 }
 
 STATUS_LABELS = {
@@ -70,7 +86,13 @@ class Controller(QObject):
         self.desktop = desktop
         self.engine = Engine()
         self._settings = {**DEFAULTS, **self.store.get_settings()}
-        self._page, self._state = "dictation", "idle"
+        saved_bindings = {
+            "dictate": HOTKEY_OPTIONS.get(str(self._settings["dictate_hotkey"])),
+            "island": HOTKEY_OPTIONS.get(str(self._settings["island_hotkey"])),
+        }
+        if all(saved_bindings.values()) and saved_bindings["dictate"] != saved_bindings["island"]:
+            self.desktop.set_hotkeys(saved_bindings)
+        self._page, self._state = "live", "idle"
         self._status = "Готов к работе"
         self._notice = ""
         self._level = 0.0
@@ -99,6 +121,8 @@ class Controller(QObject):
         self._testing_device = False
         self._cover_url = ""
         self._rendering = False
+        self._edit_undo: list[tuple[int, str, str]] = []
+        self._edit_redo: list[tuple[int, str, str]] = []
         self.segmentArrived.connect(self._on_segment)
         self.jobFinished.connect(self._on_finished)
         self.statusArrived.connect(self._set_status)
@@ -199,6 +223,18 @@ class Controller(QObject):
     @Property(bool, notify=changed)
     def rendering(self): return self._rendering
 
+    @Property("QVariantList", notify=changed)
+    def dictionary(self): return list(self._settings.get("dictionary", []))
+
+    @Property("QVariantList", notify=changed)
+    def snippets(self): return list(self._settings.get("snippets", []))
+
+    @Property(bool, notify=changed)
+    def canUndoEdit(self): return bool(self._edit_undo)
+
+    @Property(bool, notify=changed)
+    def canRedoEdit(self): return bool(self._edit_redo)
+
     @Property(str, notify=changed)
     def sessionTitle(self): return self._session_title
 
@@ -216,7 +252,7 @@ class Controller(QObject):
 
     @Slot(str)
     def selectPage(self, page):
-        if page in ("dictation", "live", "media", "models", "history", "settings"):
+        if page in ("dictation", "live", "media", "monitor", "models", "history", "settings"):
             self._page = page
             self._record_log("info", f"Открыт раздел: {page}")
             self.changed.emit()
@@ -229,11 +265,16 @@ class Controller(QObject):
             "model": ("tiny", "base", "small", "medium", "large-v3", "turbo"),
             "device": ("auto", "cpu", "cuda"), "language": ("auto", "ru", "en", "de", "es", "fr", "zh"),
             "task": ("transcribe", "translate"), "backend": ("local", "remote"),
-            "source": ("microphone", "system"), "profile": ("fast", "balanced", "quality"),
+            "source": ("microphone", "system"), "live_source": ("microphone", "system"),
+            "profile": ("fast", "balanced", "quality"),
         }
         if name in choices and value not in choices[name]:
             return
         self._settings[name] = value
+        if name == "live_source":
+            self._settings["source"] = value
+        elif name == "source":
+            self._settings["live_source"] = value
         if name == "profile":
             self._settings["model"] = {"fast": "tiny", "balanced": "base", "quality": "large-v3"}[value]
         self.store.save_settings(self._settings)
@@ -244,14 +285,114 @@ class Controller(QObject):
                 "message": "Модель выбрана и ждёт подготовки",
             }
             self._record_log("info", f"Выбрана модель: {value}")
-        elif name in ("device", "backend", "source", "language", "task"):
+        elif name in ("device", "backend", "source", "live_source", "language", "task"):
             self._record_log("info", f"Настройка {name}: {value}")
         self.changed.emit()
 
     def _config(self, media_mode=False):
         values = {key: self._settings[key] for key in
                   ("model", "device", "language", "task", "backend", "server_url", "profile")}
+        values["initial_prompt"] = "; ".join(
+            str(entry.get("term", "")).strip()
+            for entry in self.dictionary if isinstance(entry, dict)
+        )
         return RecognitionConfig(**values, media_mode=bool(media_mode))
+
+    @Slot(str, str)
+    def setHotkeys(self, dictate, island):
+        if self._jobs:
+            return
+        bindings = {"dictate": HOTKEY_OPTIONS.get(str(dictate)), "island": HOTKEY_OPTIONS.get(str(island))}
+        if None in bindings.values() or bindings["dictate"] == bindings["island"]:
+            self._notice = "Выберите две разные поддерживаемые комбинации."
+            self.changed.emit()
+            return
+        if not self.desktop.set_hotkeys(bindings):
+            self._notice = "Комбинация занята другой программой. Прежние hotkey сохранены."
+            self.changed.emit()
+            return
+        self._settings["dictate_hotkey"] = str(dictate)
+        self._settings["island_hotkey"] = str(island)
+        self.store.save_settings(self._settings)
+        self._notice = "Горячие клавиши обновлены."
+        self._record_log("success", "Горячие клавиши переназначены.")
+        self.changed.emit()
+
+    def _save_local_rules(self, key, entries):
+        self._settings[key] = entries
+        self.store.save_settings(self._settings)
+        self.changed.emit()
+
+    @Slot(str, str)
+    def addDictionaryEntry(self, term, misheard=""):
+        term, misheard = str(term).strip(), str(misheard).strip()
+        if not term or len(term) > 80 or len(misheard) > 80:
+            self._notice = "Термин и вариант ошибки должны быть короче 80 символов."
+            self.changed.emit()
+            return
+        entries = [item for item in self.dictionary if isinstance(item, dict)]
+        if any(str(item.get("term", "")).casefold() == term.casefold() for item in entries):
+            self._notice = "Такой термин уже есть в словаре."
+            self.changed.emit()
+            return
+        if len(entries) >= 200:
+            self._notice = "Словарь ограничен 200 терминами."
+            self.changed.emit()
+            return
+        entries.append({"term": term, "misheard": misheard})
+        self._save_local_rules("dictionary", entries)
+        self._notice = "Термин сохранён локально и будет подсказкой для Whisper."
+        self._record_log("success", f"Добавлен термин: {term}")
+
+    @Slot(int)
+    def removeDictionaryEntry(self, index):
+        entries = self.dictionary
+        if 0 <= index < len(entries):
+            removed = entries.pop(index)
+            self._save_local_rules("dictionary", entries)
+            self._record_log("info", f"Удалён термин: {removed.get('term', '')}")
+
+    @Slot(str, str)
+    def addSnippet(self, trigger, expansion):
+        trigger, expansion = str(trigger).strip(), str(expansion).strip()
+        if not trigger or not expansion or len(trigger) > 60 or len(expansion) > 4000:
+            self._notice = "Для snippet нужны фраза до 60 и текст до 4000 символов."
+            self.changed.emit()
+            return
+        entries = [item for item in self.snippets if isinstance(item, dict)]
+        if any(str(item.get("trigger", "")).casefold() == trigger.casefold() for item in entries):
+            self._notice = "Такой голосовой trigger уже существует."
+            self.changed.emit()
+            return
+        entries.append({"trigger": trigger, "expansion": expansion})
+        self._save_local_rules("snippets", entries)
+        self._notice = "Snippet сохранён. Он применяется только к финальному тексту диктовки."
+        self._record_log("success", f"Добавлен snippet: {trigger}")
+
+    @Slot(int)
+    def removeSnippet(self, index):
+        entries = self.snippets
+        if 0 <= index < len(entries):
+            removed = entries.pop(index)
+            self._save_local_rules("snippets", entries)
+            self._record_log("info", f"Удалён snippet: {removed.get('trigger', '')}")
+
+    def _apply_dictation_rules(self, text):
+        """Apply explicit local substitutions only after raw text is saved."""
+        result = text
+        for entry in self.dictionary:
+            if not isinstance(entry, dict):
+                continue
+            term, misheard = str(entry.get("term", "")).strip(), str(entry.get("misheard", "")).strip()
+            if term and misheard:
+                result = re.sub(rf"(?<!\w){re.escape(misheard)}(?!\w)", term, result, flags=re.IGNORECASE)
+        for entry in self.snippets:
+            if not isinstance(entry, dict):
+                continue
+            trigger, expansion = str(entry.get("trigger", "")).strip(), str(entry.get("expansion", "")).strip()
+            if trigger and expansion:
+                result = re.sub(rf"(?<!\w){re.escape(trigger)}(?!\w)", expansion, result, flags=re.IGNORECASE)
+        return result
 
     def _set_status(self, value):
         if self._jobs:
@@ -379,6 +520,13 @@ class Controller(QObject):
     def applyIslandClickThrough(self, enabled):
         self._apply_click_through(enabled)
 
+    @Slot("QVariant", bool)
+    def applyClickThrough(self, window_id, enabled):
+        try:
+            self.desktop.set_click_through(int(window_id), bool(enabled))
+        except (RuntimeError, TypeError, ValueError):
+            return
+
     @Slot(float, float)
     def saveIslandPosition(self, x, y):
         if not self._settings["island_snap"]:
@@ -412,14 +560,15 @@ class Controller(QObject):
     @Slot()
     def testLiveSource(self):
         """Check exactly the source selected for live captions."""
-        self._test_capture(self._settings["source"])
+        kind, _device = source_for_mode("live", self._settings)
+        self._test_capture(kind)
 
     @Slot()
     def testSystemLoopback(self):
         """Play a quiet tone and verify that the selected output loops back."""
         if self._jobs or self._testing_device:
             return
-        if self._settings["source"] != "system":
+        if self._settings["live_source"] != "system":
             self._notice = "Для проверки loopback выберите «Звук системы» как источник Live."
             self.changed.emit()
             return
@@ -609,12 +758,14 @@ class Controller(QObject):
             self.desktop.target = 0
         self._notice = ""
         self._segments = []
+        self._edit_undo = []
+        self._edit_redo = []
         self._media_url = ""
         self._hits = []
         self._started = time.monotonic()
         self._last_signal_at = self._started
         self._elapsed = "00:00"
-        mode = self._page if self._page in ("dictation", "live") else "dictation"
+        mode = self._page if self._page in ("dictation", "live", "monitor") else "dictation"
         self._recording_mode = mode
         self._session_mode = mode
         self._session_title = {
@@ -626,7 +777,8 @@ class Controller(QObject):
         self._status = "Слушаю · модель загрузится при первой фразе"
         self._last_status = ""
         self._record_log("info", f"Запущен режим: {mode}.")
-        sources = [("Микрофон" if self._settings["source"] == "microphone" else "Звук компьютера", "")]
+        kind, device = source_for_mode(mode, self._settings)
+        sources = [("Микрофон" if kind == "microphone" else "Звук компьютера", "")]
         if mode == "monitor":
             sources = []
             for line in str(self._settings["channels"]).splitlines():
@@ -639,7 +791,7 @@ class Controller(QObject):
                 self.changed.emit()
                 return
         for name, url in sources:
-            sid = self.store.create_session(name, mode, url or self._settings["source"], self._settings["model"])
+            sid = self.store.create_session(name, mode, url or kind, self._settings["model"])
             self._session_id = sid
             if sid == self._session_id:
                 self._session_title = name
@@ -650,15 +802,16 @@ class Controller(QObject):
             self._jobs[sid] = {"live": live, "mode": mode, "name": name, "hotkey": hotkey}
             try:
                 def audio_error(error, sid=sid, live=live):
+                    if str(error).startswith("Поток переподключается"):
+                        self.logArrived.emit("warning", str(error))
+                        return
                     live.failed = error
                     threading.Thread(target=live.stop, kwargs={"cancel": True}, daemon=True).start()
                 args = {"on_audio": live.feed, "on_level": self.levelArrived.emit, "on_error": audio_error}
                 if url:
                     capture = StreamCapture(url, **args)
                 else:
-                    device = self._settings["input_device"] if self._settings["source"] == "microphone" else self._settings["loopback_device"]
-                    capture = AudioCapture(kind=self._settings["source"],
-                                            device=int(device) if str(device).isdigit() else device or None, **args)
+                    capture = AudioCapture(kind=kind, device=device, **args)
                 # Device startup and WASAPI initialization must not block the QML thread.
                 def start(live=live, capture=capture, sid=sid):
                     try:
@@ -719,6 +872,8 @@ class Controller(QObject):
         sid = self.store.create_session(media.name, "media", str(media), self._settings["model"])
         self._session_id = sid
         self._segments = []
+        self._edit_undo = []
+        self._edit_redo = []
         self._session_mode = "media"
         self._session_title = media.name
         self._media_url = QUrl.fromLocalFile(str(media.resolve())).toString()
@@ -771,10 +926,14 @@ class Controller(QObject):
             self._record_log("error", error)
         if job["mode"] == "dictation" and not cancelled and not error:
             session = self.store.get_session(sid)
-            text = " ".join(s["text"].strip() for s in session["segments"])
+            raw_text = " ".join(s["text"].strip() for s in session["segments"])
+            text = self._apply_dictation_rules(raw_text)
             if text:
                 QApplication.clipboard().setText(text)
-                self._notice = "Текст скопирован в буфер обмена."
+                changed = text != raw_text
+                self._notice = "Текст скопирован в буфер обмена." + (
+                    " Применены ваши локальные правила." if changed else ""
+                )
                 if self._settings["auto_paste"] and job.get("hotkey"):
                     QTimer.singleShot(250, self._paste)
         if not self._jobs:
@@ -816,6 +975,8 @@ class Controller(QObject):
         if session:
             self._session_id = sid
             self._segments = session["segments"]
+            self._edit_undo = []
+            self._edit_redo = []
             self._session_mode = session["mode"]
             self._session_title = session["title"]
             source = session["source"]
@@ -832,10 +993,42 @@ class Controller(QObject):
     @Slot(int, str)
     def editSegment(self, segment_id, text):
         if self._session_id:
+            before = next((item["text"] for item in self._segments if item["id"] == segment_id), None)
+            if before is None or before == text:
+                return
             self.store.update_segment(self._session_id, segment_id, text)
             self._segments = self.store.get_session(self._session_id)["segments"]
+            self._edit_undo.append((segment_id, before, text))
+            self._edit_undo = self._edit_undo[-100:]
+            self._edit_redo = []
             self._record_log("info", f"Изменён сегмент {segment_id}.")
             self.changed.emit()
+
+    def _apply_edit(self, change, use_after):
+        segment_id, before, after = change
+        value = after if use_after else before
+        self.store.update_segment(self._session_id, segment_id, value)
+        self._segments = self.store.get_session(self._session_id)["segments"]
+
+    @Slot()
+    def undoEdit(self):
+        if not self._session_id or not self._edit_undo:
+            return
+        change = self._edit_undo.pop()
+        self._apply_edit(change, False)
+        self._edit_redo.append(change)
+        self._record_log("info", "Отменена правка сегмента.")
+        self.changed.emit()
+
+    @Slot()
+    def redoEdit(self):
+        if not self._session_id or not self._edit_redo:
+            return
+        change = self._edit_redo.pop()
+        self._apply_edit(change, True)
+        self._edit_undo.append(change)
+        self._record_log("info", "Повторена правка сегмента.")
+        self.changed.emit()
 
     @Slot(str)
     def exportFile(self, format):
@@ -845,7 +1038,8 @@ class Controller(QObject):
                                              f"{format.upper()} (*.{format})")
         if path:
             try:
-                Path(path).write_text(export_transcript(self._segments, format), encoding="utf-8")
+                segments = regroup_for_subtitles(self._segments) if format in ("srt", "vtt") else self._segments
+                Path(path).write_text(export_transcript(segments, format), encoding="utf-8")
                 self._notice = "Расшифровка сохранена."
                 self._record_log("success", f"Экспорт: {Path(path).name}")
             except OSError as exc:
