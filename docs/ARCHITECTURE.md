@@ -30,7 +30,7 @@ docs/             продуктовый контекст и передача р
 ## Поток данных
 
 ```text
-Microphone / System audio / HTTP stream
+Dictation microphone / Live system loopback (or microphone) / HTTP stream
   -> float32, mono, 16 kHz
   -> endpointing + bounded queue
   -> RecognitionConfig + Engine

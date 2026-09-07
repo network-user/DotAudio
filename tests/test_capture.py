@@ -15,6 +15,7 @@ from dotaudio.capture import (
     list_output_devices,
     play_output_tone,
     playback_device_for_loopback,
+    source_for_mode,
 )
 
 
@@ -132,6 +133,65 @@ def test_system_capture_resolves_selected_output_index(monkeypatch) -> None:
     )
 
     assert AudioCapture(kind="system", device=4)._resolve_loopback_speaker(soundcard) is selected_speaker
+
+
+def test_live_defaults_to_system_audio_even_if_legacy_source_is_microphone() -> None:
+    kind, device = source_for_mode(
+        "live",
+        {
+            "source": "microphone",
+            "input_device": "1",
+            "loopback_device": "{0.0.0.00000000}.{speaker}",
+        },
+    )
+    assert kind == "system"
+    assert device == "{0.0.0.00000000}.{speaker}"
+
+
+def test_dictation_ignores_live_system_source() -> None:
+    kind, device = source_for_mode(
+        "dictation",
+        {"live_source": "system", "input_device": "4", "loopback_device": "headphones"},
+    )
+    assert kind == "microphone"
+    assert device == 4
+
+
+def test_live_can_still_use_microphone() -> None:
+    kind, device = source_for_mode(
+        "live",
+        {"live_source": "microphone", "input_device": "", "loopback_device": "ignored"},
+    )
+    assert kind == "microphone"
+    assert device is None
+
+
+def test_system_loop_records_native_mix_channels(monkeypatch) -> None:
+    recorded: dict[str, object] = {}
+
+    class Recorder:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def record(self, numframes):
+            raise RuntimeError("opened")
+
+    class Microphone:
+        channels = 2
+
+        def recorder(self, **kwargs):
+            recorded.update(kwargs)
+            return Recorder()
+
+    capture = AudioCapture(kind="system")
+    capture._resolve_loopback_microphone = lambda _soundcard: Microphone()  # type: ignore[method-assign]
+    monkeypatch.setitem(sys.modules, "soundcard", SimpleNamespace())
+    capture._system_loop()
+    assert recorded["channels"] == 2
+    assert recorded["samplerate"] == 16000
 
 
 def test_system_capture_uses_loopback_microphone_endpoint() -> None:

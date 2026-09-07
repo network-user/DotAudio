@@ -8,7 +8,8 @@ so a slow visualizer cannot cause microphone overflows or block a UI thread.
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Callable
+import sys
+from collections.abc import Callable, Mapping
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread, current_thread
 from typing import Any
@@ -22,6 +23,42 @@ ErrorCallback = Callable[[str], None]
 _QUEUE_LIMIT = 24
 _SAMPLE_RATE = 16000
 _BLOCK_FRAMES = 1600
+
+
+def source_for_mode(mode: str, settings: Mapping[str, Any]) -> tuple[str, int | str | None]:
+    """Pick capture kind and device for dictation vs live captions.
+
+    Dictation always uses the microphone.  Live defaults to system loopback
+    even when a leftover ``source=microphone`` setting remains from older
+    builds: computer playback never reaches a USB mic in a headset.
+    """
+
+    if mode == "live":
+        kind = str(settings.get("live_source") or "system")
+        if kind not in {"microphone", "system"}:
+            kind = "system"
+        raw = settings.get("input_device") if kind == "microphone" else settings.get("loopback_device")
+    else:
+        kind = "microphone"
+        raw = settings.get("input_device")
+    text = "" if raw is None else str(raw)
+    if text.isdigit():
+        return kind, int(text)
+    return kind, text or None
+
+
+def _ensure_windows_com() -> None:
+    """WASAPI loopback needs COM on the capture thread, not only at import."""
+
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        # COINIT_MULTITHREADED. S_FALSE and RPC_E_CHANGED_MODE are non-fatal.
+        ctypes.windll.ole32.CoInitializeEx(None, 0x0)
+    except Exception:
+        return
 
 
 class _CallbackDispatcher:
@@ -233,12 +270,18 @@ class AudioCapture(_CallbackDispatcher):
         try:
             import soundcard as sc
 
+            # soundcard initialises COM on the importing thread.  The
+            # loopback thread still needs its own apartment under Qt.
+            _ensure_windows_com()
             microphone = self._resolve_loopback_microphone(sc)
             if microphone is None:
                 raise RuntimeError("no system output device available")
+            # WASAPI loopback is the mix format of the render endpoint.
+            # Forcing mono can open, then return silence on some headsets.
+            channels = int(getattr(microphone, "channels", 1) or 1)
             with microphone.recorder(
                 samplerate=_SAMPLE_RATE,
-                channels=1,
+                channels=channels,
                 blocksize=_BLOCK_FRAMES,
             ) as recorder:
                 while not self._stop.is_set():
@@ -365,40 +408,48 @@ class StreamCapture(_CallbackDispatcher):
             str(_SAMPLE_RATE),
             "pipe:1",
         ]
-        try:
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            )
-            with self._lock:
-                self._process = process
-            assert process.stdout is not None
-            carry = b""
-            bytes_per_block = _BLOCK_FRAMES * 2
-            while not self._stop.is_set():
-                chunk = process.stdout.read(bytes_per_block)
-                if not chunk:
-                    break
-                carry += chunk
-                while len(carry) >= bytes_per_block:
-                    raw, carry = carry[:bytes_per_block], carry[bytes_per_block:]
-                    audio = np.frombuffer(raw, dtype="<i2").astype(np.float32)
-                    self._publish_audio(audio / 32768.0)
-            if not self._stop.is_set():
-                self._error("stream ended or FFmpeg could not read the source")
-        except Exception as exc:
-            if not self._stop.is_set():
-                self._error(f"stream capture failed: {exc}")
-        finally:
-            with self._lock:
-                process, self._process = self._process, None
-            if process is not None and process.poll() is None:
-                try:
-                    process.terminate()
-                except Exception:
-                    pass
+        attempt = 0
+        while not self._stop.is_set():
+            process = None
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                with self._lock:
+                    self._process = process
+                assert process.stdout is not None
+                carry = b""
+                bytes_per_block = _BLOCK_FRAMES * 2
+                while not self._stop.is_set():
+                    chunk = process.stdout.read(bytes_per_block)
+                    if not chunk:
+                        break
+                    carry += chunk
+                    while len(carry) >= bytes_per_block:
+                        raw, carry = carry[:bytes_per_block], carry[bytes_per_block:]
+                        audio = np.frombuffer(raw, dtype="<i2").astype(np.float32)
+                        self._publish_audio(audio / 32768.0)
+                attempt = 0 if self._stop.is_set() else attempt + 1
+            except Exception:
+                attempt += 1
+            finally:
+                with self._lock:
+                    if self._process is process:
+                        self._process = None
+                if process is not None and process.poll() is None:
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
+            if self._stop.is_set():
+                return
+            delay = min(15, 2 ** min(attempt - 1, 4))
+            self._error(f"Поток переподключается через {delay} с (попытка {attempt}).")
+            # Event.wait makes stop immediate even during a long network backoff.
+            self._stop.wait(delay)
 
 
 def list_input_devices() -> list[dict[str, str | int]]:
@@ -540,4 +591,5 @@ __all__ = [
     "list_output_devices",
     "playback_device_for_loopback",
     "play_output_tone",
+    "source_for_mode",
 ]
