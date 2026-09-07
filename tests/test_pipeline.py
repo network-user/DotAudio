@@ -47,6 +47,21 @@ class _Engine:
         return []
 
 
+def test_live_session_stop_before_start_still_completes() -> None:
+    completed = Event()
+    errors: list[tuple[str, bool]] = []
+    capture = _Capture()
+    session = LiveSession(
+        _Engine(), RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda error, cancelled: (errors.append((error, cancelled)), completed.set()),
+    )
+    session.stop(cancel=True)
+    assert completed.wait(2)
+    assert errors == [("", True)]
+    session.start(capture)
+    assert capture.started is False
+
+
 def test_live_session_drains_the_last_phrase_before_completion() -> None:
     completed = Event()
     segments: list[dict] = []
@@ -189,3 +204,137 @@ def test_live_session_coalesces_preview_and_prioritises_final() -> None:
     assert engine.calls == [SAMPLE_RATE // 10, SAMPLE_RATE * 3 // 10, SAMPLE_RATE * 8 // 10]
     assert partials == []
     assert [segment["text"] for segment in finals] == ["текст"]
+
+
+def _speech(seconds: float = 0.1) -> np.ndarray:
+    return np.full(int(SAMPLE_RATE * seconds), 0.4, dtype=np.float32)
+
+
+def _silence(seconds: float = 0.5) -> np.ndarray:
+    return np.zeros(int(SAMPLE_RATE * seconds), dtype=np.float32)
+
+
+def test_live_session_without_catch_up_stops_when_the_queue_is_full() -> None:
+    class SlowEngine:
+        def __init__(self) -> None:
+            self.started = Event()
+            self.release = Event()
+
+        def transcribe(self, audio, _config, _cancel, on_segment, _on_status):
+            if not self.started.is_set():
+                self.started.set()
+                assert self.release.wait(2)
+            on_segment({"start": 0.0, "end": len(audio) / SAMPLE_RATE, "text": "фраза"})
+            return []
+
+    engine = SlowEngine()
+    completed = Event()
+    errors: list[tuple[str, bool]] = []
+    statuses: list[str] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), lambda _segment: None, statuses.append,
+        lambda error, cancelled: (errors.append((error, cancelled)), completed.set()),
+    )
+    session.start(_Capture())
+    session.feed(_speech())
+    session.feed(_silence())
+    assert engine.started.wait(2)
+    session.feed(_speech())
+    session.feed(_silence())
+    session.feed(_speech())
+    session.feed(_silence())
+    session.feed(_speech())
+    session.feed(_silence())
+    engine.release.set()
+    assert completed.wait(2)
+    assert session.failed.startswith("Модель не успевает")
+    assert errors[0][0].startswith("Модель не успевает")
+
+
+def test_catch_up_drops_stale_finals_instead_of_stopping() -> None:
+    class SlowEngine:
+        def __init__(self) -> None:
+            self.started = Event()
+            self.release = Event()
+            self.lengths: list[int] = []
+
+        def transcribe(self, audio, _config, cancel, on_segment, _on_status):
+            self.lengths.append(len(audio))
+            if len(self.lengths) == 1:
+                self.started.set()
+                assert self.release.wait(2)
+            if not cancel.is_set():
+                on_segment({"start": 0.0, "end": len(audio) / SAMPLE_RATE, "text": "сейчас"})
+            return []
+
+    engine = SlowEngine()
+    completed = Event()
+    finals: list[dict] = []
+    statuses: list[str] = []
+    errors: list[tuple[str, bool]] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), finals.append, statuses.append,
+        lambda error, cancelled: (errors.append((error, cancelled)), completed.set()),
+        catch_up=True,
+    )
+    session.start(_Capture())
+    session.feed(_speech(0.2))
+    session.feed(_silence())
+    assert engine.started.wait(2)
+    session.feed(_speech(0.3))
+    session.feed(_silence())
+    session.feed(_speech(0.4))
+    session.feed(_silence())
+    session.stop()
+    engine.release.set()
+    assert completed.wait(2)
+    assert session.failed == ""
+    assert errors == [("", False)]
+    assert "live_backlog" in statuses
+    # In-flight first phrase plus the newest queued phrase. The middle
+    # utterance is dropped so captions stay on the current sound.
+    assert len(engine.lengths) == 2
+    assert engine.lengths[0] == int(SAMPLE_RATE * 0.2) + int(SAMPLE_RATE * 0.5)
+    assert engine.lengths[1] == int(SAMPLE_RATE * 0.4) + int(SAMPLE_RATE * 0.5)
+    assert finals[-1]["text"] == "сейчас"
+
+
+def test_catch_up_preview_uses_a_rolling_window() -> None:
+    class Engine:
+        def __init__(self) -> None:
+            self.lengths: list[int] = []
+            self.ready = Event()
+
+        def transcribe(self, audio, config, _cancel, on_segment, _on_status):
+            self.lengths.append(len(audio))
+            if config.live_preview:
+                on_segment({"start": 0.0, "end": len(audio) / SAMPLE_RATE, "text": "черновик"})
+                self.ready.set()
+            return []
+
+    engine = Engine()
+    completed = Event()
+    session = LiveSession(
+        engine, RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: completed.set(), lambda _partial: None,
+        catch_up=True, preview_min_seconds=0.2, preview_interval_seconds=0.2,
+        preview_window_seconds=0.4,
+    )
+    session.start(_Capture())
+    session.feed(_speech(1.0))
+    assert engine.ready.wait(2)
+    session.stop(cancel=True)
+    assert completed.wait(2)
+    assert engine.lengths
+    assert max(engine.lengths) <= int(SAMPLE_RATE * 0.4) + 1
+
+
+def test_catch_up_defaults_keep_a_one_second_preview_window() -> None:
+    session = LiveSession(
+        _Engine(), RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: None, lambda _partial: None, catch_up=True,
+    )
+    assert session.buffer.limit == int(1.5 * SAMPLE_RATE)
+    assert session.buffer.silence_limit == int(0.24 * SAMPLE_RATE)
+    assert session._preview_window_samples == int(1.05 * SAMPLE_RATE)
+    assert session._preview_interval_samples == int(0.35 * SAMPLE_RATE)

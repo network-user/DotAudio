@@ -40,6 +40,26 @@ def test_local_engine_caches_model_and_normalises_segments(monkeypatch) -> None:
     assert created == [("base", "cpu", "int8")]
 
 
+def test_cached_model_skips_loading_status(monkeypatch) -> None:
+    statuses: list[str] = []
+
+    class FakeModel:
+        def transcribe(self, _source, **_kwargs):
+            return iter([_Segment(0, 0.4, "ok")]), object()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=lambda *_args, **_kwargs: FakeModel()),
+    )
+    engine = Engine()
+    config = RecognitionConfig(device="cpu")
+    engine.transcribe(np.zeros(1600, dtype=np.float32), config, on_status=statuses.append)
+    statuses.clear()
+    engine.transcribe(np.zeros(1600, dtype=np.float32), config, on_status=statuses.append)
+    assert "loading_model" not in statuses
+
+
 def test_initial_prompt_keeps_local_dictionary_terms_bounded() -> None:
     prompt = Engine._initial_prompt("ru", "DotAudio; CTranslate2")
     assert prompt is not None
@@ -155,7 +175,11 @@ def test_live_preview_recipe_uses_greedy_decoding(monkeypatch) -> None:
     class FakeModel:
         def transcribe(self, _source, **kwargs):
             assert kwargs["beam_size"] == 1
+            assert kwargs["best_of"] == 1
+            assert kwargs["temperature"] == 0.0
             assert kwargs["word_timestamps"] is False
+            assert kwargs["vad_filter"] is False
+            assert kwargs["without_timestamps"] is True
             return iter([_Segment(0, 1, "черновик")]), object()
 
     monkeypatch.setitem(
@@ -167,3 +191,26 @@ def test_live_preview_recipe_uses_greedy_decoding(monkeypatch) -> None:
         np.zeros(1600), RecognitionConfig(device="cpu", live_preview=True)
     )
     assert result[0]["text"] == "черновик"
+
+
+def test_live_stream_recipe_skips_second_vad_and_uses_greedy(monkeypatch) -> None:
+    class FakeModel:
+        def transcribe(self, _source, **kwargs):
+            assert kwargs["beam_size"] == 1
+            assert kwargs["best_of"] == 1
+            assert kwargs["temperature"] == 0.0
+            assert kwargs["vad_filter"] is False
+            assert kwargs["word_timestamps"] is False
+            assert kwargs["without_timestamps"] is True
+            assert "compression_ratio_threshold" not in kwargs
+            return iter([_Segment(0, 1, "фраза")]), object()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=lambda *_args, **_kwargs: FakeModel()),
+    )
+    result = Engine().transcribe(
+        np.zeros(1600), RecognitionConfig(device="cpu", live_stream=True)
+    )
+    assert result[0]["text"] == "фраза"

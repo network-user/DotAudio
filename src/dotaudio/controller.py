@@ -39,6 +39,7 @@ DEFAULTS = {
     "island_x": -1, "island_y": 32,
     "caption_overlay": True, "caption_size": "md", "caption_contrast": "normal",
     "dictate_hotkey": "Ctrl+Alt+Space", "island_hotkey": "Ctrl+Alt+O",
+    "paste_last_hotkey": "Shift+Alt+Z", "dictate_hold": False,
     # Kept in local settings so terminology and snippets never leave the PC.
     "dictionary": [], "snippets": [],
 }
@@ -55,6 +56,7 @@ HOTKEY_OPTIONS = {
     "Ctrl+Alt+O": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x4F),
     "Ctrl+Shift+O": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, 0x4F),
     "Ctrl+Win+O": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_WIN, 0x4F),
+    "Shift+Alt+Z": Hotkey(MOD_NOREPEAT | MOD_SHIFT | MOD_ALT, 0x5A),
 }
 
 STATUS_LABELS = {
@@ -67,7 +69,7 @@ STATUS_LABELS = {
     "cancelled": "Обработка отменена",
     "model_ready": "Модель подготовлена",
     "remote_model_managed_by_server": "Модель подготовит удалённый сервер",
-    "live_backlog": "Модель отстаёт от живого звука…",
+    "live_backlog": "Догоняем живой звук…",
 }
 
 
@@ -104,8 +106,12 @@ class Controller(QObject):
         saved_bindings = {
             "dictate": HOTKEY_OPTIONS.get(str(self._settings["dictate_hotkey"])),
             "island": HOTKEY_OPTIONS.get(str(self._settings["island_hotkey"])),
+            "paste_last": HOTKEY_OPTIONS.get(str(self._settings["paste_last_hotkey"])),
         }
-        if all(saved_bindings.values()) and saved_bindings["dictate"] != saved_bindings["island"]:
+        if (
+            all(saved_bindings.values())
+            and len({(item.modifiers, item.key) for item in saved_bindings.values()}) == 3
+        ):
             self.desktop.set_hotkeys(saved_bindings)
         self._page, self._state = "live", "idle"
         self._status = "Готов к работе"
@@ -141,6 +147,8 @@ class Controller(QObject):
         self._testing_device = False
         self._cover_url = ""
         self._rendering = False
+        self._last_transcript = ""
+        self._hold_active = False
         self._edit_undo: list[tuple[int, str, str]] = []
         self._edit_redo: list[tuple[int, str, str]] = []
         self.segmentArrived.connect(self._on_segment)
@@ -159,9 +167,16 @@ class Controller(QObject):
         self.renderFinished.connect(self._on_render_finished)
         desktop.dictate.connect(self.hotkeyRecord)
         desktop.island.connect(self.islandRequested)
+        desktop.paste_last.connect(self.pasteLastTranscript)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(1000)
+        self._cancel_release = QTimer(self)
+        self._cancel_release.setSingleShot(True)
+        self._cancel_release.timeout.connect(self._release_cancelled_jobs)
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setInterval(50)
+        self._hold_timer.timeout.connect(self._poll_hold)
         self.refreshHistory("")
         self.refreshDevices()
         self.refreshOutputs()
@@ -307,6 +322,9 @@ class Controller(QObject):
     @Property(bool, constant=True)
     def hotkeysAvailable(self): return self.desktop.available
 
+    @Property(str, notify=changed)
+    def lastTranscript(self): return self._last_transcript
+
     @Slot(str)
     def selectPage(self, page):
         if page in ("dictation", "live", "media", "monitor", "models", "history", "settings"):
@@ -331,7 +349,7 @@ class Controller(QObject):
         }
         if name in choices and value not in choices[name]:
             return
-        if name == "caption_overlay":
+        if name in ("caption_overlay", "auto_paste", "dictate_hold", "island_click_through", "island_snap"):
             value = bool(value)
         self._settings[name] = value
         if name == "live_source":
@@ -352,21 +370,28 @@ class Controller(QObject):
             self._record_log("info", f"Настройка {name}: {value}")
         self.changed.emit()
 
-    def _config(self, media_mode=False):
+    def _config(self, media_mode=False, live_stream=False):
         values = {key: self._settings[key] for key in
                   ("model", "device", "language", "task", "backend", "server_url", "profile")}
         values["initial_prompt"] = "; ".join(
             str(entry.get("term", "")).strip()
             for entry in self.dictionary if isinstance(entry, dict)
         )
-        return RecognitionConfig(**values, media_mode=bool(media_mode))
+        return RecognitionConfig(
+            **values, media_mode=bool(media_mode), live_stream=bool(live_stream)
+        )
 
     @Slot(str, str)
     def setHotkeys(self, dictate, island):
         if self._jobs:
             return
-        bindings = {"dictate": HOTKEY_OPTIONS.get(str(dictate)), "island": HOTKEY_OPTIONS.get(str(island))}
-        if None in bindings.values() or bindings["dictate"] == bindings["island"]:
+        paste_last = HOTKEY_OPTIONS.get(str(self._settings.get("paste_last_hotkey") or "Shift+Alt+Z"))
+        bindings = {
+            "dictate": HOTKEY_OPTIONS.get(str(dictate)),
+            "island": HOTKEY_OPTIONS.get(str(island)),
+            "paste_last": paste_last,
+        }
+        if None in bindings.values() or len({(item.modifiers, item.key) for item in bindings.values()}) != 3:
             self._notice = "Выберите две разные поддерживаемые комбинации."
             self.changed.emit()
             return
@@ -462,8 +487,10 @@ class Controller(QObject):
             label = STATUS_LABELS.get(value, value)
             self._status = label
             if self.liveActive:
-                if value in {"loading_model", "model_ready"}:
-                    self._live_phase = "starting" if value == "loading_model" else "listening"
+                if value == "loading_model" and self._live_phase in {"idle", "starting"}:
+                    self._live_phase = "starting"
+                elif value == "model_ready" and self._live_phase == "starting":
+                    self._live_phase = "listening"
                 elif value.startswith("transcribing_"):
                     self._live_phase = "decoding"
                 elif value == "live_backlog":
@@ -812,19 +839,53 @@ class Controller(QObject):
 
     @Slot()
     def hotkeyRecord(self):
+        if self._hold_active and self._state == "recording":
+            return
         if not self._jobs:
             self._page = "dictation"
             self.desktop.remember_target()
+        hold = bool(self._settings.get("dictate_hold")) and self.desktop.available
+        if hold and self._state != "recording":
+            self._hold_active = True
+            self._toggle(True)
+            self._hold_timer.start()
+            return
         self._toggle(True)
+
+    def _poll_hold(self):
+        if not self._hold_active:
+            self._hold_timer.stop()
+            return
+        if self._state != "recording":
+            self._hold_active = False
+            self._hold_timer.stop()
+            return
+        if self.desktop.combo_held("dictate"):
+            return
+        self._hold_active = False
+        self._hold_timer.stop()
+        if self._state == "recording":
+            self._toggle(True)
+
+    def _stop_hold(self):
+        self._hold_active = False
+        self._hold_timer.stop()
 
     @Slot()
     def toggleRecording(self):
+        if self._state == "processing" and self._jobs:
+            self.forceStop()
+            return
         self._toggle(False)
 
     def _toggle(self, hotkey):
         if self._state == "recording":
+            self._stop_hold()
             self._state = "processing"
             self._status = "Завершаем последние фразы…"
+            if any(job.get("mode") == "live" for job in self._jobs.values()):
+                self._live_phase = "stopping"
+                self.liveStateChanged.emit()
             for job in tuple(self._jobs.values()):
                 if job.get("live"):
                     threading.Thread(target=job["live"].stop, daemon=True).start()
@@ -886,12 +947,18 @@ class Controller(QObject):
             self._session_id = sid
             if sid == self._session_id:
                 self._session_title = name
-            config = self._config()
-            live = LiveSession(self.engine, config,
-                               lambda segment, sid=sid: self.segmentArrived.emit(sid, segment),
-                               self.statusArrived.emit,
-                               lambda error, cancelled, sid=sid: self.jobFinished.emit(sid, error, cancelled),
-                               on_partial=lambda segment, sid=sid: self.partialArrived.emit(sid, segment))
+            config = self._config(live_stream=(mode == "live"))
+            live = LiveSession(
+                self.engine, config,
+                lambda segment, sid=sid: self.segmentArrived.emit(sid, segment),
+                self.statusArrived.emit,
+                lambda error, cancelled, sid=sid: self.jobFinished.emit(sid, error, cancelled),
+                on_partial=(
+                    (lambda segment, sid=sid: self.partialArrived.emit(sid, segment))
+                    if mode == "live" else None
+                ),
+                catch_up=(mode == "live"),
+            )
             self._jobs[sid] = {"live": live, "mode": mode, "name": name, "hotkey": hotkey}
             try:
                 def audio_error(error, sid=sid, live=live):
@@ -910,9 +977,12 @@ class Controller(QObject):
                     try:
                         if mode == "live":
                             self.engine.prepare(config, self.statusArrived.emit)
+                        if live.cancel.is_set() or live.closed.is_set():
+                            live.stop(cancel=True)
+                            return
                         live.start(capture)
                     except Exception as exc:
-                        self.jobFinished.emit(sid, str(exc), False)
+                        self.jobFinished.emit(sid, str(exc), live.cancel.is_set())
                 threading.Thread(target=start, daemon=True).start()
             except Exception as exc:
                 self.jobFinished.emit(sid, str(exc), False)
@@ -922,15 +992,36 @@ class Controller(QObject):
 
     @Slot()
     def cancel(self):
+        self._stop_hold()
         for job in tuple(self._jobs.values()):
             if job.get("live"):
+                job["live"].cancel.set()
                 threading.Thread(target=job["live"].stop, kwargs={"cancel": True}, daemon=True).start()
             else:
                 job["cancel"].set()
         if self._jobs:
             self._state = "processing"
             self._status = "Останавливаем обработку…"
+            if any(job.get("live") is not None for job in self._jobs.values()):
+                self._cancel_release.start(1500)
             self.changed.emit()
+
+    @Slot()
+    def forceStop(self):
+        """Abort immediately and release the island if native decode ignores cancel."""
+
+        self.cancel()
+
+    def _release_cancelled_jobs(self):
+        """Unblock the UI when CTranslate2 has not returned after cancel."""
+
+        leftover = [
+            sid for sid, job in self._jobs.items()
+            if (job.get("live") is not None and job["live"].cancel.is_set())
+            or (job.get("cancel") is not None and job["cancel"].is_set())
+        ]
+        for sid in leftover:
+            self._on_finished(sid, "", True)
 
     @Slot()
     def importFile(self):
@@ -1068,6 +1159,7 @@ class Controller(QObject):
             text = self._apply_dictation_rules(raw_text)
             if text:
                 QApplication.clipboard().setText(text)
+                self._last_transcript = text
                 changed = text != raw_text
                 self._notice = "Текст скопирован в буфер обмена." + (
                     " Применены ваши локальные правила." if changed else ""
@@ -1092,7 +1184,31 @@ class Controller(QObject):
             self.shutdownReady.emit()
 
     def _paste(self):
-        self._notice = "Текст вставлен и сохранён в буфере." if self.desktop.paste() else "Текст в буфере. Нажмите Ctrl+V в нужном поле."
+        inserted = self.desktop.paste()
+        if inserted:
+            self._notice = "Текст вставлен и сохранён в буфере."
+        else:
+            shortcut = str(self._settings.get("paste_last_hotkey") or "Shift+Alt+Z")
+            self._notice = (
+                f"Текст в буфере. Нажмите Ctrl+V в нужном поле или {shortcut}, "
+                "чтобы вставить последний текст."
+            )
+        self.changed.emit()
+
+    @Slot()
+    def pasteLastTranscript(self):
+        text = self._last_transcript
+        if not text:
+            self._notice = "Пока нет расшифровки для вставки."
+            self.changed.emit()
+            return
+        QApplication.clipboard().setText(text)
+        self.desktop.remember_target()
+        if self.desktop.paste():
+            self._notice = "Последний текст вставлен. Он также в буфере."
+        else:
+            self._notice = "Текст в буфере. Нажмите Ctrl+V в нужном поле."
+        self._record_log("success", "Запрошена вставка последнего текста.")
         self.changed.emit()
 
     @Slot()

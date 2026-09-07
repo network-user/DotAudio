@@ -42,6 +42,9 @@ class RecognitionConfig:
     # Preview requests are short, disposable snapshots used only by Live UI.
     # They deliberately favour cadence over the final transcript's accuracy.
     live_preview: bool = False
+    # Live finals keep greedy decode and skip a second VAD pass: SpeechBuffer
+    # already endpointed the phrase.  Dictation and media keep the profile.
+    live_stream: bool = False
     # Domain terms are supplied by the user-facing dictionary.  They remain a
     # hint to the recognizer, never a replacement for the spoken audio.
     initial_prompt: str = ""
@@ -107,7 +110,9 @@ class Engine:
             self._status(on_status, "remote_model_managed_by_server")
             return "remote"
         self._status(on_status, "loading_model")
-        _model, device = self._model_for(config.model, config.device)
+        model, device = self._model_for(config.model, config.device)
+        if config.live_stream:
+            self._warm_live_decoder(model, config)
         self._status(on_status, "model_ready")
         return device
 
@@ -157,7 +162,8 @@ class Engine:
     ) -> list[Segment]:
         """Run local inference, retrying once on CPU for CUDA runtime faults."""
 
-        self._status(on_status, "loading_model")
+        if not self._has_cached_model(config.model, config.device):
+            self._status(on_status, "loading_model")
         try:
             return self._run_local(
                 source, config, config.device, cancel, on_segment, on_status
@@ -194,11 +200,13 @@ class Engine:
             "balanced": {"beam": 5, "patience": 1.0},
             "quality": {"beam": 8, "patience": 1.5},
         }[config.profile]
-        if config.live_preview:
+        live_fast = config.live_preview or config.live_stream
+        if live_fast:
             profile = {"beam": 1, "patience": 1.0}
         # Music commonly has speech-like instrumental fragments.  DotSound
-        # keeps VAD off for this case; spoken live input benefits from it.
-        use_vad = not config.media_mode
+        # keeps VAD off for this case.  Live already endpointed the phrase in
+        # SpeechBuffer, so a second Silero pass only delays the caption.
+        use_vad = not config.media_mode and not live_fast
         kwargs: dict[str, Any] = {
             "task": config.task,
             "language": language,
@@ -211,13 +219,20 @@ class Engine:
             "word_timestamps": config.media_mode,
             "initial_prompt": self._initial_prompt(language, config.initial_prompt),
         }
+        if live_fast:
+            # Greedy, no timestamps, no temperature fallback: one decode pass
+            # on a 1 s window is what makes the overlay feel live.
+            kwargs["best_of"] = 1
+            kwargs["temperature"] = 0.0
+            kwargs["without_timestamps"] = True
+            kwargs["word_timestamps"] = False
         if use_vad:
             kwargs["vad_parameters"] = {
                 "threshold": 0.35,
                 "min_silence_duration_ms": 350,
                 "min_speech_duration_ms": 120,
             }
-        else:
+        elif config.media_mode:
             # Less aggressive filtering preserves real sung Russian words.
             kwargs.update({
                 "compression_ratio_threshold": 2.4,
@@ -286,6 +301,34 @@ class Engine:
                     raise
         assert last_error is not None
         raise last_error
+
+    def _has_cached_model(self, model_name: str, requested_device: str) -> bool:
+        with self._model_lock:
+            if requested_device == "auto":
+                return any(name == model_name for name, _device in self._models)
+            return (model_name, requested_device) in self._models
+
+    def _warm_live_decoder(self, model: Any, config: RecognitionConfig) -> None:
+        """Run a silent 300 ms pass so the first live caption is not a cold start."""
+
+        language = None if config.language.strip().lower() == "auto" else config.language
+        silence = np.zeros(4800, dtype=np.float32)
+        try:
+            with self._inference_lock:
+                segments, _info = model.transcribe(
+                    silence,
+                    language=language,
+                    task=config.task,
+                    beam_size=1,
+                    best_of=1,
+                    temperature=0.0,
+                    vad_filter=False,
+                    without_timestamps=True,
+                    condition_on_previous_text=False,
+                )
+                list(segments)
+        except Exception:
+            return
 
     def _get_or_load_model(self, model_name: str, device: str) -> Any:
         key = (model_name, device)
