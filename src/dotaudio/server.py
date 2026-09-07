@@ -12,6 +12,51 @@ from dataclasses import dataclass, field
 
 DEFAULT_MODELS = ("tiny", "base", "small", "medium", "large-v3", "turbo", "large-v3-turbo")
 DEFAULT_UPLOAD_BYTES = 100 * 1024 * 1024
+_OPENAI_FORMATS = {"json", "text", "verbose_json", "srt", "vtt"}
+
+
+def openai_transcription_payload(segments, *, language: str, response_format: str):
+    """Shape DotAudio segments into an OpenAI-compatible transcription body."""
+
+    fmt = str(response_format or "json").strip().lower()
+    if fmt not in _OPENAI_FORMATS:
+        from fastapi import HTTPException
+
+        raise HTTPException(422, "response_format must be json, text, verbose_json, srt or vtt.")
+    text = " ".join(
+        str(segment.get("text", "")).strip()
+        for segment in segments
+        if str(segment.get("text", "")).strip()
+    )
+    if fmt == "text":
+        return text
+    if fmt in {"srt", "vtt"}:
+        from dotaudio.transcripts import export_transcript
+
+        return export_transcript(list(segments), fmt)
+    if fmt == "verbose_json":
+        duration = max((float(segment.get("end", 0.0)) for segment in segments), default=0.0)
+        return {
+            "task": "transcribe",
+            "language": "" if language == "auto" else language,
+            "duration": duration,
+            "text": text,
+            "segments": [
+                {
+                    "id": index,
+                    "start": float(segment.get("start", 0.0)),
+                    "end": float(segment.get("end", 0.0)),
+                    "text": str(segment.get("text", "")).strip(),
+                    **(
+                        {"words": segment["words"]}
+                        if isinstance(segment.get("words"), list) and segment["words"]
+                        else {}
+                    ),
+                }
+                for index, segment in enumerate(segments)
+            ],
+        }
+    return {"text": text}
 
 
 class InvalidAudio(ValueError):
@@ -85,7 +130,7 @@ class _MultipartUpload:
         from fastapi import HTTPException
 
         self.parts += 1
-        if self.parts > 4:
+        if self.parts > 6:
             raise HTTPException(400, "Too many multipart fields.")
         self.headers.clear()
         self.value.clear()
@@ -120,7 +165,9 @@ class _MultipartUpload:
             self.name = options.get(b"name", b"").decode("utf-8")
         except UnicodeError as exc:
             raise HTTPException(400, "Invalid multipart field name.") from exc
-        if disposition != b"form-data" or self.name not in {"file", "model", "language", "task"}:
+        if disposition != b"form-data" or self.name not in {
+            "file", "model", "language", "task", "response_format",
+        }:
             raise HTTPException(400, "Unexpected multipart field.")
         if self.name == "file":
             if self.file_seen:
@@ -216,7 +263,7 @@ def create_app(*, engine=None, max_upload_bytes=DEFAULT_UPLOAD_BYTES, max_durati
         return {"status": "ok", "busy": app.state.busy, "models": models,
                 "max_upload_bytes": max_upload_bytes, "max_duration_seconds": max_duration_seconds}
 
-    async def transcribe(request):
+    async def run_asr(request):
         if app.state.busy:
             raise HTTPException(503, "Recognition worker is busy.", headers={"Retry-After": "2"})
         app.state.busy = True
@@ -240,6 +287,9 @@ def create_app(*, engine=None, max_upload_bytes=DEFAULT_UPLOAD_BYTES, max_durati
             if language != "auto" and (not language.isascii() or not language.isalpha()
                                        or len(language) not in {2, 3}):
                 raise HTTPException(422, "Language must be auto or a Whisper language code.")
+            response_format = upload.fields.get("response_format", "json")
+            if "response_format" in upload.fields and response_format not in _OPENAI_FORMATS:
+                raise HTTPException(422, "response_format must be json, text, verbose_json, srt or vtt.")
 
             def recognize():
                 from dotaudio.engine import Engine, RecognitionConfig
@@ -264,7 +314,7 @@ def create_app(*, engine=None, max_upload_bytes=DEFAULT_UPLOAD_BYTES, max_durati
                 raise HTTPException(422, str(exc)) from exc
             except Exception as exc:
                 raise HTTPException(500, "Recognition failed. Check the model and server configuration.") from exc
-            return {"segments": segments}
+            return upload.fields, segments
         except (asyncio.CancelledError, ClientDisconnect):
             cancel.set()
             raise
@@ -275,9 +325,29 @@ def create_app(*, engine=None, max_upload_bytes=DEFAULT_UPLOAD_BYTES, max_durati
             else:
                 release()
 
+    async def transcribe(request):
+        _fields, segments = await run_asr(request)
+        return {"segments": segments}
+
+    async def openai_transcriptions(request):
+        from fastapi.responses import PlainTextResponse
+
+        fields, segments = await run_asr(request)
+        payload = openai_transcription_payload(
+            segments,
+            language=fields.get("language", "auto"),
+            response_format=fields.get("response_format", "json"),
+        )
+        if isinstance(payload, str):
+            return PlainTextResponse(payload)
+        return payload
+
     # Resolve Request explicitly: FastAPI cannot resolve function-local imports in postponed annotations.
+    run_asr.__annotations__["request"] = Request
     transcribe.__annotations__["request"] = Request
+    openai_transcriptions.__annotations__["request"] = Request
     app.post("/v1/transcribe")(transcribe)
+    app.post("/v1/audio/transcriptions")(openai_transcriptions)
     return app
 
 

@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from dotaudio.server import InvalidAudio, create_app, decode_audio
+from dotaudio.server import InvalidAudio, create_app, decode_audio, openai_transcription_payload
 
 
 class FakeEngine:
@@ -35,6 +35,32 @@ def test_health_and_transcribe():
         assert response.json()["segments"][0]["text"] == "Привет"
         assert engine.calls[0][1].language == "ru"
         assert client.get("/health").json()["busy"] is False
+
+
+def test_openai_transcriptions_json_and_text():
+    engine = FakeEngine()
+    with TestClient(create_app(engine=engine, decoder=fake_decode)) as client:
+        json_response = client.post(
+            "/v1/audio/transcriptions",
+            files={"file": ("clip.wav", b"audio")},
+            data={"model": "base", "language": "ru", "response_format": "json"},
+        )
+        assert json_response.status_code == 200, json_response.text
+        assert json_response.json()["text"] == "Привет"
+        text_response = client.post(
+            "/v1/audio/transcriptions",
+            files={"file": ("clip.wav", b"audio")},
+            data={"model": "base", "response_format": "text"},
+        )
+        assert text_response.status_code == 200
+        assert text_response.text == "Привет"
+        verbose = openai_transcription_payload(
+            [{"start": 0.0, "end": 1.2, "text": "Привет"}],
+            language="ru",
+            response_format="verbose_json",
+        )
+        assert verbose["duration"] == 1.2
+        assert verbose["text"] == "Привет"
 
 
 @pytest.mark.parametrize("body,content_type", [
