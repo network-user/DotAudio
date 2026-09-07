@@ -222,6 +222,27 @@ def export_transcript(
     raise ValueError(f"unsupported transcript format: {format}")
 
 
+def apply_keyword_cooldown(
+    matches: list[str],
+    last_fired: dict[str, float],
+    now: float,
+    cooldown_seconds: float = 20.0,
+) -> list[str]:
+    """Keep the first hit of a keyword, then ignore repeats until cooldown elapses."""
+
+    if cooldown_seconds < 0:
+        raise ValueError("cooldown_seconds must be >= 0")
+    fresh: list[str] = []
+    for keyword in matches:
+        key = _normalise(keyword)
+        previous = last_fired.get(key)
+        if previous is not None and now - previous < cooldown_seconds:
+            continue
+        last_fired[key] = now
+        fresh.append(keyword)
+    return fresh
+
+
 def match_keywords(text: str, keywords: list[str]) -> list[str]:
     """Return supplied words or phrases found on Unicode word boundaries."""
     if not isinstance(text, str):

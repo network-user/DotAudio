@@ -5,6 +5,7 @@ import json
 import pytest
 
 from dotaudio.transcripts import (
+    apply_keyword_cooldown,
     export_transcript,
     match_keywords,
     regroup_for_subtitles,
@@ -39,6 +40,13 @@ def test_keyword_matching_respects_unicode_word_and_phrase_boundaries() -> None:
         text,
         ["елка", "новая новость", "новость", "новост", "елку"],
     ) == ["елка", "новая новость", "новость"]
+
+
+def test_keyword_cooldown_ignores_repeats_until_the_window_elapses() -> None:
+    seen: dict[str, float] = {}
+    assert apply_keyword_cooldown(["елка"], seen, 0.0, 20.0) == ["елка"]
+    assert apply_keyword_cooldown(["елка"], seen, 5.0, 20.0) == []
+    assert apply_keyword_cooldown(["елка", "новость"], seen, 21.0, 20.0) == ["елка", "новость"]
 
 
 def test_unknown_export_format_and_negative_timestamp_fail() -> None:
