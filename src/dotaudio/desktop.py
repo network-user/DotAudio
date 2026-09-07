@@ -1,6 +1,7 @@
 """Small Windows integration surface; other desktops keep clipboard fallback."""
 
 import ctypes
+import os
 import sys
 from collections.abc import Mapping
 from ctypes import wintypes
@@ -14,11 +15,17 @@ MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 
+VK_SHIFT = 0x10
 VK_CONTROL = 0x11
+VK_MENU = 0x12
 VK_V = 0x56
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
 KEYEVENTF_KEYUP = 0x0002
+_ASYNC_DOWN = 0x8000
 
-_HOTKEY_IDS = {"dictate": 41, "island": 42}
+_HOTKEY_IDS = {"dictate": 41, "island": 42, "paste_last": 43}
+_REQUIRED_HOTKEYS = {"dictate", "island"}
 _ALLOWED_MODIFIERS = MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN | MOD_NOREPEAT
 
 
@@ -65,9 +72,28 @@ class _INPUT(ctypes.Structure):
 INPUT_KEYBOARD = 1
 
 
+def combo_is_held(key_down, hotkey: Hotkey) -> bool:
+    """Return True when every modifier and the action key are currently down.
+
+    ``RegisterHotKey`` only reports the press.  Hold-to-talk polls this until
+    the user releases the combination.  ``key_down`` takes a virtual-key code.
+    """
+
+    if hotkey.modifiers & MOD_CONTROL and not key_down(VK_CONTROL):
+        return False
+    if hotkey.modifiers & MOD_ALT and not key_down(VK_MENU):
+        return False
+    if hotkey.modifiers & MOD_SHIFT and not key_down(VK_SHIFT):
+        return False
+    if hotkey.modifiers & MOD_WIN and not (key_down(VK_LWIN) or key_down(VK_RWIN)):
+        return False
+    return bool(key_down(hotkey.key))
+
+
 class Desktop(QObject, QAbstractNativeEventFilter):
     dictate = Signal()
     island = Signal()
+    paste_last = Signal()
 
     def __init__(self, app):
         QObject.__init__(self)
@@ -85,6 +111,7 @@ class Desktop(QObject, QAbstractNativeEventFilter):
                 {
                     "dictate": Hotkey(MOD_NOREPEAT | MOD_ALT | MOD_CONTROL, 0x20),
                     "island": Hotkey(MOD_NOREPEAT | MOD_ALT | MOD_CONTROL, 0x4F),
+                    "paste_last": Hotkey(MOD_NOREPEAT | MOD_SHIFT | MOD_ALT, 0x5A),
                 }
             )
 
@@ -107,6 +134,10 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         self.user32.UnregisterHotKey.restype = wintypes.BOOL
         self.user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT), ctypes.c_int]
         self.user32.SendInput.restype = wintypes.UINT
+        self.user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        self.user32.GetAsyncKeyState.restype = wintypes.SHORT
+        self.user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        self.user32.SetForegroundWindow.restype = wintypes.BOOL
 
     def set_hotkeys(self, bindings: Mapping[str, Hotkey]) -> bool:
         """Atomically register the application hotkeys.
@@ -117,7 +148,10 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         active or the last known working pair is restored.
         """
 
-        if set(bindings) != set(_HOTKEY_IDS):
+        unknown = set(bindings) - set(_HOTKEY_IDS)
+        if unknown:
+            raise ValueError(f"Unknown hotkey actions: {sorted(unknown)}")
+        if not _REQUIRED_HOTKEYS <= set(bindings):
             raise ValueError("Hotkey bindings must define dictate and island actions")
         if any(not isinstance(hotkey, Hotkey) for hotkey in bindings.values()):
             raise TypeError("Hotkey bindings must contain Hotkey values")
@@ -129,7 +163,9 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         previous = self._registered_hotkeys.copy()
         self._unregister_hotkeys()
         for action, hotkey_id in _HOTKEY_IDS.items():
-            hotkey = bindings[action]
+            hotkey = bindings.get(action)
+            if hotkey is None:
+                continue
             if not self.user32.RegisterHotKey(None, hotkey_id, hotkey.modifiers, hotkey.key):
                 self._unregister_hotkeys()
                 self.available = self._register_hotkeys(previous)
@@ -168,23 +204,48 @@ class Desktop(QObject, QAbstractNativeEventFilter):
                     self.dictate.emit()
                 elif msg.wParam == 42:
                     self.island.emit()
+                elif msg.wParam == 43:
+                    self.paste_last.emit()
         return False, 0
 
     def remember_target(self):
         self.target = 0
         if self.user32:
             window = self.user32.GetForegroundWindow()
-            pid = wintypes.DWORD()
-            self.user32.GetWindowThreadProcessId(window, ctypes.byref(pid))
-            import os
-            if pid.value != os.getpid():
+            if window and not self._is_current_process(window):
                 self.target = window
+
+    def combo_held(self, action: str = "dictate") -> bool:
+        """True while the registered combination for ``action`` is still down."""
+
+        hotkey = self._registered_hotkeys.get(action)
+        if not self.user32 or hotkey is None:
+            return False
+        return combo_is_held(
+            lambda vk: bool(self.user32.GetAsyncKeyState(vk) & _ASYNC_DOWN),
+            hotkey,
+        )
+
+    def _is_current_process(self, window) -> bool:
+        if not self.user32 or not window:
+            return False
+        pid = wintypes.DWORD()
+        self.user32.GetWindowThreadProcessId(window, ctypes.byref(pid))
+        return int(pid.value) == os.getpid()
 
     def paste(self):
         if not self.user32 or not self.target or not self.user32.IsWindow(self.target):
             return False
-        if self.user32.GetForegroundWindow() != self.target:
-            return False
+        foreground = self.user32.GetForegroundWindow()
+        if foreground != self.target:
+            # The island is our window.  If it stole focus, return it to the
+            # remembered target.  If the user switched to another app, do not paste.
+            if not self._is_current_process(foreground):
+                return False
+            if not self.user32.SetForegroundWindow(self.target):
+                return False
+            if self.user32.GetForegroundWindow() != self.target:
+                return False
         # Called after the shortcut modifiers are released; no Enter is ever sent.
         inputs = (_INPUT * 4)(
             self._keyboard_input(VK_CONTROL),
