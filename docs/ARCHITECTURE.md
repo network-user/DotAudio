@@ -15,7 +15,9 @@ src/dotaudio/
   app.py          запуск Qt, аргументы CLI
   controller.py   мост QObject между QML и сервисами
   desktop.py      Windows hotkeys, целевое окно, Ctrl+V
-  qml/MainMvp.qml, TranscriptEditor.qml  оболочка MVP и редактор сегментов
+  qml/MainMvp.qml, MiniIsland.qml, LiveTheater.qml, CaptionOverlay.qml
+                  оболочка, остров, Live-сцена, окно субтитров
+  qml/Theme.js, Icon.qml, Waveform.qml, CaptionText.qml, TranscriptEditor.qml, KaraokePreview.qml
   capture.py      микрофон, loopback, прямой эфир через FFmpeg
   pipeline.py     буфер речи, ограниченная очередь, live-session
   engine.py       локальный/удалённый ASR, выбор устройства

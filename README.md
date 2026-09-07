@@ -70,9 +70,12 @@ src/dotaudio/
                                       # захват, очередь и faster-whisper
   storage.py, transcripts.py          # SQLite, миграции и экспорт расшифровок
   karaoke.py                          # word timestamps, ASS и MP4
-  qml/MainMvp.qml                     # остров и рабочее пространство
-  qml/KaraokePreview.qml              # просмотр караоке
-tests/                                # 40 тестов
+  qml/MainMvp.qml                     # оболочка: остров, сцена субтитров, окно
+  qml/MiniIsland.qml, LiveTheater.qml, CaptionOverlay.qml
+                                      # фазы острова, Live-сцена и экран зала
+  qml/Theme.js, Icon.qml, Waveform.qml, CaptionText.qml
+  qml/KaraokePreview.qml, TranscriptEditor.qml
+tests/                                # pytest, без микрофона и без скачивания моделей
 docs/                                 # продукт, архитектура, исследование
 ```
 
