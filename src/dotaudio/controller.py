@@ -380,6 +380,7 @@ class Controller(QObject):
     shutdownReady = Signal()
     transcribeChanged = Signal()
     transcribeStatus = Signal(str)
+    diarizeProbed = Signal("QVariantMap")
 
     def __init__(self, data_dir: Path, desktop):
         super().__init__()
@@ -499,6 +500,7 @@ class Controller(QObject):
         self.deviceTestFinished.connect(self._on_device_test_finished)
         self.renderFinished.connect(self._on_render_finished)
         self.realignReady.connect(self._on_realign_ready)
+        self.diarizeProbed.connect(self._on_diarize_probed)
         desktop.dictate.connect(self.hotkeyRecord)
         desktop.island.connect(self.islandRequested)
         desktop.paste_last.connect(self.pasteLastTranscript)
@@ -2243,7 +2245,7 @@ class Controller(QObject):
             self._record_log("success", self._notice)
         self.changed.emit()
 
-    @Slot()
+    @Slot(str)
     def exportFile(self, format):
         if not self._segments or format not in ("txt", "srt", "vtt", "json"):
             return
@@ -2334,6 +2336,103 @@ class Controller(QObject):
     @Property("QVariantList", notify=transcribeChanged)
     def transcribeSegments(self): return self._trans_state["segments"]
 
+    @Property("QVariantList", notify=transcribeChanged)
+    def diarizeEngines(self):
+        return [{"key": key, "label": label} for key, label in DIARIZE_ENGINES.items()]
+
+    @Property("QVariantMap", notify=transcribeChanged)
+    def diarizeStatus(self):
+        """Готовность выбранного движка голосов и что делать, если его нет."""
+
+        engine = str(self._settings.get("diarize_engine") or "off")
+        label = DIARIZE_ENGINES.get(engine, DIARIZE_ENGINES["off"])
+        base = {
+            "engine": engine, "label": label, "ready": False,
+            "checking": False, "message": "", "install": "", "hint": "",
+        }
+        if engine == "off":
+            return {**base, "ready": True,
+                    "message": "Голоса не определяются: только текст с таймкодами."}
+        if engine == "ecapa":
+            # find_spec не импортирует torch: проверка не должна стоить
+            # секунд загрузки тяжёлого стека на каждое открытие страницы.
+            from importlib.util import find_spec
+
+            ready = find_spec("speechbrain") is not None
+            return {
+                **base,
+                "ready": ready,
+                "message": (
+                    "SpeechBrain ECAPA готов · одна метка на фразу"
+                    if ready
+                    else "Не установлен SpeechBrain: движок голосов недоступен."
+                ),
+                "install": "" if ready else 'pip install -e ".[diarize]"',
+                "hint": "" if ready else "Выполните команду в папке проекта и перезапустите приложение.",
+            }
+        if self._diarize_probing:
+            return {**base, "checking": True, "message": "Проверяем рантайм NVIDIA NeMo…"}
+        report = self._diarize_probe
+        if not report:
+            return {**base, "message": "Готовность NeMo ещё не проверена."}
+        if report.get("available"):
+            return {**base, "ready": True, "message": str(report.get("message") or "NeMo готов")}
+        from dotaudio.nemo_diarize import install_command
+
+        hints = {
+            "not_installed": "Установите рантайм и нажмите «Проверить снова». "
+                             "Модель весом около 140 МБ скачается при первом запуске.",
+            "no_diarization": "Переустановите рантайм профилем, включающим диаризацию.",
+        }
+        reason = str(report.get("reason") or "")
+        return {
+            **base,
+            "message": str(report.get("message") or "Рантайм NeMo недоступен."),
+            "install": install_command() if reason == "not_installed" else "",
+            "hint": hints.get(reason, "Нажмите «Проверить снова» после устранения причины."),
+        }
+
+    @Slot()
+    def refreshDiarizeStatus(self):
+        """Опросить рантайм NeMo в фоне: это запуск процесса, не импорт."""
+
+        if self._diarize_probing or str(self._settings.get("diarize_engine")) != "nemo":
+            return
+        self._diarize_probing = True
+        self.transcribeChanged.emit()
+
+        def run():
+            from dotaudio.nemo_diarize import probe
+
+            try:
+                report = probe()
+            except Exception as exc:  # noqa: BLE001
+                report = {"available": False, "reason": "broken",
+                          "message": f"Не удалось проверить NeMo: {exc}"}
+            self.diarizeProbed.emit(report)
+
+        threading.Thread(target=run, name="dotaudio-nemo-probe", daemon=True).start()
+
+    def _on_diarize_probed(self, report):
+        self._diarize_probing = False
+        self._diarize_probe = dict(report)
+        self.transcribeChanged.emit()
+
+    @Slot()
+    def copyDiarizeInstall(self):
+        command = str(self.diarizeStatus.get("install") or "")
+        if not command:
+            return
+        QApplication.clipboard().setText(command)
+        self.transcribeStatus.emit("Команда установки скопирована в буфер обмена.")
+
+    @Slot(str)
+    def setDiarizeEngine(self, engine):
+        self.setSetting("diarize_engine", str(engine))
+        self._diarize_probe = {}
+        self.refreshDiarizeStatus()
+        self.transcribeChanged.emit()
+
     @Slot()
     def pickTranscriptFile(self):
         """Раздельный выбор файла именно для транскрибации."""
@@ -2345,8 +2444,9 @@ class Controller(QObject):
         if not path:
             return
         self.transcribeStatus.emit("Файл выбран. Нажмите «Транскрибировать».")
-        self._trans_state.update({"phase": "idle", "path": path, "file": str(Path(path).name),
-                                  "error": "", "speakers": [], "segments": []})
+        self._trans_state.update({"phase": "idle", "stage": "", "path": path,
+                                  "file": str(Path(path).name), "error": "", "speakers": [],
+                                  "segments": [], "engine": "", "engineNote": "", "duration": 0.0})
         self.transcribeChanged.emit()
 
     @Slot(str)
@@ -2361,8 +2461,9 @@ class Controller(QObject):
             self.transcribeStatus.emit("Выберите поддерживаемый аудио- или видеофайл.")
             self.transcribeChanged.emit()
             return
-        self._trans_state.update({"phase": "idle", "path": str(media), "file": media.name,
-                                  "error": "", "speakers": [], "segments": []})
+        self._trans_state.update({"phase": "idle", "stage": "", "path": str(media),
+                                  "file": media.name, "error": "", "speakers": [],
+                                  "segments": [], "engine": "", "engineNote": "", "duration": 0.0})
         self.transcribeChanged.emit()
 
     @Slot()
@@ -2377,7 +2478,8 @@ class Controller(QObject):
             return
         self._trans_cancel.clear()
         state = self._trans_state
-        state.update({"phase": "working", "error": "", "segments": []})
+        state.update({"phase": "working", "stage": "asr", "error": "", "segments": [],
+                      "speakers": [], "diarization": False, "engine": "", "engineNote": ""})
         self._record_log("info", f"Транскрибация (локально): {Path(path).name}")
         self.transcribeChanged.emit()
 
@@ -2387,6 +2489,7 @@ class Controller(QObject):
             except Exception as exc:  # noqa: BLE001
                 text = f"Ошибка: {exc}"
                 self._record_log("error", str(exc))
+            state["stage"] = ""
             if self._trans_cancel.is_set():
                 state.update({"phase": "idle"})
                 self.transcribeStatus.emit("Распознавание отменено (частичный результат не сохранён).")
@@ -2397,6 +2500,12 @@ class Controller(QObject):
 
         threading.Thread(target=process, name="dotaudio-transcribe", daemon=True).start()
         self.transcribeStatus.emit("Распознаём файл на этом устройстве…")
+
+    def _trans_stage(self, stage: str) -> None:
+        """Показать, чем занят проход: словами или голосами."""
+
+        self._trans_state["stage"] = stage
+        self.transcribeChanged.emit()
 
     def _transcribe_local(self, path: str) -> str:
         # Параметры движения как в караоке (слова), но backend принудительно
@@ -2415,39 +2524,108 @@ class Controller(QObject):
         results = self.engine.transcribe(path, config, self._trans_cancel,
                                          on_segment, lambda s: self.transcribeStatus.emit(s.upper()))
         collected = [item for item in collected if item["text"]] or results
-        # Определение голосов опционально (torch/speechbrain). Наличие проверяем
-        # в модуле speaker_id: если движка нет, включаем честное предупреждение.
-        try:
-            from platformdirs import user_cache_dir
-
-            from dotaudio.speaker_id import decode_audio, diarize_segments
-
-            audio = decode_audio(path)
-            roles = diarize_segments(audio, collected, user_cache_dir("dotaudio", "dotcore"))
-        except Exception as exc:  # noqa: BLE001
-            roles = []
-            self.transcribeStatus.emit("Без определения голосов: " + str(exc))
-        else:
-            self.transcribeStatus.emit("Готово. Громче всех - в метках говорящих.")
-        spoken, speakers = [], []
-        seen: dict[int, str] = {}
-        for number, row in enumerate(collected):
-            has_role = bool(roles and number < len(roles) and roles[number] is not None)
-            if has_role:
-                key = int(roles[number]) + 1
-                if key not in seen:
-                    seen[key] = f"Человек {key}"
-                    speakers.append({"key": key, "label": f"Человек {key}"})
-                speaker = seen[key]
-            else:
-                key = None
-                speaker = ""
-            spoken.append({**row, "role": key, "speaker": speaker})
+        if self._trans_cancel.is_set():
+            return ""
+        rows, engine, note = self._identify_voices(path, collected)
         state = self._trans_state
-        state["segments"] = spoken
-        state["speakers"] = speakers
-        state["diarization"] = bool(roles)
+        state["segments"] = rows
+        state["speakers"] = self._speaker_legend(rows)
+        state["diarization"] = bool(state["speakers"])
+        state["engine"] = engine
+        state["engineNote"] = note
+        state["duration"] = max((float(row.get("end", 0.0)) for row in rows), default=0.0)
         return ""
+
+    def _identify_voices(self, path: str, segments: list[dict]) -> tuple[list[dict], str, str]:
+        """Определить говорящих выбранным движком.
+
+        Неудача диаризации не отменяет расшифровку: текст с таймкодами
+        остаётся, а причина уходит в подпись под списком. Отмена во время
+        разметки голосов трактуется так же, как отмена распознавания.
+        """
+
+        engine = str(self._settings.get("diarize_engine") or "off")
+        if engine == "off" or not segments:
+            return self._label_speakers(segments), "", ""
+        self._trans_stage("voices")
+        try:
+            rows, note = (
+                self._voices_nemo(path, segments)
+                if engine == "nemo"
+                else self._voices_ecapa(path, segments)
+            )
+        except Exception as exc:  # noqa: BLE001
+            if self._trans_cancel.is_set():
+                return self._label_speakers(segments), "", ""
+            reason = str(exc).strip() or "движок голосов не ответил"
+            self._record_log("warning", f"Голоса не определены: {reason}")
+            self.transcribeStatus.emit("Текст готов, голоса не определены.")
+            return self._label_speakers(segments), "", f"Без определения голосов: {reason}"
+        self.transcribeStatus.emit("Готово: текст и говорящие.")
+        return self._label_speakers(rows), engine, note
+
+    def _voices_nemo(self, path: str, segments: list[dict]) -> tuple[list[dict], str]:
+        """Разметка дорожки моделью NVIDIA Sortformer через нативный рантайм."""
+
+        from dotaudio.nemo_diarize import MAX_SPEAKERS, diarize_audio
+        from dotaudio.speaker_id import assign_turns, decode_audio
+
+        audio = decode_audio(path)
+        turns = diarize_audio(audio, cancel=self._trans_cancel,
+                              on_status=self.transcribeStatus.emit)
+        rows = assign_turns(segments, turns)
+        voices = len({row["role"] for row in rows if row.get("role") is not None})
+        note = f"NVIDIA NeMo Sortformer · голосов: {voices}"
+        split = len(rows) - len(segments)
+        if split > 0:
+            note += f" · фраз разделено по смене голоса: {split}"
+        if voices >= MAX_SPEAKERS:
+            note += f" · модель различает не больше {MAX_SPEAKERS}"
+        return rows, note
+
+    def _voices_ecapa(self, path: str, segments: list[dict]) -> tuple[list[dict], str]:
+        """Прежний путь: один эмбеддинг на фразу и онлайн-кластеризация."""
+
+        from platformdirs import user_cache_dir
+
+        from dotaudio.speaker_id import apply_roles, decode_audio, diarize_segments
+
+        audio = decode_audio(path)
+        roles = diarize_segments(audio, segments, user_cache_dir("dotaudio", "dotcore"))
+        rows = apply_roles(segments, roles)
+        voices = len({role for role in roles if role is not None})
+        return rows, f"SpeechBrain ECAPA · голосов: {voices} · метка на фразу целиком"
+
+    @staticmethod
+    def _label_speakers(rows: list[dict]) -> list[dict]:
+        """Роль движка с нуля -> номер и подпись, которые видит пользователь."""
+
+        labelled = []
+        for row in rows:
+            role = row.get("role")
+            key = int(role) + 1 if role is not None else None
+            labelled.append({**row, "role": key, "speaker": f"Человек {key}" if key else ""})
+        return labelled
+
+    @staticmethod
+    def _speaker_legend(rows: list[dict]) -> list[dict]:
+        """Легенда с числом реплик и временем речи каждого голоса."""
+
+        legend: dict[int, dict] = {}
+        for row in rows:
+            key = row.get("role")
+            if not key:
+                continue
+            entry = legend.setdefault(
+                int(key),
+                {"key": int(key), "label": str(row.get("speaker") or ""), "count": 0, "seconds": 0.0},
+            )
+            entry["count"] += 1
+            entry["seconds"] += max(
+                0.0, float(row.get("end", 0.0)) - float(row.get("start", 0.0))
+            )
+        ordered = sorted(legend.values(), key=lambda item: item["key"])
+        return [{**item, "seconds": round(item["seconds"], 1)} for item in ordered]
 
     @Slot()
     def stopTranscript(self):
@@ -2457,9 +2635,10 @@ class Controller(QObject):
     def clearTranscript(self):
         if self._jobs or self._trans_state["phase"] == "working":
             return
-        self._trans_state.update({"phase": "idle", "file": "", "path": "",
+        self._trans_state.update({"phase": "idle", "stage": "", "file": "", "path": "",
                                   "error": "", "speakers": [], "segments": [],
-                                  "diarization": False})
+                                  "diarization": False, "engine": "", "engineNote": "",
+                                  "duration": 0.0})
         self.transcribeChanged.emit()
 
     @Slot(int, str)

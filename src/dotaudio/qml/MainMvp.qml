@@ -49,6 +49,14 @@ ApplicationWindow {
     property real pageFade: 1
     property real pageSlide: 0
     readonly property int targetPageIndex: Math.max(0, pageKeys.indexOf(bridge.page))
+
+    // Время воспроизведения в мм:сс для транспорта медиа-страницы.
+    function clock(milliseconds) {
+        var total = Math.max(0, Math.round(Number(milliseconds) / 1000))
+        var minutes = Math.floor(total / 60)
+        var seconds = total % 60
+        return (minutes < 10 ? "0" : "") + minutes + ":" + (seconds < 10 ? "0" : "") + seconds
+    }
     onTargetPageIndexChanged: {
         if (root.shellMode === "app")
             pageSwap.restart()
@@ -835,6 +843,71 @@ ApplicationWindow {
                                         PillButton { Layout.alignment: Qt.AlignHCenter; text: "Выбрать медиа"; primary: true; onClicked: bridge.importFile() }
                                     }
                                 }
+                                // Транспорт воспроизведения. Без него по записи
+                                // можно было двигаться только кликом по таймкоду
+                                // в списке фраз, а паузы не было вовсе.
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    visible: bridge.mediaUrl.length > 0
+                                    spacing: Theme.gapSm
+
+                                    IconButton {
+                                        readonly property bool running:
+                                            mediaPlayer.playbackState === MediaPlayer.PlayingState
+                                        iconName: running ? "stop" : "live"
+                                        onClicked: running ? mediaPlayer.pause() : mediaPlayer.play()
+                                        ToolTip.visible: hovered
+                                        ToolTip.text: running ? "Пауза" : "Воспроизвести"
+                                    }
+
+                                    Label {
+                                        text: root.clock(mediaPlayer.position)
+                                        color: Theme.muted
+                                        font.family: Theme.monoFamily
+                                        font.pixelSize: Theme.fsSmall
+                                    }
+
+                                    Slider {
+                                        id: seek
+                                        Layout.fillWidth: true
+                                        from: 0
+                                        to: Math.max(1, mediaPlayer.duration)
+                                        // Пока тянут ручку, позиция плеера не
+                                        // перетирает то, что показывает слайдер.
+                                        value: pressed ? value : mediaPlayer.position
+                                        onMoved: mediaPlayer.position = value
+                                        background: Rectangle {
+                                            x: seek.leftPadding
+                                            y: seek.topPadding + seek.availableHeight / 2 - height / 2
+                                            width: seek.availableWidth
+                                            height: 3
+                                            radius: 2
+                                            color: Theme.fill
+                                            Rectangle {
+                                                width: seek.visualPosition * parent.width
+                                                height: parent.height
+                                                radius: 2
+                                                color: Theme.text
+                                            }
+                                        }
+                                        handle: Rectangle {
+                                            x: seek.leftPadding + seek.visualPosition * (seek.availableWidth - width)
+                                            y: seek.topPadding + seek.availableHeight / 2 - height / 2
+                                            width: 12
+                                            height: 12
+                                            radius: 6
+                                            color: Theme.text
+                                        }
+                                    }
+
+                                    Label {
+                                        text: root.clock(mediaPlayer.duration)
+                                        color: Theme.faint
+                                        font.family: Theme.monoFamily
+                                        font.pixelSize: Theme.fsSmall
+                                    }
+                                }
+
                                 RowLayout {
                                     Layout.fillWidth: true
                                     PillButton { text: "Открыть"; onClicked: bridge.importFile() }
@@ -843,6 +916,11 @@ ApplicationWindow {
                                     IconButton { iconName: "redo"; enabled: bridge.canRedoEdit; onClicked: bridge.redoEdit(); ToolTip.visible: hovered; ToolTip.text: "Повторить правку" }
                                     Item { Layout.fillWidth: true }
                                     PillButton { text: "слова→тишина"; enabled: bridge.segments.length > 0; onClicked: bridge.realignKaraoke(); ToolTip.visible: hovered; ToolTip.text: "Притянуть границы слов к тишине аудио (без повторного распознавания)" }
+                                    // Обычная расшифровка, а не только караоке:
+                                    // экспорт был реализован в ядре, но на этой
+                                    // странице его нечем было вызвать.
+                                    PillButton { text: "TXT"; enabled: bridge.segments.length > 0; onClicked: bridge.exportFile("txt") }
+                                    PillButton { text: "SRT"; enabled: bridge.segments.length > 0; onClicked: bridge.exportFile("srt"); ToolTip.visible: hovered; ToolTip.text: "Субтитры с таймкодами (также VTT и JSON - в диктовке)" }
                                     PillButton { text: "ASS"; enabled: bridge.segments.length > 0; onClicked: bridge.exportKaraokeFile() }
                                     PillButton { text: bridge.rendering ? "Рендер…" : "MP4"; primary: true; enabled: bridge.segments.length > 0 && !bridge.rendering; onClicked: bridge.exportKaraokeVideo() }
                                 }
@@ -1172,7 +1250,38 @@ ApplicationWindow {
                                         TextField { id: mistakeInput; Layout.preferredWidth: 180; placeholderText: "Вариант ошибки"; color: Theme.text; placeholderTextColor: Theme.muted; onAccepted: termRow.addTerm(); background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
                                         PillButton { text: "+"; onClicked: termRow.addTerm(); ToolTip.visible: hovered; ToolTip.text: "Добавить термин" }
                                     }
-                                    ListView { Layout.fillWidth: true; Layout.preferredHeight: Math.min(70, contentHeight); model: bridge.dictionary; clip: true; delegate: RowLayout { required property var modelData; required property int index; width: ListView.view.width; Text { Layout.fillWidth: true; text: modelData.term + (modelData.misheard ? " ← " + modelData.misheard : ""); color: Theme.muted; elide: Text.ElideRight; font.pixelSize: Theme.fsSmall } PillButton { text: "×"; onClicked: bridge.removeDictionaryEntry(index) } } }
+                                    // Список терминов: раньше он был обрезан
+                                    // семьюдесятью пикселями и уже с четвёртой
+                                    // записью словарь нельзя было просмотреть.
+                                    ListView {
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: Math.min(160, contentHeight)
+                                        model: bridge.dictionary
+                                        clip: true
+                                        spacing: 2
+                                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                                        delegate: RowLayout {
+                                            required property var modelData
+                                            required property int index
+                                            width: ListView.view.width
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: modelData.term + (modelData.misheard ? " ← " + modelData.misheard : "")
+                                                color: Theme.muted
+                                                elide: Text.ElideRight
+                                                font.pixelSize: Theme.fsSmall
+                                            }
+                                            IconButton {
+                                                iconName: "close"
+                                                glyph: 12
+                                                implicitWidth: 22
+                                                implicitHeight: 22
+                                                onClicked: bridge.removeDictionaryEntry(index)
+                                                ToolTip.visible: hovered
+                                                ToolTip.text: "Убрать термин"
+                                            }
+                                        }
+                                    }
                                     RowLayout {
                                         id: snippetRow
                                         Layout.fillWidth: true
@@ -1187,6 +1296,45 @@ ApplicationWindow {
                                         TextField { id: snippetInput; Layout.preferredWidth: 180; placeholderText: "Фраза"; color: Theme.text; placeholderTextColor: Theme.muted; onAccepted: snippetRow.addSnippet(); background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
                                         TextField { id: expansionInput; Layout.fillWidth: true; placeholderText: "Вставляемый текст"; color: Theme.text; placeholderTextColor: Theme.muted; onAccepted: snippetRow.addSnippet(); background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
                                         PillButton { text: "+"; onClicked: snippetRow.addSnippet(); ToolTip.visible: hovered; ToolTip.text: "Добавить замену" }
+                                    }
+                                    // Добавленные замены раньше исчезали из виду:
+                                    // их некуда было посмотреть и нечем убрать.
+                                    ListView {
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: Math.min(120, contentHeight)
+                                        model: bridge.snippets
+                                        clip: true
+                                        spacing: 2
+                                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                                        delegate: RowLayout {
+                                            required property var modelData
+                                            required property int index
+                                            width: ListView.view.width
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: modelData.trigger + " → " + modelData.expansion
+                                                color: Theme.muted
+                                                elide: Text.ElideRight
+                                                font.pixelSize: Theme.fsSmall
+                                            }
+                                            IconButton {
+                                                iconName: "close"
+                                                glyph: 12
+                                                implicitWidth: 22
+                                                implicitHeight: 22
+                                                onClicked: bridge.removeSnippet(index)
+                                                ToolTip.visible: hovered
+                                                ToolTip.text: "Убрать замену"
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        visible: bridge.snippets.length === 0
+                                        text: "Замен пока нет. Например: «пдп» → «Подпишитесь на канал»."
+                                        color: Theme.faint
+                                        font.pixelSize: Theme.fsSmall
+                                        wrapMode: Text.Wrap
                                     }
                                 }
                             }
@@ -1503,6 +1651,23 @@ ApplicationWindow {
                                             text: "Удерживать клавишу, чтобы диктовать"
                                             checked: Boolean(bridge.settings.dictate_hold)
                                             onToggled: bridge.setSetting("dictate_hold", checked)
+                                        }
+                                        // Автовставка была включена всегда и не
+                                        // имела выключателя, хотя вставляет текст
+                                        // в чужое окно.
+                                        ToggleSwitch {
+                                            text: "Вставлять текст в активное окно"
+                                            checked: Boolean(bridge.settings.auto_paste)
+                                            onToggled: bridge.setSetting("auto_paste", checked)
+                                        }
+                                        Label {
+                                            text: Boolean(bridge.settings.auto_paste)
+                                                ? "После диктовки текст копируется и вставляется в то окно, где вы работали. Enter не нажимается."
+                                                : "Текст только копируется в буфер обмена; вставить можно самому или клавишей " + bridge.settings.paste_last_hotkey + "."
+                                            color: Theme.faint
+                                            font.pixelSize: Theme.fsSmall
+                                            wrapMode: Text.Wrap
+                                            Layout.fillWidth: true
                                         }
                                         Label {
                                             text: "По умолчанию повтор " + bridge.settings.dictate_hotkey + " начинает и останавливает запись. Вставка последнего текста: " + bridge.settings.paste_last_hotkey + "."
