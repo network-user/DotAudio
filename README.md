@@ -63,6 +63,12 @@ dве строки. Альтернатива после `pip install -e`:
   словным таймкодам, длине и пунктуации без выдумывания времени.
 - Караоке-просмотр с подсветкой текущего слова, экспорт ASS и MP4 поверх видео
   или выбранной обложки.
+- Расшифровка файла с определением говорящих: модель NVIDIA NeMo Sortformer
+  (до четырёх голосов) размечает дорожку по времени, поэтому фраза со сменой
+  голоса разрезается по границе, а не получает одну метку. Голоса можно
+  переименовать, оставить в списке одного говорящего и перейти к фразе по
+  полосе разговора. Движок необязателен: без него остаётся текст с
+  таймкодами. Запасной вариант - SpeechBrain ECAPA, одна метка на фразу.
 - Мониторинг до четырёх прямых HTTP(S) источников, локальные ключевые фразы,
   пауза 20 с на повтор одного слова и автоматическое переподключение потока
   с backoff.
@@ -79,6 +85,7 @@ src/dotaudio/
                                       # захват, очередь и faster-whisper
   storage.py, transcripts.py          # SQLite, миграции и экспорт расшифровок
   karaoke.py                          # word timestamps, ASS и MP4
+  speaker_id.py, nemo_diarize.py      # голоса: разметка дорожки и разбор фраз
   qml/MainMvp.qml                     # оболочка: остров, сцена субтитров, окно
   qml/MiniIsland.qml, LiveTheater.qml, CaptionOverlay.qml
                                       # фазы острова, Live-сцена и экран зала
@@ -87,7 +94,7 @@ src/dotaudio/
   qml/Icon.qml, Waveform.qml, StatusDot.qml
   qml/PillButton.qml, IconButton.qml, ToggleSwitch.qml, Dropdown.qml
                                       # общие элементы управления
-  qml/KaraokePreview.qml, TranscriptEditor.qml
+  qml/KaraokePreview.qml, TranscriptEditor.qml, TranscriptView.qml
 tests/                                # pytest, без микрофона и без скачивания моделей
 docs/                                 # продукт, архитектура, аналоги, исследование
 ```
