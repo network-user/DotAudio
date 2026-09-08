@@ -208,6 +208,11 @@ class RecognitionConfig:
     # beam width so the stored transcript can improve without slowing every
     # on-screen update.
     live_stream: bool = False
+    # Very weak machines can fall behind on live finals (which decode with the
+    # profile's beam width).  When asked, a final degrades to the same greedy
+    # decode as a preview: faster at the cost of a little transcript quality.
+    # It never applies outside Live.
+    live_greedy_finals: bool = False
     # "speech" keeps the confidence gate: sound that the decoder does not
     # believe in (music, noise) is reported as nothing.  "everything" shows
     # whatever the decoder heard, which is the explicit "caption the song"
@@ -608,7 +613,7 @@ class Engine:
     def _live_beam_size(config: RecognitionConfig) -> int:
         """Keep previews responsive while finals honour the quality profile."""
 
-        if config.live_preview:
+        if config.live_preview or config.live_greedy_finals:
             return 1
         return {"fast": 1, "balanced": 3, "quality": 5}[config.profile]
 

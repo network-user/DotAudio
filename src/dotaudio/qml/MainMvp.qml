@@ -1296,6 +1296,36 @@ ApplicationWindow {
                                 spacing: Theme.gapMd
                                 Rectangle {
                                     Layout.fillWidth: true
+                                    implicitHeight: dictEngineBox.implicitHeight + 2 * Theme.padCard
+                                    radius: Theme.radiusLg
+                                    color: Theme.surface
+                                    border.width: 1
+                                    border.color: Theme.border
+                                    ColumnLayout {
+                                        id: dictEngineBox
+                                        anchors.fill: parent
+                                        anchors.margins: Theme.padCard
+                                        spacing: Theme.gapSm
+                                        Label { text: "Движок распознавания Live"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
+                                        Text { Layout.fillWidth: true; text: "Vosk - лёгкая потоковая Kaldi-модель для слабого CPU (по умолчанию). Whisper - точнее, но заметно тяжелее. Диктовка и медиа всегда на Whisper."; color: Theme.muted; font.pixelSize: Theme.fsLabel; wrapMode: Text.Wrap }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            PillButton { text: "Vosk"; primary: String(bridge.settings.live_engine) === "vosk"; onClicked: bridge.setSetting("live_engine", "vosk") }
+                                            PillButton { text: "Whisper"; primary: String(bridge.settings.live_engine) !== "vosk"; onClicked: bridge.setSetting("live_engine", "whisper") }
+                                            Item { Layout.fillWidth: true }
+                                            Label { text: bridge.liveModelText; color: Theme.faint; font.pixelSize: Theme.fsSmall }
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            visible: String(bridge.settings.live_engine) === "vosk"
+                                            Label { text: "Модель vosk"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.fillWidth: true }
+                                            PillButton { text: "Малая (~44 МБ)"; primary: String(bridge.settings.vosk_size) === "small"; onClicked: bridge.setSetting("vosk_size", "small"); ToolTip.visible: hovered; ToolTip.text: "vosk-model-small-ru-0.22 · для слабого CPU" }
+                                            PillButton { text: "Большая (~1,8 ГБ)"; primary: String(bridge.settings.vosk_size) !== "small"; onClicked: bridge.setSetting("vosk_size", "big"); ToolTip.visible: hovered; ToolTip.text: "vosk-model-ru-0.42 · точнее, тяжелее" }
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    Layout.fillWidth: true
                                     implicitHeight: languageBox.implicitHeight + 2 * Theme.padCard
                                     radius: Theme.radiusLg
                                     color: Theme.surface
@@ -1650,6 +1680,21 @@ ApplicationWindow {
                                             Item { Layout.fillWidth: true }
                                             ToggleSwitch { text: "Показывать «старую» фразу"; checked: Boolean(bridge.settings.live_show_previous); onToggled: bridge.setSetting("live_show_previous", checked) }
                                         }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            ToggleSwitch {
+                                                text: "Экономный режим финалов (greedy)"
+                                                checked: Boolean(bridge.settings.live_greedy_finals)
+                                                onToggled: bridge.setSetting("live_greedy_finals", checked)
+                                            }
+                                            Text {
+                                                Layout.alignment: Qt.AlignVCenter
+                                                text: "для слабых машин: финалы лучом 1"
+                                                color: Theme.faint
+                                                font.pixelSize: Theme.fsMicro
+                                            }
+                                            Item { Layout.fillWidth: true }
+                                        }
                                         Label {
                                             text: "Комбинация выхода: закрывает программу целиком из консоли и по горячей клавише."
                                             color: Theme.faint
@@ -1659,14 +1704,39 @@ ApplicationWindow {
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            Label { text: "Выход"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.preferredWidth: 70 }
+                                            TextField {
+                                                id: quitInput
+                                                Layout.fillWidth: true
+                                                text: String(bridge.settings.quit_hotkey || "Ctrl+Alt+X")
+                                                placeholderText: "Ctrl+Alt+A"
+                                                selectByMouse: true
+                                                color: Theme.text
+                                                placeholderTextColor: Theme.faint
+                                                font.family: Theme.fontFamily
+                                                inputMethodHints: Qt.ImhNoPredictiveText
+                                                background: Rectangle { radius: 10; color: Theme.fill; border.width: 1; border.color: Theme.hairline }
+                                            }
+                                            PillButton {
+                                                compact: true
+                                                text: "Применить"
+                                                primary: true
+                                                onClicked: {
+                                                    bridge.setQuitHotkey(quitInput.text)
+                                                    // После валидации показываем каноничный вид.
+                                                    quitInput.text = String(bridge.settings.quit_hotkey)
+                                                }
+                                            }
+                                        }
+                                        Row {
+                                            Layout.fillWidth: true
+                                            spacing: 6
                                             Repeater {
-                                                model: ["Ctrl+Alt+X", "Ctrl+Alt+C", "Ctrl+Shift+X", "Ctrl+Win+X", "Ctrl+Alt+Q"]
+                                                model: ["Ctrl+Alt+X", "Ctrl+Alt+C", "Ctrl+Alt+Q"]
                                                 PillButton {
                                                     required property string modelData
                                                     text: modelData
                                                     primary: String(bridge.settings.quit_hotkey) === modelData
-                                                    onClicked: bridge.setSetting("quit_hotkey", modelData)
+                                                    onClicked: { bridge.setSetting("quit_hotkey", modelData); quitInput.text = modelData }
                                                 }
                                             }
                                         }
@@ -1675,59 +1745,7 @@ ApplicationWindow {
                             }
                         }
                     }
-                    Item {
-                        ColumnLayout {
-                            anchors.fill: parent
-                            spacing: Theme.gapMd
-                            Rectangle {
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: 228
-                                radius: Theme.radiusLg
-                                color: Theme.surface
-                                border.width: 1
-                                border.color: Theme.border
-                                ColumnLayout {
-                                    anchors.fill: parent
-                                    anchors.margins: Theme.padCard
-                                    spacing: 9
-                                    Label { text: "Прямые источники"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
-                                    Text { Layout.fillWidth: true; text: "Одна HTTP(S) аудио- или HLS-ссылка на строку. Формат: Название | URL. Максимум четыре источника."; color: Theme.muted; wrapMode: Text.Wrap; font.pixelSize: Theme.fsLabel }
-                                    TextArea { id: monitorChannels; Layout.fillWidth: true; Layout.fillHeight: true; text: bridge.settings.channels; placeholderText: "Радио | https://example.org/live.m3u8"; color: Theme.text; placeholderTextColor: Theme.muted; onActiveFocusChanged: if (!activeFocus) bridge.setSetting("channels", text); background: Rectangle { radius: 12; color: Theme.fill; border.width: 1; border.color: Theme.border } }
-                                }
-                            }
-                            Rectangle {
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: 94
-                                radius: Theme.radiusLg
-                                color: Theme.surface
-                                border.width: 1
-                                border.color: Theme.border
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.margins: Theme.padCard
-                                    TextField { Layout.fillWidth: true; text: bridge.settings.keywords; placeholderText: "Ключевые слова и фразы через запятую"; color: Theme.text; placeholderTextColor: Theme.muted; onEditingFinished: bridge.setSetting("keywords", text); background: Rectangle { radius: 12; color: Theme.fill; border.width: 1; border.color: Theme.border } }
-                                    PillButton { text: bridge.recording ? "Стоп" : "Начать"; primary: true; onClicked: bridge.toggleRecording() }
-                                }
-                            }
-                            ListView {
-                                Layout.fillWidth: true
-                                Layout.fillHeight: true
-                                model: bridge.hits
-                                clip: true
-                                spacing: Theme.gapSm
-                                delegate: Rectangle {
-                                    required property var modelData
-                                    width: ListView.view.width
-                                    implicitHeight: hitText.implicitHeight + 22
-                                    radius: 14
-                                    color: Theme.surface
-                                    border.width: 1
-                                    border.color: Theme.border
-                                    Text { id: hitText; anchors.fill: parent; anchors.margins: 11; text: modelData.source + " · " + modelData.matches + "\n" + modelData.text; color: Theme.text; wrapMode: Text.Wrap; font.pixelSize: Theme.fsLabel }
-                                }
-                            }
-                        }
-                    }
+                    TranscriptView { Layout.fillWidth: true; Layout.fillHeight: true }
                 }
             }
         }

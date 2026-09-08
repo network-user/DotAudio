@@ -497,3 +497,18 @@ def test_live_final_beam_follows_the_selected_profile() -> None:
     assert Engine._live_beam_size(RecognitionConfig(live_stream=True, profile="fast")) == 1
     assert Engine._live_beam_size(RecognitionConfig(live_stream=True, profile="balanced")) == 3
     assert Engine._live_beam_size(RecognitionConfig(live_stream=True, profile="quality")) == 5
+
+
+def test_live_greedy_finals_force_beam_one_for_very_weak_machines() -> None:
+    # «Жадные финалы» не трогают ни качество-профиль, ни черновики: только
+    # готовые фразы на очень слабом CPU считаются лучом 1, но пользователь
+    # выбирает это явно.
+    assert Engine._live_beam_size(
+        RecognitionConfig(live_stream=True, profile="balanced", live_greedy_finals=True)
+    ) == 1
+    assert Engine._live_beam_size(
+        RecognitionConfig(live_preview=True, profile="balanced", live_greedy_finals=False)
+    ) == 1
+    assert Engine._live_beam_size(
+        RecognitionConfig(live_stream=True, profile="balanced", live_greedy_finals=False)
+    ) == 3

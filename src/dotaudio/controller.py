@@ -28,6 +28,7 @@ from dotaudio.capture import (
 from dotaudio.desktop import MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, Hotkey
 from dotaudio.engine import Engine, RecognitionConfig
 from dotaudio.karaoke import export_ass, render_video
+from dotaudio.karaoke_align import align_words, decode_file
 from dotaudio.karaoke_edit import apply_word, clamp_row, set_word_text
 from dotaudio.pipeline import (
     LIVE_SPEECH_THRESHOLD,
@@ -72,6 +73,7 @@ DEFAULTS = {
     "caption_screen": -1, "caption_autohide": False, "caption_locked": True,
     "reduce_motion": False,
     "live_sensitivity": "speech",
+    "live_greedy_finals": False,
     # Живой движок распознавания. "vosk" - лёгкая потоковая Kaldi-модель,
     # рассчитанная на слабый CPU без GPU (см. docs/STT_METHODS.md). По
     # умолчанию vosk: именно Live-суттитры делаются этим лёгким движком на
@@ -178,6 +180,49 @@ def sensitivity_label(value: str) -> str:
     """Подпись кнопки чувствительности Live в один месте."""
 
     return {"speech": "Речь", "everything": "Всё"}.get(str(value or ""), "Речь")
+
+
+def parse_hotkey(value: str) -> Hotkey | None:
+    """Разбор свободной комбинации вроде ``Ctrl+Shift+A``.
+
+    Берёт только модификаторы (Ctrl/Alt/Shift/Win/Cmd) и одну клавишу A-Z или
+    цифру - безраскладочные и тем самым безопасные для RegisterHotKey. Строит
+    Hotkey(MOD_NOREPEAT|модификаторы, VK). Невалидную строку возвращает None,
+    не трогая уже установленный биндинг.
+    """
+
+    if not value or not isinstance(value, str):
+        return None
+    mods = {"ctrl": MOD_CONTROL, "alt": MOD_ALT, "shift": MOD_SHIFT,
+            "win": MOD_WIN, "cmd": MOD_WIN}
+    mod = 0
+    key: str | None = None
+    for raw in value.replace("+", " ").replace("_", " ").split():
+        token = raw.strip()
+        if not token:
+            continue
+        low = token.casefold()
+        if low in mods:
+            mod |= mods[low]
+            continue
+        if key is not None or len(token) != 1 or not token.isalnum():
+            return None
+        key = token.upper()
+    if key is None or mod == 0:
+        return None
+    return Hotkey(MOD_NOREPEAT | mod, ord(key))
+
+
+def hotkey_id(value: str) -> str:
+    """Нормализованный вид комбинации для хранения и отображения."""
+
+    parts = [p.casefold() for p in value.split("+") if p.strip()]
+    parts.sort(key=lambda p: {"ctrl": 0, "alt": 1, "shift": 2, "win": 3}.get(p, 4))
+    caps = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Win"}
+    out = [caps.get(p, p) for p in parts]
+    if out and len(out[-1]) == 1 and out[-1].isalnum():
+        out[-1] = out[-1].upper()
+    return "+".join(out)
 
 
 def live_engine_label(method: str, model: str = "", vosk_size: str = "") -> str:
@@ -309,6 +354,7 @@ class Controller(QObject):
     deviceTestLevelArrived = Signal(float)
     deviceTestFinished = Signal(str, str)
     renderFinished = Signal(str)
+    realignReady = Signal(object)
     shutdownReady = Signal()
     transcribeChanged = Signal()
     transcribeStatus = Signal(str)
@@ -386,6 +432,7 @@ class Controller(QObject):
         self._testing_device = False
         self._cover_url = ""
         self._rendering = False
+        self._aligning = False
         self._last_transcript = ""
         self._hold_active = False
         self._keyword_cool: dict[str, float] = {}
@@ -417,6 +464,7 @@ class Controller(QObject):
         self.deviceTestLevelArrived.connect(self._on_device_test_level)
         self.deviceTestFinished.connect(self._on_device_test_finished)
         self.renderFinished.connect(self._on_render_finished)
+        self.realignReady.connect(self._on_realign_ready)
         desktop.dictate.connect(self.hotkeyRecord)
         desktop.island.connect(self.islandRequested)
         desktop.paste_last.connect(self.pasteLastTranscript)
@@ -576,25 +624,6 @@ class Controller(QObject):
         current = str(self._settings.get("live_sensitivity") or "speech")
         self.setSetting("live_sensitivity", "speech" if current == "everything" else "everything")
 
-    @Slot()
-    def cycleLiveModel(self):
-        """Цикл движок+размер Live: vosk-малая → vosk-большая → whisper → vosk.
-
-        Не даёт уехать в состояние недоступного vosk (когда whisper по ошибке
-        выбран при отсутствии поддержки) - меняется из любого при нажатии.
-        """
-        if self._jobs:
-            return
-        engine = str(self._settings.get("live_engine") or "vosk")
-        size = str(self._settings.get("vosk_size") or "small")
-        if engine == "vosk" and size == "small":
-            self.setSetting("vosk_size", "big")
-        elif engine == "vosk":
-            self.setSetting("live_engine", "whisper")
-        else:
-            self.setSetting("live_engine", "vosk")
-            self.setSetting("vosk_size", "small")
-
     @Property(str, notify=changed)
     def sessionTitle(self): return self._session_title
 
@@ -679,7 +708,6 @@ class Controller(QObject):
             "caption_contrast": ("normal", "high"),
             "caption_position": ("top", "bottom", "floating"),
             "live_size": ("small", "standard", "wide", "tall"),
-            "quit_hotkey": tuple(QUIT_HOTKEY_OPTIONS),
         }
         if name in choices and value not in choices[name]:
             return
@@ -687,6 +715,7 @@ class Controller(QObject):
             "caption_overlay", "auto_paste", "dictate_hold", "island_click_through",
             "island_snap", "caption_autohide", "caption_locked", "reduce_motion",
             "live_auto_window", "live_click_history", "live_show_previous", "live_locked",
+            "live_greedy_finals",
         ):
             value = bool(value)
         if name in ("caption_x", "caption_y", "caption_screen"):
@@ -729,22 +758,46 @@ class Controller(QObject):
         self.changed.emit()
 
     def _apply_quit_hotkey(self) -> None:
-        """Re-register the emergency exit combo after it changes in Settings."""
+        """Re-register the exit combo after it changes in Settings."""
 
         quit_name = str(self._settings.get("quit_hotkey") or "Ctrl+Alt+X")
-        quit_combo = QUIT_HOTKEY_OPTIONS.get(quit_name)
+        combo = QUIT_HOTKEY_OPTIONS.get(quit_name) or parse_hotkey(quit_name)
         base = {
             "dictate": HOTKEY_OPTIONS.get(str(self._settings.get("dictate_hotkey"))),
             "island": HOTKEY_OPTIONS.get(str(self._settings.get("island_hotkey"))),
             "paste_last": HOTKEY_OPTIONS.get(str(self._settings.get("paste_last_hotkey"))),
         }
-        if not quit_combo or None in base.values() or not self.desktop.available:
+        if combo is None or None in base.values() or not self.desktop.available:
+            if combo is None:
+                self._notice = f"Не понимаю комбинацию «{quit_name}». Формат: Ctrl+Alt+A."
+                self.changed.emit()
             return
-        if not self.desktop.set_hotkeys({**base, "quit": quit_combo}):
+        if not self.desktop.set_hotkeys({**base, "quit": combo}):
             self._notice = "Комбинация выхода занята. Оставлена прежняя."
-            self._settings["quit_hotkey"] = "Ctrl+Alt+X"
+            self.changed.emit()
+            return
+        # Нормализуем строку, чтобы интерфейс и перезапуск видели один вид.
+        if quit_name != hotkey_id(quit_name):
+            self._settings["quit_hotkey"] = hotkey_id(quit_name)
             self.store.save_settings(self._settings)
-            self.desktop.set_hotkeys({**base, "quit": QUIT_HOTKEY_OPTIONS["Ctrl+Alt+X"]})
+
+    @Slot(str)
+    def setQuitHotkey(self, text) -> None:
+        """Установить свободную комбинацию выхода с клиента (строкой)."""
+
+        raw = str(text or "").strip()
+        if not raw:
+            self._notice = "Введите комбинацию, например Ctrl+Alt+G."
+            self.changed.emit()
+            return
+        combo = parse_hotkey(raw)
+        if combo is None:
+            self._notice = f"Не понимаю «{raw}». Пример: Ctrl+Alt+G."
+            self.changed.emit()
+            return
+        self._settings["quit_hotkey"] = raw
+        self.store.save_settings(self._settings)
+        self._apply_quit_hotkey()
 
     @Slot()
     def resetCaptionPosition(self):
@@ -759,6 +812,7 @@ class Controller(QObject):
                   ("model", "device", "language", "task", "backend", "server_url", "profile")}
         if live_stream:
             values["live_sensitivity"] = str(self._settings["live_sensitivity"])
+            values["live_greedy_finals"] = bool(self._settings.get("live_greedy_finals", False))
         values["initial_prompt"] = "; ".join(
             str(entry.get("term", "")).strip()
             for entry in self.dictionary if isinstance(entry, dict)
@@ -2060,6 +2114,78 @@ class Controller(QObject):
             changed,
             info=f"Изменён текст слова {word_index + 1} в сегменте {segment_id}.",
         )
+
+    @Slot()
+    def realignKaraoke(self):
+        """Snap each media word toward the quiet of the actual audio.
+
+        Whisper word timings on music drift.  This reruns no model: it decodes
+        the media once to 16 k mono and nudges every word edge to the closest
+        quiet moment.  Results persist row-by-row and re-emit ``segments``, so
+        the editor, preview and ASS/MP4 export all follow the refined timing.
+        """
+        if self._aligning or self._rendering or self._jobs:
+            return
+        if not self._media_url:
+            self._notice = "Сначала откройте аудио или видео."
+            self.changed.emit()
+            return
+        source = QUrl(self._media_url).toLocalFile()
+        if not source or not Path(source).is_file():
+            self._notice = "Исходный медиафайл недоступен для выравнивания."
+            self.changed.emit()
+            return
+        rows = [r for r in self._segments if (r.get("words") or [])]
+        if not rows or not any(len(r["words"]) > 1 for r in rows):
+            self._notice = "Пословная разметка не найдена: распознайте трек сначала."
+            self.changed.emit()
+            return
+        self._aligning = True
+        self._status = "Выравниваем слова к тишине аудио…"
+        self.changed.emit()
+        snapshot = [dict(r) for r in rows]
+
+        def work():
+            error = ""
+            payload: list[dict] = []
+            try:
+                samples = decode_file(source)
+                for row in snapshot:
+                    words = align_words(row["words"], samples, 16000)
+                    if words != row["words"]:
+                        span_start = min(float(row["start"]), min(float(w["start"]) for w in words))
+                        span_end = max(float(row["end"]), max(float(w["end"]) for w in words))
+                        payload.append({
+                            "id": row["id"],
+                            "start": span_start,
+                            "end": span_end,
+                            "text": str(row["text"]),
+                            "words": words,
+                        })
+            except Exception as exc:  # noqa: BLE001 - доставляем причину в UI
+                error = str(exc)
+            self.realignReady.emit({"error": error, "rows": payload})
+
+        threading.Thread(target=work, name="dotaudio-karaoke-align", daemon=True).start()
+
+    def _on_realign_ready(self, result):
+        self._aligning = False
+        error = str((result or {}).get("error") or "")
+        if error:
+            self._notice = f"Не удалось выровнять слова: {error}"
+            self._status = "Ошибка выравнивания"
+            self._record_log("error", self._notice)
+        else:
+            rows = list((result or {}).get("rows") or [])
+            if self._session_id:
+                for row in rows:
+                    self.store.update_segment_edit(self._session_id, row["id"], row)
+                self._segments = self.store.get_session(self._session_id)["segments"]
+                self.segmentsChanged.emit()
+            self._notice = "Слова выровнены к тишине." if rows else "Границы слов уже на тишине."
+            self._status = "Готово"
+            self._record_log("success", self._notice)
+        self.changed.emit()
 
     @Slot()
     def exportFile(self, format):

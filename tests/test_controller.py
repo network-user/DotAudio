@@ -5,8 +5,11 @@ from dotaudio.controller import (
     DEFAULTS,
     HOTKEY_OPTIONS,
     MODEL_BY_PROFILE,
+    QUIT_HOTKEY_OPTIONS,
     STATUS_LABELS,
     Controller,
+    hotkey_id,
+    parse_hotkey,
     sensitivity_label,
 )
 from dotaudio.engine import Engine
@@ -41,6 +44,22 @@ def test_caption_overlay_settings_are_local_and_sized() -> None:
     assert DEFAULTS["caption_overlay"] is False
     assert DEFAULTS["caption_size"] == "md"
     assert DEFAULTS["caption_contrast"] == "normal"
+
+
+def test_parse_and_normalise_free_exit_hotkey() -> None:
+    combo = parse_hotkey("Ctrl+Alt+K")
+    assert combo is not None
+    assert combo.key == ord("K")
+    assert hotkey_id("ctrl+k+alt") == "Ctrl+Alt+K"
+    # Некорректные/двойные клавиши и строки без модификатора не принимаются.
+    assert parse_hotkey("Alt") is None
+    assert parse_hotkey("Ctrl+A+B") is None
+    assert parse_hotkey("") is None
+
+
+def test_default_exit_combo_is_registered_as_a_normal_option() -> None:
+    assert "Ctrl+Alt+X" in QUIT_HOTKEY_OPTIONS
+    assert parse_hotkey("Ctrl+Alt+X") == QUIT_HOTKEY_OPTIONS["Ctrl+Alt+X"]
 
 
 def test_segments_have_a_dedicated_qt_notify_signal() -> None:
