@@ -152,7 +152,10 @@ def test_late_live_final_does_not_replace_a_newer_preview() -> None:
     controller.liveStateChanged = _Signal()
     controller.recording = True
     controller._record_log = lambda *_args: None
-    controller.changed = _Signal()
+    controller._status = ""
+    controller.changed = _Counting()
+    controller.statusChanged = _Signal()
+    controller.logsChanged = _Signal()
 
     Controller._on_segment(
         controller, "live", {"start": 2.0, "end": 4.0, "text": "старая фраза"}
@@ -162,6 +165,9 @@ def test_late_live_final_does_not_replace_a_newer_preview() -> None:
     assert controller._confirmed_caption == "новая фраза"
     assert controller._partial_caption == "продолжается"
     assert controller._caption_revision == 3
+    # Готовая фраза не перетряхивает весь интерфейс: настройки, устройства и
+    # карточки моделей не перечитываются на каждой реплике говорящего.
+    assert controller.changed.count == 0
 
 
 def test_live_decode_statuses_do_not_touch_interface_bindings() -> None:
@@ -178,6 +184,8 @@ def test_live_decode_statuses_do_not_touch_interface_bindings() -> None:
     controller._record_log = lambda *_args: None
     controller.changed = _Counting()
     controller.liveStateChanged = _Counting()
+    controller.statusChanged = _Counting()
+    controller.logsChanged = _Counting()
 
     for _ in range(3):
         Controller._set_status(controller, "transcribing_cpu")
@@ -186,12 +194,15 @@ def test_live_decode_statuses_do_not_touch_interface_bindings() -> None:
     assert controller._live_phase == "listening"
     assert controller._status == "Слушаю"
     assert controller.changed.count == 0
+    assert controller.statusChanged.count == 0
     assert controller.liveStateChanged.count == 6
 
     Controller._set_status(controller, "live_slow")
     assert controller._live_diagnostic == "live_slow"
     assert controller._status == STATUS_LABELS["live_slow"]
-    assert controller.changed.count == 1
+    # Заметный статус меняет строку состояния и журнал, но не весь интерфейс.
+    assert controller.statusChanged.count == 1
+    assert controller.changed.count == 0
 
 
 def test_live_sensitivity_stays_speech_outside_live() -> None:

@@ -125,10 +125,16 @@ Window {
         easing.bezierCurve: Theme.easeOut
     }
 
-    Connections {
-        target: bridge
-        function onChanged() { overlay.placeOnScreen() }
-    }
+    // Положение зависит только от выбранных настроек субтитров и от экрана.
+    // Раньше окно пересчитывало место на каждое общее уведомление контроллера,
+    // то есть и на каждую секунду записи.
+    readonly property string placement: [
+        bridge.settings.caption_position,
+        bridge.settings.caption_screen,
+        bridge.settings.caption_x,
+        bridge.settings.caption_y,
+    ].join("|")
+    onPlacementChanged: overlay.placeOnScreen()
 
     Rectangle {
         id: card

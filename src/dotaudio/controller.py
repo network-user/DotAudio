@@ -92,8 +92,22 @@ DEFAULTS = {
     "dictate_hotkey": "Ctrl+Alt+Space", "island_hotkey": "Ctrl+Alt+O",
     "paste_last_hotkey": "Shift+Alt+Z", "dictate_hold": False,
     "quit_hotkey": "Ctrl+Alt+X",
+    # Движок определения голосов на странице «Транскрибация». "nemo" -
+    # нативный рантайм NVIDIA NeMo с моделью Sortformer: он размечает
+    # дорожку по времени и потому умеет резать фразу по смене голоса.
+    # "ecapa" - прежний путь через SpeechBrain: одна метка на фразу.
+    # "off" не грузит ничего. Ни один из движков не входит в базовую
+    # установку, и интерфейс показывает, как поставить выбранный.
+    "diarize_engine": "nemo",
     # Kept in local settings so terminology and snippets never leave the PC.
     "dictionary": [], "snippets": [],
+}
+
+# Подписи движков голосов для интерфейса и журнала.
+DIARIZE_ENGINES = {
+    "off": "Не определять",
+    "nemo": "NVIDIA NeMo",
+    "ecapa": "Быстрый (ECAPA)",
 }
 
 LIVE_SETTINGS = {
@@ -332,7 +346,15 @@ def recommended_model(hardware: dict) -> str:
 
 
 class Controller(QObject):
+    # ``changed`` - общее уведомление «пересчитать интерфейс». Оно дорогое:
+    # по нему перечитываются настройки, журнал, списки устройств и карточки
+    # моделей. Часто меняющиеся строки вынесены в отдельные сигналы, чтобы
+    # секундный таймер и каждая распознанная фраза не двигали весь UI.
+    # ``changed`` по-прежнему подразумевает и их: связи ставятся в __init__.
     changed = Signal()
+    statusChanged = Signal()
+    elapsedChanged = Signal()
+    logsChanged = Signal()
     captionChanged = Signal()
     segmentsChanged = Signal()
     levelChanged = Signal()
@@ -407,11 +429,16 @@ class Controller(QObject):
         self._session_mode = ""
         self._jobs = {}
         self._trans_state = {
-            "phase": "idle", "file": "", "path": "",
+            "phase": "idle", "stage": "", "file": "", "path": "",
             "error": "", "speakers": [], "diarization": False,
+            "engine": "", "engineNote": "", "duration": 0.0,
             "segments": [],
         }
         self._trans_cancel = threading.Event()
+        # Опрос рантайма NeMo - запуск процесса, поэтому он делается один раз
+        # в фоне и кешируется. Пустой словарь значит «ещё не проверяли».
+        self._diarize_probe: dict = {}
+        self._diarize_probing = False
         self._started = 0
         self._elapsed = "00:00"
         self._closing = False
@@ -448,6 +475,13 @@ class Controller(QObject):
         threading.Thread(target=self._probe_hardware, daemon=True, name="hardware-probe").start()
         self._edit_undo: list[tuple[int, str, str]] = []
         self._edit_redo: list[tuple[int, str, str]] = []
+        # Общий сигнал остаётся надмножеством точечных: код, который уже
+        # сообщал об изменении через changed, продолжает работать как прежде.
+        self.changed.connect(self.statusChanged)
+        self.changed.connect(self.elapsedChanged)
+        self.changed.connect(self.logsChanged)
+        self.changed.connect(self.captionChanged)
+        self.changed.connect(self.liveStateChanged)
         self.segmentArrived.connect(self._on_segment)
         self.partialArrived.connect(self._on_partial)
         self.jobFinished.connect(self._on_finished)
@@ -492,13 +526,13 @@ class Controller(QObject):
     @Property(str, notify=changed)
     def state(self): return self._state
 
-    @Property(str, notify=changed)
+    @Property(str, notify=statusChanged)
     def status(self): return self._status
 
     @Property(str, notify=changed)
     def notice(self): return self._notice
 
-    @Property(str, notify=changed)
+    @Property(str, notify=elapsedChanged)
     def elapsed(self): return self._elapsed
 
     @Property(float, notify=levelChanged)
@@ -544,7 +578,7 @@ class Controller(QObject):
     @Property("QVariantMap", notify=changed)
     def deviceTest(self): return self._device_test
 
-    @Property("QVariantList", notify=changed)
+    @Property("QVariantList", notify=logsChanged)
     def logs(self): return self._logs
 
     @Property("QVariantMap", notify=changed)
@@ -630,10 +664,10 @@ class Controller(QObject):
     @Property(str, notify=changed)
     def sessionMode(self): return self._session_mode
 
-    @Property(str, notify=changed)
+    @Property(str, notify=segmentsChanged)
     def text(self): return " ".join(s["text"].strip() for s in self._segments)
 
-    @Property(str, notify=changed)
+    @Property(str, notify=captionChanged)
     def caption(self):
         if self.liveActive:
             return self.displayCaption
@@ -649,7 +683,7 @@ class Controller(QObject):
     @Property(float, notify=liveStateChanged)
     def liveLatencyMs(self): return self._live_latency_ms
 
-    @Property(str, notify=changed)
+    @Property(str, notify=liveStateChanged)
     def liveStatusText(self):
         if self._live_phase == "starting":
             return "Готовим модель…"
@@ -703,6 +737,7 @@ class Controller(QObject):
             "live_sensitivity": ("speech", "everything"),
             "live_engine": ("vosk", "whisper"),
             "vosk_size": ("small", "big"),
+            "diarize_engine": tuple(DIARIZE_ENGINES),
             "profile": ("fast", "balanced", "quality"),
             "caption_size": ("sm", "md", "lg"),
             "caption_contrast": ("normal", "high"),
@@ -975,7 +1010,8 @@ class Controller(QObject):
                 if value != self._last_status:
                     self._last_status = value
                     self._record_log("info", label)
-                self.changed.emit()
+                self.statusChanged.emit()
+                self.logsChanged.emit()
                 return
             self._status = label
             if value != self._last_status:
@@ -1320,7 +1356,10 @@ class Controller(QObject):
             seconds = int(time.monotonic() - self._started)
             self._elapsed = f"{seconds // 60:02}:{seconds % 60:02}"
             self._update_live_sound_status()
-            self.changed.emit()
+            # Раз в секунду меняется только счётчик времени. Общий changed
+            # заставлял интерфейс перечитывать настройки, журнал и списки
+            # устройств во время записи - каждую секунду, без причины.
+            self.elapsedChanged.emit()
 
     def _update_live_sound_status(self):
         """Say out loud what Live hears instead of freezing the last phrase.
@@ -1835,7 +1874,12 @@ class Controller(QObject):
         elif sid == self._session_id:
             self._record_log("success", f"Добавлен сегмент {len(self._segments)}: {segment['text'][:80]}")
         self._status = "Слушаю" if self.recording else "Распознаём…"
-        self.changed.emit()
+        # Готовая фраза меняет строку состояния, журнал и подпись - но не
+        # настройки, устройства и карточки моделей. При длинной речи общий
+        # changed на каждой фразе перетряхивал весь интерфейс.
+        self.statusChanged.emit()
+        self.logsChanged.emit()
+        self.captionChanged.emit()
 
     def _on_partial(self, sid, segment):
         """Accept a disposable Live preview without persisting it.
