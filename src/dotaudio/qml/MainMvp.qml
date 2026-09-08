@@ -8,6 +8,22 @@ import "Theme.js" as Theme
 
 ApplicationWindow {
     id: root
+
+    // Мини-статистика в сводке железа: подпись над значением.
+    component HwStat: ColumnLayout {
+        property string label: ""
+        property string value: ""
+        spacing: 1
+        Label { text: label; color: Theme.faint; font.pixelSize: Theme.fsMicro }
+        Label {
+            text: value
+            color: Theme.text
+            font.pixelSize: Theme.fsBody
+            font.weight: Font.DemiBold
+            font.family: Theme.monoFamily
+        }
+    }
+
     property string shellMode: "island"
     property bool logsOpen: false
     property bool islandModesOpen: false
@@ -786,62 +802,247 @@ ApplicationWindow {
                                 id: modelsColumn
                                 width: parent.width
                                 spacing: 10
+
+                                // Сводка устройства и рекомендация. Числа здесь
+                                // фактические: потоки CPU, ОЗУ и то, что видит
+                                // CTranslate2. Проба доезжает фоном, поэтому пока
+                                // она не готова, поля честно показывают прочерк.
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    implicitHeight: hwBody.implicitHeight + 2 * Theme.padCard
+                                    radius: Theme.radiusLg
+                                    color: Theme.surface
+                                    border.width: 1
+                                    border.color: Theme.border
+                                    ColumnLayout {
+                                        id: hwBody
+                                        anchors.fill: parent
+                                        anchors.margins: Theme.padCard
+                                        spacing: Theme.gapSm
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: Theme.gapSm
+                                            Label { text: "Ваше устройство"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold; Layout.fillWidth: true }
+                                            Label {
+                                                text: bridge.hardware.compute_label && bridge.hardware.compute_label.length ? bridge.hardware.compute_label : "Определяем…"
+                                                color: Theme.muted
+                                                font.pixelSize: Theme.fsSmall
+                                                font.family: Theme.monoFamily
+                                            }
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: Theme.gapLg
+                                            HwStat { label: "Потоки CPU"; value: bridge.hardware.threads > 0 ? String(bridge.hardware.threads) : "-" }
+                                            HwStat { label: "ОЗУ"; value: bridge.hardware.ram_gb ? bridge.hardware.ram_gb + " ГБ" : "-" }
+                                            HwStat { label: "CUDA"; value: bridge.hardware.cuda_devices > 0 ? "есть" : "нет" }
+                                            HwStat { label: "Рекомендуем"; value: bridge.recommendedModel }
+                                        }
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: "Подходит и не подходит оцениваются по факту: память сравнивается с реальным ОЗУ, скорость - рекомендация по числу потоков, не замер. Замер появится после первого распознавания."
+                                            color: Theme.muted
+                                            font.pixelSize: Theme.fsSmall
+                                            wrapMode: Text.Wrap
+                                        }
+                                    }
+                                }
+
                             Repeater {
                                 model: ["tiny", "base", "small", "medium", "large-v3", "turbo"]
                                 delegate: Rectangle {
                                     id: modelCard
                                     required property string modelData
                                     required property int index
-                                    Layout.fillWidth: true
-                                    implicitHeight: 82
-                                    radius: Theme.radiusLg
-                                    color: bridge.settings.model === modelData ? Theme.fill : Theme.surface
-                                    border.width: 1
-                                    border.color: bridge.settings.model === modelData ? Theme.borderHi : Theme.border
-                                    Behavior on color { ColorAnimation { duration: Theme.baseMs } }
-                                    Behavior on border.color { ColorAnimation { duration: Theme.baseMs } }
-                                    readonly property string cacheText: {
+                                    readonly property var disk: {
                                         var lib = bridge.modelLibrary
                                         for (var i = 0; i < lib.length; i++) {
                                             if (lib[i].model === modelCard.modelData)
-                                                return lib[i].message
+                                                return lib[i]
                                         }
-                                        return "Ещё не скачана · будет загружена при подготовке"
+                                        return { "ready": false, "bytes": 0 }
                                     }
-                                    RowLayout {
+                                    readonly property var spec: bridge.modelCatalog[modelCard.modelData] || null
+                                    readonly property var fit: {
+                                        // Чтение hardware держит привязку живой: сводка
+                                        // доезжает фоном, и оценка пересчитывается сама.
+                                        var hw = bridge.hardware
+                                        return bridge.modelFit(modelCard.modelData)
+                                    }
+                                    readonly property bool selected: bridge.settings.model === modelData
+                                    readonly property bool preparing: bridge.modelPreparing && bridge.modelState.model === modelData
+                                    readonly property bool cached: Boolean(disk.ready)
+                                    Layout.fillWidth: true
+                                    implicitHeight: cardBody.implicitHeight + 2 * 16
+                                    radius: Theme.radiusLg
+                                    color: selected ? Theme.fill : Theme.surface
+                                    border.width: 1
+                                    border.color: selected ? Theme.borderHi : Theme.border
+                                    Behavior on color { ColorAnimation { duration: Theme.baseMs } }
+                                    Behavior on border.color { ColorAnimation { duration: Theme.baseMs } }
+
+                                    ColumnLayout {
+                                        id: cardBody
                                         anchors.fill: parent
                                         anchors.margins: 16
-                                        spacing: Theme.gapMd
-                                        Icon { name: "models"; width: 20; height: 20 }
-                                        ColumnLayout {
+                                        spacing: Theme.gapSm
+
+                                        RowLayout {
                                             Layout.fillWidth: true
-                                            spacing: 2
-                                            Label { Layout.fillWidth: true; text: modelCard.modelData; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
-                                            // Без fillWidth подпись задавала минимальную
-                                            // ширину колонки, и кнопки в карточках
-                                            // моделей стояли на разной высоте строки.
+                                            spacing: Theme.gapSm
+                                            Icon { name: "models"; width: 18; height: 18; ink: modelCard.selected ? Theme.text : Theme.muted }
+                                            Label { text: modelCard.modelData; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
+                                            // Бейджи состояния: выбрана / в кеше / рекомендована.
+                                            // Состояние не передаётся одним цветом.
+                                            Rectangle {
+                                                visible: modelCard.selected
+                                                radius: 8
+                                                implicitHeight: 16
+                                                implicitWidth: badgeSel.implicitWidth + 12
+                                                color: Theme.text
+                                                Label { id: badgeSel; anchors.centerIn: parent; text: "выбрана"; color: Theme.bg; font.pixelSize: Theme.fsMicro; font.weight: Font.DemiBold }
+                                            }
+                                            Rectangle {
+                                                visible: modelCard.cached && !modelCard.selected
+                                                radius: 8
+                                                implicitHeight: 16
+                                                implicitWidth: badgeCache.implicitWidth + 12
+                                                color: Theme.fill
+                                                border.width: 1
+                                                border.color: Theme.border
+                                                Label {
+                                                    id: badgeCache
+                                                    anchors.centerIn: parent
+                                                    text: modelCard.disk.bytes > 0 ? "в кеше · " + Math.round(modelCard.disk.bytes / 1048576) + " МБ" : "в кеше"
+                                                    color: Theme.muted
+                                                    font.pixelSize: Theme.fsMicro
+                                                }
+                                            }
+                                            Rectangle {
+                                                visible: !modelCard.selected && bridge.recommendedModel === modelCard.modelData
+                                                radius: 8
+                                                implicitHeight: 16
+                                                implicitWidth: badgeRec.implicitWidth + 12
+                                                color: "transparent"
+                                                border.width: 1
+                                                border.color: Theme.borderHi
+                                                Label { id: badgeRec; anchors.centerIn: parent; text: "для этого ПК"; color: Theme.muted; font.pixelSize: Theme.fsMicro }
+                                            }
+                                            Item { Layout.fillWidth: true }
                                             Label {
-                                                Layout.fillWidth: true
-                                                text: bridge.modelState.model === modelCard.modelData && bridge.modelState.message
-                                                      ? bridge.modelState.message
-                                                      : modelCard.cacheText
+                                                visible: modelCard.spec !== null
+                                                text: modelCard.spec ? modelCard.spec.params + " параметров" : ""
                                                 color: Theme.muted
                                                 font.pixelSize: Theme.fsSmall
-                                                elide: Text.ElideRight
+                                                font.family: Theme.monoFamily
                                             }
                                         }
-                                        PillButton { text: "Выбрать"; enabled: !bridge.busy; onClicked: bridge.setSetting("model", modelCard.modelData) }
-                                        PillButton {
-                                            visible: bridge.modelPreparing && bridge.modelState.model === modelCard.modelData
-                                            text: "Отмена"
-                                            onClicked: bridge.cancelModelPrepare()
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: Theme.gapSm
+                                            // Справочная шкала нагрузки: пять сегментов по
+                                            // числу параметров из каталога. Это ориентир
+                                            // архитектуры, не замер скорости машины.
+                                            Item {
+                                                Layout.preferredWidth: 84
+                                                Layout.preferredHeight: 5
+                                                Layout.alignment: Qt.AlignVCenter
+                                                Repeater {
+                                                    model: 5
+                                                    Rectangle {
+                                                        required property int index
+                                                        x: index * 17
+                                                        width: 14
+                                                        radius: 2
+                                                        anchors.top: parent.top
+                                                        anchors.bottom: parent.bottom
+                                                        color: modelCard.spec && index < modelCard.spec.load
+                                                               ? (modelCard.selected ? Theme.text : Theme.muted)
+                                                               : Theme.hairline
+                                                        Behavior on color { ColorAnimation { duration: Theme.baseMs } }
+                                                    }
+                                                }
+                                            }
+                                            Label {
+                                                visible: modelCard.spec !== null
+                                                text: modelCard.spec ? "скачать ~" + modelCard.spec.download_mb + " МБ · память ~" + modelCard.spec.ram_gb + " ГБ" : ""
+                                                color: Theme.muted
+                                                font.pixelSize: Theme.fsSmall
+                                            }
+                                            Item { Layout.fillWidth: true }
+                                            Label {
+                                                text: modelCard.fit.note
+                                                color: modelCard.fit.state === "tight" || modelCard.fit.state === "slow" ? Theme.muted : Theme.faint
+                                                font.pixelSize: Theme.fsSmall
+                                                font.italic: modelCard.fit.state === "tight" || modelCard.fit.state === "slow"
+                                            }
                                         }
-                                        PillButton {
-                                            visible: !(bridge.modelPreparing && bridge.modelState.model === modelCard.modelData)
-                                            text: "Загрузить"
-                                            primary: true
-                                            enabled: !bridge.busy && !bridge.modelPreparing
-                                            onClicked: { bridge.setSetting("model", modelCard.modelData); bridge.prepareSelectedModel() }
+
+                                        // Прогресс подготовки. Реального процента скачивания
+                                        // движок не отдаёт, поэтому полоса неопределённая:
+                                        // она честно говорит «работаем», а не притворяется
+                                        // замером.
+                                        Item {
+                                            visible: modelCard.preparing
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: 4
+                                            clip: true
+                                            Rectangle {
+                                                anchors.fill: parent
+                                                radius: 2
+                                                color: Theme.hairline
+                                            }
+                                            Rectangle {
+                                                id: sweep
+                                                width: parent.width * 0.3
+                                                height: parent.height
+                                                radius: 2
+                                                color: Theme.text
+                                                SequentialAnimation on x {
+                                                    loops: Animation.Infinite
+                                                    running: modelCard.preparing
+                                                    NumberAnimation { from: -sweep.width; to: modelCard.width; duration: 1100; easing.type: Easing.InOutQuad }
+                                                }
+                                            }
+                                            Label {
+                                                anchors.top: parent.bottom
+                                                anchors.topMargin: 6
+                                                anchors.left: parent.left
+                                                visible: modelCard.preparing && bridge.modelState.message.length > 0
+                                                text: bridge.modelState.message
+                                                color: Theme.muted
+                                                font.pixelSize: Theme.fsMicro
+                                            }
+                                        }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: Theme.gapSm
+                                            PillButton {
+                                                text: modelCard.selected ? "Выбрана" : "Выбрать"
+                                                enabled: !modelCard.selected && !bridge.busy
+                                                onClicked: bridge.setSetting("model", modelCard.modelData)
+                                            }
+                                            PillButton {
+                                                visible: modelCard.preparing
+                                                text: "Отмена"
+                                                onClicked: bridge.cancelModelPrepare()
+                                            }
+                                            PillButton {
+                                                visible: !modelCard.preparing && !modelCard.cached
+                                                text: "Загрузить"
+                                                primary: true
+                                                enabled: !bridge.busy && !bridge.modelPreparing
+                                                onClicked: { bridge.setSetting("model", modelCard.modelData); bridge.prepareSelectedModel() }
+                                            }
+                                            Label {
+                                                visible: modelCard.cached && !modelCard.preparing
+                                                text: "Готова к работе"
+                                                color: Theme.muted
+                                                font.pixelSize: Theme.fsSmall
+                                            }
+                                            Item { Layout.fillWidth: true }
                                         }
                                     }
                                 }

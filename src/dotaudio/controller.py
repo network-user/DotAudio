@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import sys
 import threading
 import time
 from datetime import datetime
@@ -40,6 +42,19 @@ from dotaudio.transcripts import (
 )
 
 MODEL_BY_PROFILE = {"fast": "base", "balanced": "small", "quality": "large-v3"}
+
+# Справочные характеристики моделей Whisper из публичной документации
+# faster-whisper. Это параметры архитектуры и требования к памяти, а не
+# замеры скорости на конкретной машине: скорость без реального прогона
+# не заявляется.
+MODEL_CATALOG = {
+    "tiny":     {"params": "39 млн",  "download_mb": 75,   "ram_gb": 1,  "load": 1},
+    "base":     {"params": "74 млн",  "download_mb": 142,  "ram_gb": 1,  "load": 2},
+    "small":    {"params": "244 млн", "download_mb": 483,  "ram_gb": 2,  "load": 3},
+    "medium":   {"params": "769 млн", "download_mb": 1530, "ram_gb": 5,  "load": 4},
+    "large-v3": {"params": "1,55 млрд", "download_mb": 3100, "ram_gb": 10, "load": 5},
+    "turbo":    {"params": "809 млн", "download_mb": 1620, "ram_gb": 6,  "load": 4},
+}
 
 DEFAULTS = {
     "model": "small", "device": "auto", "language": "ru", "task": "transcribe",
@@ -113,6 +128,99 @@ def sensitivity_label(value: str) -> str:
     """Подпись кнопки чувствительности Live в один месте."""
 
     return {"speech": "Речь", "everything": "Всё"}.get(str(value or ""), "Речь")
+
+
+def _physical_memory_gb() -> float | None:
+    """Реальный объём ОЗУ; вне Windows или при отказе API - неизвестно."""
+
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetPhysicallyInstalledSystemMemory.argtypes = [ctypes.POINTER(wintypes.ULONGLONG)]
+        kb = wintypes.ULONGLONG(0)
+        if not kernel32.GetPhysicallyInstalledSystemMemory(ctypes.byref(kb)):
+            return None
+        return round(kb.value / (1024 * 1024), 1)
+    except (OSError, AttributeError):
+        return None
+
+
+def _cuda_device_count() -> int:
+    """Сколько CUDA-устройств видит CTranslate2 прямо сейчас.
+
+    Это фактическая проверка текущей сборки: если runtime-библиотеки
+    (например cublas) недоступны, вернётся 0 и движок пойдёт на CPU.
+    """
+
+    try:
+        import ctranslate2
+
+        return max(0, int(ctranslate2.get_cuda_device_count()))
+    except Exception:
+        return 0
+
+
+def hardware_summary() -> dict:
+    """Фактическая сводка устройства для страницы моделей."""
+
+    threads = os.cpu_count() or 0
+    ram = _physical_memory_gb()
+    cuda = _cuda_device_count()
+    return {
+        "threads": threads,
+        "ram_gb": ram,
+        "cuda_devices": cuda,
+        "compute_label": "Видеокарта (CUDA)" if cuda > 0 else "Процессор (CPU)",
+    }
+
+
+def model_fit(model: str, hardware: dict) -> dict:
+    """Подходит ли модель этому устройству, по факту памяти и CPU.
+
+    Оценка памяти - факт (сравнение с реальным ОЗУ). Оценка скорости -
+    рекомендация по числу потоков, не измерение.
+    """
+
+    spec = MODEL_CATALOG.get(model)
+    if spec is None:
+        return {"state": "unknown", "note": ""}
+    ram = hardware.get("ram_gb")
+    threads = int(hardware.get("threads") or 0)
+    cuda = int(hardware.get("cuda_devices") or 0)
+    if ram is not None and float(ram) < float(spec["ram_gb"]):
+        return {
+            "state": "tight",
+            "note": f"Хочет около {spec['ram_gb']} ГБ памяти, у вас {ram:g} ГБ",
+        }
+    if spec["load"] >= 4 and cuda == 0:
+        if threads and threads < 8:
+            return {"state": "slow", "note": "На этом CPU Live будет отставать"}
+        return {"state": "slow", "note": "Потянет, но Live на CPU заметно медленнее"}
+    if threads and threads < 4 and spec["load"] >= 3:
+        return {"state": "slow", "note": "Мало потоков CPU: берите «Быстро»"}
+    return {"state": "ok", "note": "Подходит этому устройству"}
+
+
+def recommended_model(hardware: dict) -> str:
+    """Модель по умолчанию под это устройство, из факта CPU/GPU.
+
+    «small» на этом языке держит ритм Live начиная примерно с 4 потоков
+    CPU (замер итерации скорости Live); слабее - «base». GPU снимает
+    вопрос для всех карточек.
+    """
+
+    if int(hardware.get("cuda_devices") or 0) > 0:
+        return "small"
+    threads = int(hardware.get("threads") or 0)
+    if threads >= 4:
+        return "small"
+    if threads >= 2:
+        return "base"
+    return "tiny"
 
 
 class Controller(QObject):
@@ -204,6 +312,11 @@ class Controller(QObject):
         self._prepared_model = ""
         self._model_prepare_error = ""
         self._model_library = [Engine.disk_status(name) for name in ("tiny", "base", "small", "medium", "large-v3", "turbo")]
+        # Сводка железа приехает фоном: импорт ctranslate2 для проверки CUDA
+        # стоит сотни миллисекунд и не должен задерживать первый кадр окна.
+        self._hardware = {"threads": os.cpu_count() or 0, "ram_gb": None, "cuda_devices": 0, "compute_label": ""}
+        self._recommended_model = recommended_model(self._hardware)
+        threading.Thread(target=self._probe_hardware, daemon=True, name="hardware-probe").start()
         self._edit_undo: list[tuple[int, str, str]] = []
         self._edit_redo: list[tuple[int, str, str]] = []
         self.segmentArrived.connect(self._on_segment)
@@ -311,6 +424,29 @@ class Controller(QObject):
 
     @Property(bool, notify=changed)
     def modelPreparing(self): return self._model_preparing
+
+    @Property("QVariantMap", notify=changed)
+    def hardware(self): return self._hardware
+
+    @Property(str, notify=changed)
+    def recommendedModel(self): return self._recommended_model
+
+    @Property("QVariantMap", constant=True)
+    def modelCatalog(self): return MODEL_CATALOG
+
+    @Slot(str, result="QVariantMap")
+    def modelFit(self, model):
+        """Пригодность модели этому устройству; читается вместе с hardware."""
+
+        return model_fit(str(model), self._hardware)
+
+    def _probe_hardware(self) -> None:
+        """Фоновая проба железа: обновляет сводку и рекомендацию."""
+
+        summary = hardware_summary()
+        self._hardware = summary
+        self._recommended_model = recommended_model(summary)
+        self.changed.emit()
 
     @Property(str, notify=changed)
     def mediaUrl(self): return self._media_url

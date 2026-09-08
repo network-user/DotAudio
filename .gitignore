@@ -1,4 +1,7 @@
 .venv/
+.idea/
+.cursor/
+transcript.txt
 __pycache__/
 *.py[cod]
 .pytest_cache/

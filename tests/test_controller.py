@@ -83,6 +83,28 @@ def test_disk_status_describes_cache_without_downloading() -> None:
     assert "message" in info
 
 
+def test_model_fit_compares_memory_with_the_real_machine() -> None:
+    from dotaudio.controller import MODEL_CATALOG, model_fit, recommended_model
+
+    known = {"threads": 8, "ram_gb": 4.0, "cuda_devices": 0}
+    # Память - факт: large-v3 не влезает в 4 ГБ, и это сказано словами.
+    tight = model_fit("large-v3", known)
+    assert tight["state"] == "tight"
+    assert "4 ГБ" in tight["note"]
+    # Скорость - рекомендация, а не замер: тяжёлые модели на CPU помечены.
+    rich_cpu = {"threads": 8, "ram_gb": 32.0, "cuda_devices": 0}
+    assert model_fit("medium", rich_cpu)["state"] == "slow"
+    assert model_fit("small", rich_cpu)["state"] == "ok"
+    # Без сведений об ОЗУ оценка по памяти не выдумывается.
+    unknown_ram = {"threads": 8, "ram_gb": None, "cuda_devices": 0}
+    assert model_fit("large-v3", unknown_ram)["state"] != "tight"
+    # Каталог покрывает все карточки страницы, рекомендация существует.
+    assert set(MODEL_CATALOG) == {"tiny", "base", "small", "medium", "large-v3", "turbo"}
+    assert recommended_model(known) == "small"
+    assert recommended_model({"threads": 2, "ram_gb": 8.0, "cuda_devices": 0}) == "base"
+    assert recommended_model({"threads": 0, "ram_gb": None, "cuda_devices": 0}) == "tiny"
+
+
 def test_late_live_final_does_not_replace_a_newer_preview() -> None:
     class Store:
         @staticmethod
