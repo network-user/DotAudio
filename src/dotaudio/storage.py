@@ -334,6 +334,30 @@ class Store:
                 (text, segment_id, session_id),
             )
 
+    def update_segment_edit(
+        self,
+        session_id: str,
+        segment_id: int,
+        segment: dict[str, Any],
+    ) -> None:
+        """Persist an edited row: timings, text and word timings together.
+
+        A karaoke edit can change the phrase window and per-word timings in one
+        action.  Rewriting all three from a single validated row keeps the
+        segment always consistent instead of applying partial updates that can
+        break monotonicity in between calls.
+        """
+        start, end, text, words = _validate_segment(segment)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE segments
+                SET start = ?, end = ?, text = ?, words_json = ?
+                WHERE id = ? AND session_id = ?
+                """,
+                (start, end, text, words, segment_id, session_id),
+            )
+
     def finish_session(
         self, session_id: str, status: str = "completed"
     ) -> None:

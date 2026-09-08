@@ -5,6 +5,7 @@ import re
 import sys
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from dotaudio.capture import (
 from dotaudio.desktop import MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, Hotkey
 from dotaudio.engine import Engine, RecognitionConfig
 from dotaudio.karaoke import export_ass, render_video
+from dotaudio.karaoke_edit import apply_word, clamp_row, set_word_text
 from dotaudio.pipeline import (
     LIVE_SPEECH_THRESHOLD,
     SAMPLE_RATE,
@@ -40,6 +42,7 @@ from dotaudio.transcripts import (
     match_keywords,
     regroup_for_subtitles,
 )
+from dotaudio.vosk_engine import VoskEngine
 
 MODEL_BY_PROFILE = {"fast": "base", "balanced": "small", "quality": "large-v3"}
 
@@ -64,13 +67,29 @@ DEFAULTS = {
     "channels": "", "profile": "balanced", "output_device": "", "loopback_device": "",
     "island_opacity": 0.94, "island_click_through": False, "island_snap": True,
     "island_x": -1, "island_y": 32,
-    "caption_overlay": True, "caption_size": "md", "caption_contrast": "normal",
+    "caption_overlay": False, "caption_size": "md", "caption_contrast": "normal",
     "caption_position": "bottom", "caption_x": -1, "caption_y": -1,
     "caption_screen": -1, "caption_autohide": False, "caption_locked": True,
     "reduce_motion": False,
     "live_sensitivity": "speech",
+    # Живой движок распознавания. "vosk" - лёгкая потоковая Kaldi-модель,
+    # рассчитанная на слабый CPU без GPU (см. docs/STT_METHODS.md). По
+    # умолчанию vosk: именно Live-суттитры делаются этим лёгким движком на
+    # слабом железе; диктовка и медиа остаются на faster-whisper до миграции.
+    "live_engine": "vosk",
+    # Размер vosk-модели для Live. "small" - vosk-model-small-ru-0.22 (~44 МБ),
+    # "big" - vosk-model-ru-0.42 (~1,8 ГБ, точнее, но тяжелее).
+    "vosk_size": "small",
+    # Оконная «зал» Live при запуске записи Live: превращать остров в окно
+    # автоматически (live_auto_window) и как показывать внутри текст.
+    "live_auto_window": True,
+    "live_click_history": True,
+    "live_show_previous": True,
+    "live_locked": False,
+    "live_size": "standard",
     "dictate_hotkey": "Ctrl+Alt+Space", "island_hotkey": "Ctrl+Alt+O",
     "paste_last_hotkey": "Shift+Alt+Z", "dictate_hold": False,
+    "quit_hotkey": "Ctrl+Alt+X",
     # Kept in local settings so terminology and snippets never leave the PC.
     "dictionary": [], "snippets": [],
 }
@@ -82,6 +101,25 @@ LIVE_SETTINGS = {
     "island_opacity", "island_snap",
 }
 
+# vosk-модели, доступные для живого распознавания, по ключу выбора размера.
+# Значения - имена, которые понимает vosk (Model(model_name=...)), размер
+# на диске и короткая подпись для интерфейса. Подробнее в docs/STT_METHODS.md.
+VOSK_MODEL_BY_SIZE = {
+    "small": {
+        "name": "vosk-model-small-ru-0.22",
+        "download_mb": 44,
+        "label": "Малая (vosk)",
+        "detail": "Лёгкая русская модель ~44 МБ, для слабого CPU",
+    },
+    "big": {
+        "name": "vosk-model-ru-0.42",
+        "download_mb": 1860,
+        "label": "Большая (vosk)",
+        "detail": "Точная русская модель ~1,8 ГБ, подойдёт не каждому CPU",
+    },
+}
+
+LIVE_ENGINE_LABELS = {"whisper": "Whisper", "vosk": "Vosk"}
 HOTKEY_OPTIONS = {
     "Ctrl+Alt+Space": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x20),
     "Ctrl+Shift+Space": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, 0x20),
@@ -90,6 +128,16 @@ HOTKEY_OPTIONS = {
     "Ctrl+Shift+O": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, 0x4F),
     "Ctrl+Win+O": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_WIN, 0x4F),
     "Shift+Alt+Z": Hotkey(MOD_NOREPEAT | MOD_SHIFT | MOD_ALT, 0x5A),
+}
+
+# Переназначаемые комбинации аварийного выхода. Не пересекаются с действиями
+# из HOTKEY_OPTIONS, чтобы merge в Desktop не ругался на дубликаты.
+QUIT_HOTKEY_OPTIONS = {
+    "Ctrl+Alt+X": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x58),
+    "Ctrl+Alt+C": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x43),
+    "Ctrl+Shift+X": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, 0x58),
+    "Ctrl+Win+X": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_WIN, 0x58),
+    "Ctrl+Alt+Q": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x51),
 }
 
 STATUS_LABELS = {
@@ -130,6 +178,19 @@ def sensitivity_label(value: str) -> str:
     """Подпись кнопки чувствительности Live в один месте."""
 
     return {"speech": "Речь", "everything": "Всё"}.get(str(value or ""), "Речь")
+
+
+def live_engine_label(method: str, model: str = "", vosk_size: str = "") -> str:
+    """Человекочитаемая подпись активного движка/модели для Live.
+
+    Используется в статусной строке Live и на острове, чтобы было видно,
+    какая именно модель сейчас слушает. ``vosk_size``: малая большая.
+    """
+    way = str(method or "whisper")
+    if way == "vosk":
+        size = "малая" if str(vosk_size or "small") == "small" else "большая"
+        return f"Vosk · {size} RU"
+    return f"Whisper · {str(model or 'по умолчанию')}"
 
 
 def _physical_memory_gb() -> float | None:
@@ -249,6 +310,8 @@ class Controller(QObject):
     deviceTestFinished = Signal(str, str)
     renderFinished = Signal(str)
     shutdownReady = Signal()
+    transcribeChanged = Signal()
+    transcribeStatus = Signal(str)
 
     def __init__(self, data_dir: Path, desktop):
         super().__init__()
@@ -256,6 +319,10 @@ class Controller(QObject):
         self.store = Store(data_dir / "history.db")
         self.desktop = desktop
         self.engine = Engine()
+        # vosk-движок для живых субтитров создаётся лениво при первом запуске
+        # Live с выбранным размером и кешируется между сессиями.
+        self._vosk_engine: VoskEngine | None = None
+        self._vosk_size: str = ""
         self._settings = {**DEFAULTS, **self.store.get_settings()}
         saved_bindings = {
             "dictate": HOTKEY_OPTIONS.get(str(self._settings["dictate_hotkey"])),
@@ -267,6 +334,11 @@ class Controller(QObject):
             and len({(item.modifiers, item.key) for item in saved_bindings.values()}) == 3
         ):
             self.desktop.set_hotkeys(saved_bindings)
+        # Сохранённая комбинация выхода побеждает значение по умолчанию, которым
+        # Desktop собрался на старте. Отложить на один тик: контроллер ещё не
+        # успел повесить нужные QTimer-сигналы.
+        if self.desktop.available and str(self._settings.get("quit_hotkey")) != "Ctrl+Alt+X":
+            QTimer.singleShot(0, self._apply_quit_hotkey)
         self._page, self._state = "live", "idle"
         self._status = "Готов к работе"
         self._notice = ""
@@ -288,6 +360,12 @@ class Controller(QObject):
         self._session_title = ""
         self._session_mode = ""
         self._jobs = {}
+        self._trans_state = {
+            "phase": "idle", "file": "", "path": "",
+            "error": "", "speakers": [], "diarization": False,
+            "segments": [],
+        }
+        self._trans_cancel = threading.Event()
         self._started = 0
         self._elapsed = "00:00"
         self._closing = False
@@ -498,6 +576,25 @@ class Controller(QObject):
         current = str(self._settings.get("live_sensitivity") or "speech")
         self.setSetting("live_sensitivity", "speech" if current == "everything" else "everything")
 
+    @Slot()
+    def cycleLiveModel(self):
+        """Цикл движок+размер Live: vosk-малая → vosk-большая → whisper → vosk.
+
+        Не даёт уехать в состояние недоступного vosk (когда whisper по ошибке
+        выбран при отсутствии поддержки) - меняется из любого при нажатии.
+        """
+        if self._jobs:
+            return
+        engine = str(self._settings.get("live_engine") or "vosk")
+        size = str(self._settings.get("vosk_size") or "small")
+        if engine == "vosk" and size == "small":
+            self.setSetting("vosk_size", "big")
+        elif engine == "vosk":
+            self.setSetting("live_engine", "whisper")
+        else:
+            self.setSetting("live_engine", "vosk")
+            self.setSetting("vosk_size", "small")
+
     @Property(str, notify=changed)
     def sessionTitle(self): return self._session_title
 
@@ -575,16 +672,21 @@ class Controller(QObject):
             "task": ("transcribe", "translate"), "backend": ("local", "remote"),
             "source": ("microphone", "system"), "live_source": ("microphone", "system", "mixed"),
             "live_sensitivity": ("speech", "everything"),
+            "live_engine": ("vosk", "whisper"),
+            "vosk_size": ("small", "big"),
             "profile": ("fast", "balanced", "quality"),
             "caption_size": ("sm", "md", "lg"),
             "caption_contrast": ("normal", "high"),
             "caption_position": ("top", "bottom", "floating"),
+            "live_size": ("small", "standard", "wide", "tall"),
+            "quit_hotkey": tuple(QUIT_HOTKEY_OPTIONS),
         }
         if name in choices and value not in choices[name]:
             return
         if name in (
             "caption_overlay", "auto_paste", "dictate_hold", "island_click_through",
             "island_snap", "caption_autohide", "caption_locked", "reduce_motion",
+            "live_auto_window", "live_click_history", "live_show_previous", "live_locked",
         ):
             value = bool(value)
         if name in ("caption_x", "caption_y", "caption_screen"):
@@ -613,6 +715,8 @@ class Controller(QObject):
             # запуска - пользователь мог выбрать совершенно другой источник.
             self._device_test = {"phase": "idle", "message": "", "level": 0.0}
         self.store.save_settings(self._settings)
+        if name == "quit_hotkey":
+            self._apply_quit_hotkey()
         if name == "model":
             self._model_state = {
                 "phase": "idle",
@@ -623,6 +727,24 @@ class Controller(QObject):
         elif name in ("device", "backend", "source", "live_source", "language", "task", "live_sensitivity"):
             self._record_log("info", f"Настройка {name}: {value}")
         self.changed.emit()
+
+    def _apply_quit_hotkey(self) -> None:
+        """Re-register the emergency exit combo after it changes in Settings."""
+
+        quit_name = str(self._settings.get("quit_hotkey") or "Ctrl+Alt+X")
+        quit_combo = QUIT_HOTKEY_OPTIONS.get(quit_name)
+        base = {
+            "dictate": HOTKEY_OPTIONS.get(str(self._settings.get("dictate_hotkey"))),
+            "island": HOTKEY_OPTIONS.get(str(self._settings.get("island_hotkey"))),
+            "paste_last": HOTKEY_OPTIONS.get(str(self._settings.get("paste_last_hotkey"))),
+        }
+        if not quit_combo or None in base.values() or not self.desktop.available:
+            return
+        if not self.desktop.set_hotkeys({**base, "quit": quit_combo}):
+            self._notice = "Комбинация выхода занята. Оставлена прежняя."
+            self._settings["quit_hotkey"] = "Ctrl+Alt+X"
+            self.store.save_settings(self._settings)
+            self.desktop.set_hotkeys({**base, "quit": QUIT_HOTKEY_OPTIONS["Ctrl+Alt+X"]})
 
     @Slot()
     def resetCaptionPosition(self):
@@ -644,6 +766,26 @@ class Controller(QObject):
         return RecognitionConfig(
             **values, media_mode=bool(media_mode), live_stream=bool(live_stream)
         )
+
+    def _vosk_engine_for(self, size: str) -> VoskEngine:
+        """Возвращает общий vosk-движок, пересоздавая при смене размера.
+
+        Один объект на процесс обеспечивает кеширование модели vosk между
+        Live-сессиями (подобно кешу одной модели у faster-whisper).
+        """
+        size = size if size in ("small", "big") else "small"
+        if self._vosk_engine is None or self._vosk_size != size:
+            self._vosk_engine = VoskEngine(model_size=size)
+            self._vosk_size = size
+        return self._vosk_engine
+
+    @Property(str, notify=changed)
+    def liveModelText(self):
+        """Какая модель/движок сейчас стоит для Live - видно в статусе/острове."""
+        way = str(self._settings.get("live_engine") or "vosk")
+        if way == "vosk":
+            return live_engine_label("vosk", "", str(self._settings.get("vosk_size") or "small"))
+        return live_engine_label("whisper", str(self._settings.get("model") or ""))
 
     @Slot(str, str)
     def setHotkeys(self, dictate, island):
@@ -1326,9 +1468,9 @@ class Controller(QObject):
             "monitor": "Мониторинг эфира",
         }[mode]
         if mode == "live":
-            # Live is an overlay-first mode.  The user can hide it during a
-            # session, but each new Live session starts with captions visible.
-            self._settings["caption_overlay"] = True
+            # Единое Live-окно: отдельное «окно зала» (CaptionOverlay) не
+            # дублирует текст поверх, а открывается только кнопкой-оверлеем
+            # в самом окне, когда оно нужно отдельным экраном/подчисткой.
             self._live_phase = "starting"
             self._live_latency_ms = 0.0
             self._live_diagnostic = ""
@@ -1355,13 +1497,27 @@ class Controller(QObject):
                 self.changed.emit()
                 return
         for name, url in sources:
-            sid = self.store.create_session(name, mode, url or kind, self._settings["model"])
+            config = self._config(live_stream=(mode == "live"))
+            use_vosk = mode == "live" and str(self._settings.get("live_engine") or "vosk") == "vosk"
+            vosk_size = str(self._settings.get("vosk_size") or "small")
+            engine_now = (
+                self._vosk_engine_for(vosk_size) if use_vosk else self.engine
+            )
+            # В истории сессии пишем не выбранную whisper-модель из profile, а
+            # реально используемый движок/модель: так понятно, чем распознавали.
+            if use_vosk:
+                try:
+                    model_tag = engine_now.model_name or self._settings["model"]
+                except Exception:
+                    model_tag = self._settings["model"]
+            else:
+                model_tag = self._settings["model"]
+            sid = self.store.create_session(name, mode, url or kind, model_tag)
             self._session_id = sid
             if sid == self._session_id:
                 self._session_title = name
-            config = self._config(live_stream=(mode == "live"))
             live = LiveSession(
-                self.engine, config,
+                engine_now, config,
                 lambda segment, sid=sid: self.segmentArrived.emit(sid, segment),
                 self.statusArrived.emit,
                 lambda error, cancelled, sid=sid: self.jobFinished.emit(sid, error, cancelled),
@@ -1371,7 +1527,7 @@ class Controller(QObject):
                 ),
                 catch_up=(mode == "live"),
             )
-            self._jobs[sid] = {"live": live, "mode": mode, "name": name, "hotkey": hotkey}
+            self._jobs[sid] = {"live": live, "mode": mode, "name": name, "hotkey": hotkey, "engine": engine_now, "vosk": use_vosk}
             try:
                 def audio_error(error, sid=sid, live=live):
                     if str(error).startswith("Поток переподключается"):
@@ -1404,7 +1560,7 @@ class Controller(QObject):
                 else:
                     capture = open_live_capture(kind, self._settings, **args)
                 # Device startup and WASAPI initialization must not block the QML thread.
-                def start(live=live, capture=capture, sid=sid, config=config, mode=mode):
+                def start(live=live, capture=capture, sid=sid, config=config, mode=mode, engine=engine_now, vosk=use_vosk):
                     try:
                         if mode == "live":
                             # "Всё подряд" не платит за модель VAD: буфер
@@ -1412,7 +1568,12 @@ class Controller(QObject):
                             # любой звук, включая песни.
                             if config.live_sensitivity == "speech":
                                 live.use_detector(open_voice_activity())
-                            if self._prepared_model == config.model:
+                            if vosk:
+                                # vosk-модель подготавливается сама в рабочем
+                                # потоке; prepare идемпотентна и не трогает сеть
+                                # повторно, когда модель уже загружена.
+                                engine.prepare(config, self.statusArrived.emit)
+                            elif self._prepared_model == config.model:
                                 self.statusArrived.emit("model_ready")
                             elif self._model_preparing:
                                 # Startup preparation owns model loading.  Do
@@ -1768,22 +1929,44 @@ class Controller(QObject):
     @Slot(int, str)
     def editSegment(self, segment_id, text):
         if self._session_id:
-            before = next((item["text"] for item in self._segments if item["id"] == segment_id), None)
-            if before is None or before == text:
+            before = next((item for item in self._segments if item["id"] == segment_id), None)
+            if before is None or before["text"] == text:
                 return
-            self.store.update_segment(self._session_id, segment_id, text)
-            self._segments = self.store.get_session(self._session_id)["segments"]
-            self.segmentsChanged.emit()
-            self._edit_undo.append((segment_id, before, text))
-            self._edit_undo = self._edit_undo[-100:]
-            self._edit_redo = []
-            self._record_log("info", f"Изменён сегмент {segment_id}.")
-            self.changed.emit()
+            self._apply_row_change(
+                segment_id,
+                before,
+                {**before, "text": text},
+                info=f"Изменён текст сегмента {segment_id}.",
+            )
+
+    def _row_snapshot(self, segment: dict) -> dict:
+        """A reducible copy of everything a user edit may change."""
+        return {
+            "id": segment["id"],
+            "start": float(segment["start"]),
+            "end": float(segment["end"]),
+            "text": str(segment["text"]),
+            "words": [dict(w) for w in (segment.get("words") or [])],
+        }
+
+    def _apply_row_change(self, segment_id, before, after, *, info):
+        """Persist a whole-row before/after pair and record it for undo."""
+        after_id = after.pop("id", after.get("id", segment_id))
+        self.store.update_segment_edit(self._session_id, segment_id, after)
+        self._segments = self.store.get_session(self._session_id)["segments"]
+        self.segmentsChanged.emit()
+        self._edit_undo.append((segment_id, before, {**after, "id": after_id}))
+        self._edit_undo = self._edit_undo[-100:]
+        self._edit_redo = []
+        self._record_log("info", info)
+        self.changed.emit()
 
     def _apply_edit(self, change, use_after):
         segment_id, before, after = change
         value = after if use_after else before
-        self.store.update_segment(self._session_id, segment_id, value)
+        row = dict(value)
+        row.pop("id", None)
+        self.store.update_segment_edit(self._session_id, segment_id, row)
         self._segments = self.store.get_session(self._session_id)["segments"]
         self.segmentsChanged.emit()
 
@@ -1807,7 +1990,78 @@ class Controller(QObject):
         self._record_log("info", "Повторена правка сегмента.")
         self.changed.emit()
 
-    @Slot(str)
+    def _seg_row(self, segment_id):
+        return next((item for item in self._segments if item["id"] == segment_id), None)
+
+    @Slot(int, float, float)
+    def setPhraseWindow(self, segment_id, start, end):
+        """Move a phrase's time window (words keep their own edges)."""
+        row = self._seg_row(segment_id)
+        if row is None or not self._session_id:
+            return
+        adjusted = clamp_row(self._row_snapshot(row), start=start, end=end)
+        notice = "Граница окна фразы выровнена по соседней." if adjusted.pop("clamped", False) else ""
+        if row["start"] == adjusted["start"] and row["end"] == adjusted["end"]:
+            return
+        self._apply_row_change(
+            segment_id,
+            self._row_snapshot(row),
+            {**adjusted, "id": segment_id},
+            info=f"Изменены границы фразы {segment_id}.",
+        )
+        if notice:
+            self._record_log("warning", notice)
+
+    @Slot(int, int, str, float)
+    def setWordEdge(self, segment_id, word_index, edge, seconds):
+        """Move a word start or end, clamped to the phrase and its neighbours."""
+        row = self._seg_row(segment_id)
+        if row is None or not self._session_id:
+            return
+        if not row.get("words"):
+            return
+        words = row["words"]
+        if word_index < 0 or word_index >= len(words) or edge not in ("start", "end"):
+            return
+        before = self._row_snapshot(row)
+        changed = apply_word(before, word_index, edge, float(seconds))
+        clamped = changed.pop("clamped", False)
+        if not changed.pop("changed", False):
+            return
+        self._apply_row_change(
+            segment_id,
+            before,
+            changed,
+            info=f"Изменён таймкод слова {word_index + 1} в сегменте {segment_id}.",
+        )
+        if clamped:
+            self._record_log("warning", "Таймкод ограничен соседним словом или окном фразы.")
+
+    @Slot(int, int, str)
+    def editWordText(self, segment_id, word_index, text):
+        """Edit one word and keep the assembled phrase consistent for export."""
+        row = self._seg_row(segment_id)
+        if row is None or not self._session_id or not row.get("words"):
+            return
+        if word_index < 0 or word_index >= len(row["words"]):
+            return
+        before = self._row_snapshot(row)
+        try:
+            changed = set_word_text(before, word_index, text)
+        except (ValueError, IndexError):
+            return
+        if changed.get("words", [{}])[word_index].get("text") == before["words"][word_index]["text"]:
+            return
+        if changed["text"] == before["text"] and not changed.get("words"):
+            return
+        self._apply_row_change(
+            segment_id,
+            before,
+            changed,
+            info=f"Изменён текст слова {word_index + 1} в сегменте {segment_id}.",
+        )
+
+    @Slot()
     def exportFile(self, format):
         if not self._segments or format not in ("txt", "srt", "vtt", "json"):
             return
@@ -1886,6 +2140,185 @@ class Controller(QObject):
     @Slot()
     def showIsland(self):
         self.islandRequested.emit()
+
+    # ---- Отдельный режим «Транскрибация»: файл + говорящие, локально.
+    # Аудио всегда распознаётся локальным faster-whisper, никогда не уходит
+    # на сервер; только необязательные веса речи скачиваются один раз в
+    # локальный кеш, если включено определение голосов.
+
+    @Property("QVariantMap", notify=transcribeChanged)
+    def transcribeState(self): return self._trans_state
+
+    @Property("QVariantList", notify=transcribeChanged)
+    def transcribeSegments(self): return self._trans_state["segments"]
+
+    @Slot()
+    def pickTranscriptFile(self):
+        """Раздельный выбор файла именно для транскрибации."""
+        if self._jobs:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            None, "Открыть аудио или видео для транскрибации", "",
+            "Медиа (*.mp3 *.wav *.m4a *.flac *.ogg *.opus *.mp4 *.mkv *.webm *.mov *.aac)")
+        if not path:
+            return
+        self.transcribeStatus.emit("Файл выбран. Нажмите «Транскрибировать».")
+        self._trans_state.update({"phase": "idle", "path": path, "file": str(Path(path).name),
+                                  "error": "", "speakers": [], "segments": []})
+        self.transcribeChanged.emit()
+
+    @Slot(str)
+    def pickTranscriptFilename(self, path):
+        """QML drag-and-drop либо путь из поля."""
+        path = str(path)
+        if path.startswith("file:"):
+            path = QUrl(path).toLocalFile()
+        media = Path(path)
+        if not media.is_file() or media.suffix.lower() not in {
+            ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".mp4", ".mkv", ".webm", ".mov", ".aac"}:
+            self.transcribeStatus.emit("Выберите поддерживаемый аудио- или видеофайл.")
+            self.transcribeChanged.emit()
+            return
+        self._trans_state.update({"phase": "idle", "path": str(media), "file": media.name,
+                                  "error": "", "speakers": [], "segments": []})
+        self.transcribeChanged.emit()
+
+    @Slot()
+    def runTranscript(self):
+        """Распознайте выбранный файл локально (+ определите голоса)."""
+        if self._jobs or self._trans_state["phase"] == "working":
+            return
+        path = self._trans_state.get("path", "")
+        if not path or not Path(path).is_file():
+            self.transcribeStatus.emit("Сначала откройте аудио или видео.")
+            self.transcribeChanged.emit()
+            return
+        self._trans_cancel.clear()
+        state = self._trans_state
+        state.update({"phase": "working", "error": "", "segments": []})
+        self._record_log("info", f"Транскрибация (локально): {Path(path).name}")
+        self.transcribeChanged.emit()
+
+        def process():
+            try:
+                text = self._transcribe_local(path)
+            except Exception as exc:  # noqa: BLE001
+                text = f"Ошибка: {exc}"
+                self._record_log("error", str(exc))
+            if self._trans_cancel.is_set():
+                state.update({"phase": "idle"})
+                self.transcribeStatus.emit("Распознавание отменено (частичный результат не сохранён).")
+            else:
+                state["error"] = text if text.startswith("Ошибка") else ""
+                state["phase"] = "idle" if state["error"] else "done"
+            self.transcribeChanged.emit()
+
+        threading.Thread(target=process, name="dotaudio-transcribe", daemon=True).start()
+        self.transcribeStatus.emit("Распознаём файл на этом устройстве…")
+
+    def _transcribe_local(self, path: str) -> str:
+        # Параметры движения как в караоке (слова), но backend принудительно
+        # «local»: транскрибация никогда не отправляет аудио на сервер.
+        config = replace(self._config(media_mode=True), backend="local")
+        collected: list[dict] = []
+
+        def on_segment(segment):
+            collected.append({
+                "start": float(segment.get("start", 0.0)),
+                "end": float(segment.get("end", 0.0)),
+                "text": str(segment.get("text", "")).strip(),
+                "words": segment.get("words", []),
+            })
+
+        results = self.engine.transcribe(path, config, self._trans_cancel,
+                                         on_segment, lambda s: self.transcribeStatus.emit(s.upper()))
+        collected = [item for item in collected if item["text"]] or results
+        # Определение голосов опционально (torch/speechbrain). Наличие проверяем
+        # в модуле speaker_id: если движка нет, включаем честное предупреждение.
+        try:
+            from platformdirs import user_cache_dir
+
+            from dotaudio.speaker_id import decode_audio, diarize_segments
+
+            audio = decode_audio(path)
+            roles = diarize_segments(audio, collected, user_cache_dir("dotaudio", "dotcore"))
+        except Exception as exc:  # noqa: BLE001
+            roles = []
+            self.transcribeStatus.emit("Без определения голосов: " + str(exc))
+        else:
+            self.transcribeStatus.emit("Готово. Громче всех - в метках говорящих.")
+        spoken, speakers = [], []
+        seen: dict[int, str] = {}
+        for number, row in enumerate(collected):
+            has_role = bool(roles and number < len(roles) and roles[number] is not None)
+            if has_role:
+                key = int(roles[number]) + 1
+                if key not in seen:
+                    seen[key] = f"Человек {key}"
+                    speakers.append({"key": key, "label": f"Человек {key}"})
+                speaker = seen[key]
+            else:
+                key = None
+                speaker = ""
+            spoken.append({**row, "role": key, "speaker": speaker})
+        state = self._trans_state
+        state["segments"] = spoken
+        state["speakers"] = speakers
+        state["diarization"] = bool(roles)
+        return ""
+
+    @Slot()
+    def stopTranscript(self):
+        self._trans_cancel.set()
+
+    @Slot()
+    def clearTranscript(self):
+        if self._jobs or self._trans_state["phase"] == "working":
+            return
+        self._trans_state.update({"phase": "idle", "file": "", "path": "",
+                                  "error": "", "speakers": [], "segments": [],
+                                  "diarization": False})
+        self.transcribeChanged.emit()
+
+    @Slot(int, str)
+    def renameTranscriptSpeaker(self, key, label):
+        label = " ".join(str(label or "").strip().split())
+        if not label:
+            return
+        state = self._trans_state
+        for sp in state["speakers"]:
+            if int(sp["key"]) == int(key):
+                sp["label"] = label
+        for seg in state["segments"]:
+            if int(seg["role"]) == int(key):
+                seg["speaker"] = label
+        self.transcribeChanged.emit()
+
+    @Slot()
+    def transcriptExport(self):
+        segments = self._trans_state["segments"]
+        if not segments:
+            return
+        from dotaudio.transcripts import export_transcript
+        path, _ = QFileDialog.getSaveFileName(None, "Сохранить транскрибацию",
+                                              "transcript.txt", "TXT (*.txt);;SRT (*.srt);;VTT (*.vtt);;JSON (*.json)")
+        if not path:
+            return
+        fmt = Path(path).suffix.lstrip(".") or "txt"
+        payload = segments
+        if fmt in ("srt", "vtt"):
+            from dotaudio.transcripts import regroup_for_subtitles
+            payload = regroup_for_subtitles(segments)
+        # Говорящий выносим в текст перед экспортом (без права менять из строк).
+        rows = []
+        for seg in payload:
+            rows.append({**seg, "text": f"[{seg.get('speaker','')}] {seg.get('text','')}".strip()})
+        try:
+            Path(path).write_text(export_transcript(rows, fmt), encoding="utf-8")
+            self.transcribeStatus.emit(f"Сохранено: {Path(path).name}")
+        except OSError as exc:
+            self.transcribeStatus.emit(f"Не удалось сохранить: {exc}")
+        self.transcribeChanged.emit()
 
     def shutdown(self):
         self._closing = True

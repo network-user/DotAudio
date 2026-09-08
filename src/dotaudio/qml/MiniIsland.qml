@@ -180,6 +180,16 @@ Rectangle {
                     }
                 }
 
+                Label {
+                    visible: root.liveMode
+                    text: bridge.liveModelText
+                    color: Theme.faint
+                    font.pixelSize: Theme.fsSmall
+                    opacity: 0.85
+                    font.family: Theme.fontFamily
+                    elide: Text.ElideRight
+                }
+
                 Waveform {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 14

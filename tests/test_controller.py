@@ -35,7 +35,10 @@ def test_live_source_defaults_to_system_audio() -> None:
 
 
 def test_caption_overlay_settings_are_local_and_sized() -> None:
-    assert DEFAULTS["caption_overlay"] is True
+    # Live по умолчанию живёт в одном окне (остров превращается в зал);
+    # отдельное «окно зала» включается вручную кнопкой, а не спавнится при
+    # каждом старте Live.
+    assert DEFAULTS["caption_overlay"] is False
     assert DEFAULTS["caption_size"] == "md"
     assert DEFAULTS["caption_contrast"] == "normal"
 

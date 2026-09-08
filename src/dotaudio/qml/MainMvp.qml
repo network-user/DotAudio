@@ -42,7 +42,7 @@ ApplicationWindow {
     readonly property int liveLocked: Boolean(bridge.settings.live_locked)
     property real dragGrabDx: 0
     property real dragGrabDy: 0
-    property var pageKeys: ["live", "dictation", "media", "models", "history", "settings"]
+    property var pageKeys: ["live", "dictation", "media", "models", "history", "settings", "transcript"]
     // Страница не переключается в тот же кадр: содержимое сначала гаснет,
     // затем новое приезжает снизу. Индекс меняет сам переход.
     property int pageIndex: 0
@@ -480,7 +480,7 @@ ApplicationWindow {
                         readonly property int rowGap: 6
                         readonly property int current: Math.max(0, root.pageKeys.indexOf(bridge.page))
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 6 * rowH + 5 * rowGap
+                        Layout.preferredHeight: 7 * rowH + 6 * rowGap
 
                         function step(delta) {
                             var next = navBox.current + delta
@@ -517,7 +517,8 @@ ApplicationWindow {
                                     { key: "media", icon: "media", title: "Караоке", detail: "Аудио и видео" },
                                     { key: "models", icon: "models", title: "Модели", detail: "Whisper" },
                                     { key: "history", icon: "history", title: "История", detail: "Сессии" },
-                                    { key: "settings", icon: "settings", title: "Среда", detail: "Устройства" }
+                                    { key: "settings", icon: "settings", title: "Среда", detail: "Устройства" },
+                                    { key: "transcript", icon: "media", title: "Транскрибация", detail: "Файл + голоса" }
                                 ]
                                 delegate: Button {
                                     id: nav
@@ -581,7 +582,7 @@ ApplicationWindow {
                         text: (bridge.hotkeysAvailable
                                ? bridge.settings.dictate_hotkey + " диктовка\n" + bridge.settings.island_hotkey + " остров\n" + bridge.settings.paste_last_hotkey + " вставить"
                                : "Горячие клавиши недоступны")
-                              + "\nCtrl+1…6 разделы\nEsc в остров"
+                              + "\nCtrl+1…7 разделы\nEsc в остров"
                         color: Theme.muted
                         font.pixelSize: Theme.fsMicro
                         wrapMode: Text.Wrap
@@ -625,6 +626,7 @@ ApplicationWindow {
                                 live: "Живые субтитры",
                                 dictation: "Диктовка",
                                 media: "Караоке-студия",
+                                transcript: "Транскрибация записи",
                                 monitor: "Мониторинг эфиров",
                                 models: "Модели Whisper",
                                 history: "История",

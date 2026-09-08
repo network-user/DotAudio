@@ -135,6 +135,15 @@ Rectangle {
 
             PillButton {
                 compact: true
+                text: bridge.liveModelText
+                enabled: !bridge.recording && !bridge.busy
+                onClicked: bridge.cycleLiveModel()
+                ToolTip.visible: hovered
+                ToolTip.text: "Каким движком распознавать Live. Цикл: Vosk малая/большая, затем Whisper"
+            }
+
+            PillButton {
+                compact: true
                 visible: !bridge.recording && !bridge.busy
                 text: bridge.deviceTest.phase === "starting" || bridge.deviceTest.phase === "listening"
                     ? "Проверяем…" : "Проверить"
