@@ -17,7 +17,9 @@ Item {
     property real barH: 12
     property real barW: 3
     property real gap: 3
-    property bool live: Boolean(bridge.recording)
+    // Скрытая полоса ничего не считает: в приложении их несколько (остров,
+    // диктовка, Live), а показана всегда одна.
+    property bool live: Boolean(bridge.recording) && wave.visible
 
     implicitHeight: barH
     implicitWidth: bars * barW + Math.max(0, bars - 1) * gap

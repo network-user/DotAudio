@@ -9,8 +9,10 @@ Rectangle {
     id: root
     property var player: null
     property var segments: []
-    property real playbackSeconds: player ? player.position / 1000 : 0
-    property var activeCue: cueAt(playbackSeconds)
+    // Скрытый просмотр не считает: страница караоке остаётся в памяти, пока
+    // пользователь работает в другом разделе, и не должна ничего пересчитывать.
+    property real playbackSeconds: player && root.visible ? player.position / 1000 : 0
+    property var activeCue: null
 
     radius: Theme.radiusLg
     color: Theme.islandFill
@@ -25,6 +27,22 @@ Rectangle {
         }
         return segments.length ? segments[0] : null
     }
+
+    // Плеер сообщает позицию несколько раз в секунду. Пока играет одна и та же
+    // фраза, перебирать весь список незачем: он может быть длиной в час записи.
+    function refreshCue() {
+        var position = root.playbackSeconds
+        var current = root.activeCue
+        if (current
+                && position >= Number(current.start)
+                && position < Number(current.end))
+            return
+        root.activeCue = cueAt(position)
+    }
+
+    onPlaybackSecondsChanged: refreshCue()
+    onSegmentsChanged: { root.activeCue = null; refreshCue() }
+    Component.onCompleted: refreshCue()
 
     ColumnLayout {
         anchors.fill: parent

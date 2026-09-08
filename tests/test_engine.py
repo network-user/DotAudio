@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from dotaudio.engine import Engine, RecognitionConfig
+from dotaudio.engine import LIVE_TAIL_SECONDS, Engine, RecognitionConfig
 
 
 class _Segment:
@@ -300,9 +300,9 @@ def test_live_window_sizes_the_encoder_to_the_phrase(monkeypatch) -> None:
     result = Engine().transcribe(np.zeros(4 * 16000, dtype=np.float32), config)
 
     assert result == [{"start": 0.0, "end": 4.0, "text": "живой текст"}]
-    # Four seconds of speech plus the two second silence margin, instead of the
-    # 3000 frames Whisper would otherwise pad to.
-    assert model.model.features.shape[-1] == 600
+    # Four seconds of speech plus the silence margin, instead of the 3000
+    # frames Whisper would otherwise pad every window to.
+    assert model.model.features.shape[-1] == int((4.0 + LIVE_TAIL_SECONDS) * 100)
     assert model.model.kwargs["beam_size"] == 3
     assert model.model.kwargs["no_repeat_ngram_size"] == 3
 

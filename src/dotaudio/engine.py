@@ -31,10 +31,14 @@ ProgressCallback = Callable[[dict], None]
 # a full chunk.  CTranslate2 accepts a shorter mel spectrogram, which is what
 # makes Live affordable on a CPU.  The trailing silence is not decoration: with
 # no margin after the speech the decoder keeps generating and repeats itself.
-# Silence appended after the phrase.  It doubles as a floor: even the shortest
-# phrase gets a two second encoder window, below which Whisper returns
-# phonetic guesses instead of words.
-LIVE_TAIL_SECONDS = 2.0
+# Silence appended after the phrase.  Measured on real speech (bench_tail.py,
+# small, CPU int8): on the first window of a phrase, about a second of audio,
+# a two second tail cost 374 ms and made the decoder loop over the same words
+# ("Я мёд! Ты тесно! Я мёт!"), while 1.5 s returned one clean line in 179 ms.
+# On longer windows the difference is inside the noise, and 0.6 s starts
+# cutting the end of the phrase off.  So the margin stays, but only as much of
+# it as the decoder actually needs to stop.
+LIVE_TAIL_SECONDS = 1.5
 # A live window is short.  Anything past this token budget is a decoder loop,
 # not speech, and it would block the next caption.  The rate is not the rate of
 # speech: measured, a Russian sentence is about 9 tokens per second of audio,

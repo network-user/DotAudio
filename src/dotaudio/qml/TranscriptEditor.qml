@@ -46,7 +46,8 @@ Rectangle {
 
     Connections {
         target: bridge
-        function onChanged() {
+        // Список реагирует на список, а не на любое изменение в приложении.
+        function onSegmentsChanged() {
             var count = bridge.segments.length
             if (root.followLatest && count > root.observedSegmentCount) {
                 root.observedSegmentCount = count
@@ -90,7 +91,9 @@ Rectangle {
 
         delegate: Rectangle {
             required property var modelData
-            property bool active: root.player !== null
+            // Подсветку двигает только видимый плеер: скрытая страница не
+            // пересчитывает каждую строку на каждом кадре воспроизведения.
+            property bool active: root.player !== null && root.visible
                                   && root.player.position >= Math.round(Number(modelData.start) * 1000)
                                   && root.player.position < Math.round(Number(modelData.end) * 1000)
             width: transcript.width
