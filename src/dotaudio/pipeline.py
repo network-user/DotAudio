@@ -19,13 +19,18 @@ LIVE_SPEECH_THRESHOLD = 0.0015
 
 # Live endpointing.  A phrase is allowed to run longer than it used to: the
 # rolling preview already shows the text, and Whisper reads a whole phrase far
-# better than a 1.5 s fragment of one.
-LIVE_PHRASE_SECONDS = 7.0
-LIVE_SILENCE_SECONDS = 0.5
-# Below roughly two seconds of audio Whisper returns phonetic guesses, so an
-# earlier preview would only flash wrong words at the user.
-LIVE_PREVIEW_MIN_SECONDS = 1.2
-LIVE_PREVIEW_INTERVAL_SECONDS = 0.5
+# better than a 1.5 s fragment of one.  The limits bound how long the story
+# waits for its final: on a speaker who never pauses, a phrase settles when it
+# hits this many seconds, so a long monologue keeps producing finals and the
+# preview has covered every line the whole way.
+LIVE_PHRASE_SECONDS = 6.0
+LIVE_SILENCE_SECONDS = 0.42
+# A rolling caption that respects the confidence gate needs at least this much
+# real speech before it has words worth showing.  Below it Whisper mostly
+# guesses, so an earlier preview would flash wrong words at the user.  The
+# gate itself still decides whether what the decoder wrote is speech.
+LIVE_PREVIEW_MIN_SECONDS = 0.9
+LIVE_PREVIEW_INTERVAL_SECONDS = 0.45
 LIVE_PREVIEW_WINDOW_SECONDS = 6.0
 # Previews may not use the whole machine.  Asking for a new one before the
 # previous decode has had time to finish only grows the backlog, so the
