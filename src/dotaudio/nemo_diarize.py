@@ -285,13 +285,15 @@ def parse_turns(payload: str) -> list[Turn]:
 def diarize_audio(
     audio: np.ndarray,
     model: str = "",
+    device: str = "",
     cancel: Event | None = None,
     on_status: StatusCallback | None = None,
 ) -> list[Turn]:
     """Разметить моно 16 кГц по голосам и вернуть отрезки речи.
 
     Звук передаётся временным WAV рядом с системным temp и удаляется
-    сразу после прохода.
+    сразу после прохода. Пустое значение ``device`` и "auto" оставляют
+    выбор рантайму: он сам берёт ускоритель, если сборка его умеет.
     """
 
     path = executable()
@@ -319,6 +321,8 @@ def diarize_audio(
         ]
         if model:
             command += ["--model", model]
+        if device and device != "auto":
+            command += ["--device", device]
         budget = DIARIZE_BASE_SECONDS + DIARIZE_PER_SECOND * seconds
         result = _run(command, budget, cancel)
         if result.returncode != 0:

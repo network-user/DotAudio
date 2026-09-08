@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 import threading
 import time
 from dataclasses import replace
@@ -261,46 +260,6 @@ def live_engine_label(method: str, model: str = "", vosk_size: str = "") -> str:
         size = "малая" if str(vosk_size or "small") == "small" else "большая"
         return f"Vosk · {size} RU"
     return f"Whisper · {str(model or 'по умолчанию')}"
-
-
-def _physical_memory_gb() -> float | None:
-    """Реальный объём ОЗУ; вне Windows или при отказе API - неизвестно."""
-
-    if sys.platform != "win32":
-        return None
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.GetPhysicallyInstalledSystemMemory.argtypes = [ctypes.POINTER(wintypes.ULONGLONG)]
-        kb = wintypes.ULONGLONG(0)
-        if not kernel32.GetPhysicallyInstalledSystemMemory(ctypes.byref(kb)):
-            return None
-        return round(kb.value / (1024 * 1024), 1)
-    except (OSError, AttributeError):
-        return None
-
-
-def _cuda_device_count() -> int:
-    """Сколько CUDA-устройств видит CTranslate2 прямо сейчас.
-
-    Это фактическая проверка текущей сборки: если runtime-библиотеки
-    (например cublas) недоступны, вернётся 0 и движок пойдёт на CPU.
-    """
-
-    try:
-        from dotaudio.cuda_runtime import register_cuda_dll_directories, verify_cuda_devices
-
-        register_cuda_dll_directories()
-        return verify_cuda_devices()
-    except Exception:
-        try:
-            import ctranslate2
-
-            return max(0, int(ctranslate2.get_cuda_device_count()))
-        except Exception:
-            return 0
 
 
 def hardware_summary(*, refresh: bool = False) -> dict:
@@ -2975,7 +2934,10 @@ class Controller(QObject):
         from dotaudio.speaker_id import assign_turns, decode_audio
 
         audio = decode_audio(path)
-        turns = diarize_audio(audio, cancel=self._trans_cancel,
+        # Выбор устройства общий с Whisper: если пользователь увёл всё на
+        # процессор, диаризация не должна втихую занимать видеокарту.
+        turns = diarize_audio(audio, device=str(self._settings.get("device") or "auto"),
+                              cancel=self._trans_cancel,
                               on_status=self.transcribeStatus.emit)
         rows = assign_turns(segments, turns)
         voices = len({row["role"] for row in rows if row.get("role") is not None})

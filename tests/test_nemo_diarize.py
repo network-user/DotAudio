@@ -145,6 +145,32 @@ def test_diarize_without_the_runtime_names_the_reason(monkeypatch):
         diarize_audio(np.zeros(16000, dtype=np.float32))
 
 
+@pytest.mark.parametrize(
+    "device, expected",
+    [("", False), ("auto", False), ("cpu", True), ("cuda", True)],
+)
+def test_device_choice_reaches_the_runtime(monkeypatch, device, expected):
+    """"auto" оставляет выбор рантайму, явное устройство передаётся ему."""
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(nemo_diarize, "executable", lambda: "nemo-speech")
+    monkeypatch.setattr(nemo_diarize, "ensure_model", lambda *a, **k: None)
+
+    def fake_run(command, timeout, cancel=None):
+        seen.append(command)
+        target = command[command.index("--output") + 1]
+        with open(target, "w", encoding="utf-8") as out:
+            out.write('{"segments": [{"start": 0, "end": 1, "speaker": 1}]}')
+        return _completed()
+
+    monkeypatch.setattr(nemo_diarize, "_run", fake_run)
+    turns = diarize_audio(np.zeros(16000, dtype=np.float32), device=device)
+    assert len(turns) == 1
+    assert ("--device" in seen[0]) is expected
+    if expected:
+        assert seen[0][seen[0].index("--device") + 1] == device
+
+
 def test_install_command_is_offered_for_this_platform():
     command = install_command()
     assert "NeMo-Speech.cpp" in command
