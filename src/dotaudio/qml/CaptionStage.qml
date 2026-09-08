@@ -17,7 +17,6 @@ Item {
     property color ink: Theme.text
     property color mutedInk: Theme.muted
     property bool showPrevious: true
-    property bool animateWords: true
 
     readonly property bool hasCaption: String(confirmed).length + String(pending).length > 0
     readonly property int lineStep: Math.round(pixelSize * Theme.captionLineFactor)
@@ -111,7 +110,6 @@ Item {
         maxLines: stage.maxLines
         align: stage.align
         ink: stage.ink
-        animateWords: stage.animateWords
         opacity: stage.hasCaption ? 1 : 0
         Behavior on opacity {
             NumberAnimation {

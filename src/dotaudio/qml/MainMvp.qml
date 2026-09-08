@@ -1677,9 +1677,8 @@ ApplicationWindow {
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            ToggleSwitch { text: "Клик по тексту - история"; checked: Boolean(bridge.settings.live_click_history); onToggled: bridge.setSetting("live_click_history", checked) }
+                                            ToggleSwitch { text: "Таймкод у каждой фразы"; checked: Boolean(bridge.settings.live_show_times); onToggled: bridge.setSetting("live_show_times", checked) }
                                             Item { Layout.fillWidth: true }
-                                            ToggleSwitch { text: "Показывать «старую» фразу"; checked: Boolean(bridge.settings.live_show_previous); onToggled: bridge.setSetting("live_show_previous", checked) }
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true

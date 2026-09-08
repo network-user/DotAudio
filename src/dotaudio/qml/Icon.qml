@@ -190,6 +190,14 @@ Item {
                 line(ctx, 10, 8, 10, 6.5)
                 ctx.beginPath(); ctx.arc(10, 6.4, 3.2, Math.PI, Math.PI * 2); ctx.stroke()
                 break
+            case "more":
+                ctx.fillStyle = root.ink
+                for (var dot = 0; dot < 3; dot++) {
+                    ctx.beginPath()
+                    ctx.arc(5 + dot * 5, 10, 1.35, 0, Math.PI * 2)
+                    ctx.fill()
+                }
+                break
             case "sizer":
                 ctx.strokeStyle = root.ink; ctx.fillStyle = root.ink
                 line(ctx, 16, 12, 16, 16); line(ctx, 16, 16, 12, 16)

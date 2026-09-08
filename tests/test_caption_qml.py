@@ -182,6 +182,73 @@ def test_segment_binding_ignores_unrelated_controller_signals(gui):
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
+@pytest.fixture
+def transcript(gui):
+    view = QQuickView()
+    view.setResizeMode(QQuickView.SizeRootObjectToView)
+    view.resize(640, 420)
+    view.setSource(QUrl.fromLocalFile(str(QML_DIR / "LiveTranscript.qml")))
+    assert view.status() == QQuickView.Ready, [error.toString() for error in view.errors()]
+    view.show()
+    root = view.rootObject()
+    yield root
+    view.close()
+    view.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
+def phrases(count):
+    return [
+        {"id": index, "start": index * 5.0, "end": index * 5.0 + 4.0,
+         "text": f"Фраза номер {index} с достаточно длинным текстом, чтобы проверить перенос."}
+        for index in range(count)
+    ]
+
+
+def test_live_line_keeps_its_place_while_history_grows(transcript):
+    transcript.setProperty("segments", phrases(2))
+    transcript.setProperty("pending", "живая строка")
+    settle()
+    live = transcript.findChild(QObject, "liveCaption")
+    place = (live.property("y"), live.property("height"))
+
+    transcript.setProperty("segments", phrases(12))
+    transcript.setProperty("confirmed", "живая строка стала заметно длиннее")
+    transcript.setProperty("pending", "и продолжает расти ещё на несколько слов")
+    settle()
+    # Ни новые фразы, ни рост текущей фразы не двигают живую строку: место
+    # под неё отведено заранее, поэтому читателю некуда «уплывать».
+    assert (live.property("y"), live.property("height")) == place
+
+
+def test_history_never_overlaps_the_live_line(transcript):
+    transcript.setProperty("segments", phrases(20))
+    transcript.setProperty("pending", "текущая речь")
+    settle()
+    live = transcript.findChild(QObject, "liveRow")
+    history = transcript.findChild(QObject, "livePhrases")
+    assert history.property("y") + history.property("height") <= live.property("y") + 0.5
+    # Длинный разговор упирается в верх и прокручивается, а не выдавливает речь.
+    assert history.property("height") <= transcript.property("height")
+
+
+def test_phrases_keep_their_whole_text(transcript):
+    transcript.setProperty("segments", phrases(3))
+    settle()
+    history = transcript.findChild(QObject, "livePhrases")
+    # Делегаты видны как дочерние элементы contentItem, а не через findChildren
+    # от корня: у созданных списком строк другой владелец.
+    shown = []
+    for item in history.property("contentItem").childItems():
+        body = item.findChild(QObject, "livePhraseText")
+        if body is not None:
+            shown.append(body.property("text"))
+    assert shown, "фразы не отрисованы"
+    for text in shown:
+        # Ничего не обрезано многоточием: расшифровку читают целиком.
+        assert text.endswith("перенос.")
+
+
 def test_stage_keeps_previous_and_live_inside_reserved_space(gui):
     engine = QQmlEngine()
     component = QQmlComponent(engine, QUrl.fromLocalFile(str(QML_DIR / "CaptionStage.qml")))

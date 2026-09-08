@@ -85,8 +85,8 @@ DEFAULTS = {
     # Оконная «зал» Live при запуске записи Live: превращать остров в окно
     # автоматически (live_auto_window) и как показывать внутри текст.
     "live_auto_window": True,
-    "live_click_history": True,
-    "live_show_previous": True,
+    # Таймкод рядом с каждой сказанной фразой в Live-потоке.
+    "live_show_times": True,
     "live_locked": False,
     "live_size": "standard",
     "dictate_hotkey": "Ctrl+Alt+Space", "island_hotkey": "Ctrl+Alt+O",
@@ -714,7 +714,7 @@ class Controller(QObject):
         if name in (
             "caption_overlay", "auto_paste", "dictate_hold", "island_click_through",
             "island_snap", "caption_autohide", "caption_locked", "reduce_motion",
-            "live_auto_window", "live_click_history", "live_show_previous", "live_locked",
+            "live_auto_window", "live_show_times", "live_locked",
             "live_greedy_finals",
         ):
             value = bool(value)
@@ -1947,6 +1947,18 @@ class Controller(QObject):
             self._notice = "Текст скопирован."
             self._record_log("success", "Текст скопирован в буфер обмена.")
             self.changed.emit()
+
+    @Slot(str)
+    def copyPhrase(self, text):
+        """Скопировать одну сказанную фразу из живого потока."""
+
+        value = " ".join(str(text or "").split())
+        if not value:
+            return
+        QApplication.clipboard().setText(value)
+        self._notice = "Фраза скопирована."
+        self._record_log("success", "Фраза скопирована в буфер обмена.")
+        self.changed.emit()
 
     @Slot(str)
     def refreshHistory(self, query):

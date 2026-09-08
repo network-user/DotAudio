@@ -21,13 +21,9 @@ Item {
     property int pixelSize: Theme.fsStage
     property int weight: Font.DemiBold
     property color ink: Theme.text
-    property real pendingOpacity: 1
     property int maxLines: 2
     property int align: Text.AlignLeft
     property real lineHeightFactor: Theme.captionLineFactor
-    // Словарные анимации удалены; поле сохранено ради мест, которые
-    // передают reduce_motion, и не влияет на отображение.
-    property bool animateWords: false
 
     readonly property real lineHeight: Math.round(pixelSize * lineHeightFactor)
 
@@ -73,7 +69,10 @@ Item {
         font.weight: root.weight
         lineHeight: root.lineHeight
         lineHeightMode: Text.FixedHeight
-        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+        // Только по границам слов. Перенос «где угодно» разрезал слово, и на
+        // следующем черновике разрез уезжал в другое место - строка от этого
+        // перекладывалась целиком, хотя дописали одно слово.
+        wrapMode: Text.Wrap
         horizontalAlignment: root.align
         visible: block.text.length > 0
     }

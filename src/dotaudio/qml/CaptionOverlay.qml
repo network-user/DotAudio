@@ -217,7 +217,6 @@ Window {
             pixelSize: overlay.captionSize
             maxLines: 2
             align: Text.AlignLeft
-            animateWords: !Boolean(bridge.settings.reduce_motion)
             ink: overlay.highContrast ? "#ffffff" : Theme.text
             mutedInk: overlay.highContrast ? "#d8d8d4" : Theme.muted
         }
