@@ -615,6 +615,14 @@ class Controller(QObject):
             self._record_log("info", f"Настройка {name}: {value}")
         self.changed.emit()
 
+    @Slot()
+    def resetCaptionPosition(self):
+        """Return a dragged caption window to the safe bottom placement."""
+        self._settings.update({"caption_position": "bottom", "caption_x": -1, "caption_y": -1})
+        self.store.save_settings(self._settings)
+        self._record_log("info", "Положение субтитров возвращено вниз экрана.")
+        self.changed.emit()
+
     def _config(self, media_mode=False, live_stream=False):
         values = {key: self._settings[key] for key in
                   ("model", "device", "language", "task", "backend", "server_url", "profile")}

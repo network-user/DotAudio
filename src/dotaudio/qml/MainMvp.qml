@@ -1537,6 +1537,15 @@ ApplicationWindow {
                                             PillButton { text: "Сверху"; primary: String(bridge.settings.caption_position) === "top"; onClicked: bridge.setSetting("caption_position", "top") }
                                             PillButton { text: "Снизу"; primary: String(bridge.settings.caption_position) !== "top" && String(bridge.settings.caption_position) !== "floating"; onClicked: bridge.setSetting("caption_position", "bottom") }
                                             PillButton { text: "Плавающие"; primary: String(bridge.settings.caption_position) === "floating"; onClicked: bridge.setSetting("caption_position", "floating") }
+                                            Item { Layout.fillWidth: true }
+                                            PillButton {
+                                                compact: true
+                                                visible: String(bridge.settings.caption_position) === "floating"
+                                                text: "Вернуть вниз"
+                                                onClicked: bridge.resetCaptionPosition()
+                                                ToolTip.visible: hovered
+                                                ToolTip.text: "Сбросить сохранённое положение плавающих субтитров"
+                                            }
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true

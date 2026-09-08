@@ -206,6 +206,22 @@ def test_sensitivity_label_and_toggle_round_trip() -> None:
     assert controller._settings["live_sensitivity"] == "speech"
 
 
+def test_reset_caption_position_clears_only_saved_floating_coordinates() -> None:
+    controller = Controller.__new__(Controller)
+    controller._settings = {**DEFAULTS, "caption_position": "floating", "caption_x": 340, "caption_y": 120}
+    saved = []
+    controller.store = type("Store", (), {"save_settings": staticmethod(saved.append)})()
+    controller._record_log = lambda *_args: None
+    controller.changed = _Counting()
+
+    Controller.resetCaptionPosition(controller)
+
+    assert controller._settings["caption_position"] == "bottom"
+    assert controller._settings["caption_x"] == controller._settings["caption_y"] == -1
+    assert saved == [controller._settings]
+    assert controller.changed.count == 1
+
+
 def test_unrecognized_sound_is_named_and_silence_clears_captions() -> None:
     controller = type("ControllerState", (), {})()
     controller._jobs = {"live": {"mode": "live"}}
