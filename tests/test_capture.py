@@ -35,6 +35,39 @@ def test_audio_capture_normalises_and_dispatches_without_device() -> None:
     assert levels[0] > 0
 
 
+def test_level_meter_does_not_evict_audio_blocks_from_capture_queue() -> None:
+    received: list[np.ndarray] = []
+    gaps: list[int] = []
+    capture = AudioCapture(on_audio=received.append, on_gap=gaps.append)
+
+    # Fill the audio queue before starting its consumer. The old shared queue
+    # held both audio and meter events, so these 24 blocks lost audio merely
+    # because every one also emitted a level update.
+    for index in range(24):
+        capture._publish_audio(np.full(16, index, dtype=np.float32))
+    capture._start_dispatcher()
+    time.sleep(0.1)
+    capture._stop_dispatcher()
+
+    assert len(received) == 24
+    assert gaps == []
+
+
+def test_capture_reports_audio_gap_when_the_bounded_audio_queue_overflows() -> None:
+    received: list[np.ndarray] = []
+    gaps: list[int] = []
+    capture = AudioCapture(on_audio=received.append, on_gap=gaps.append)
+
+    for index in range(25):
+        capture._publish_audio(np.full(16, index, dtype=np.float32))
+    capture._start_dispatcher()
+    time.sleep(0.1)
+    capture._stop_dispatcher()
+
+    assert len(received) == 24
+    assert gaps == [1]
+
+
 def test_list_input_devices_filters_outputs(monkeypatch) -> None:
     monkeypatch.setitem(
         sys.modules,

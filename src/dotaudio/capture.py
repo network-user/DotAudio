@@ -20,6 +20,7 @@ import numpy as np
 AudioCallback = Callable[[np.ndarray], None]
 LevelCallback = Callable[[float], None]
 ErrorCallback = Callable[[str], None]
+GapCallback = Callable[[int], None]
 _QUEUE_LIMIT = 24
 _SAMPLE_RATE = 16000
 _BLOCK_FRAMES = 1600
@@ -145,11 +146,20 @@ class _CallbackDispatcher:
         on_audio: AudioCallback | None,
         on_level: LevelCallback | None,
         on_error: ErrorCallback | None,
+        on_gap: GapCallback | None = None,
     ) -> None:
         self._on_audio = on_audio
         self._on_level = on_level
         self._on_error = on_error
-        self._events: Queue[tuple[str, Any] | None] = Queue(maxsize=_QUEUE_LIMIT)
+        self._on_gap = on_gap
+        # Audio must never compete with the cosmetic level meter for queue
+        # space. Levels are intentionally coalesced; audio overflow remains
+        # bounded but is reported to the consumer instead of disappearing.
+        self._audio_events: Queue[np.ndarray | None] = Queue(maxsize=_QUEUE_LIMIT)
+        self._error_events: Queue[str] = Queue(maxsize=8)
+        self._event_lock = Lock()
+        self._latest_level: float | None = None
+        self._dropped_audio_blocks = 0
         self._dispatch_stop = Event()
         self._dispatch_thread: Thread | None = None
 
@@ -166,25 +176,46 @@ class _CallbackDispatcher:
 
     def _stop_dispatcher(self) -> None:
         self._dispatch_stop.set()
-        self._put_event(None)
+        self._put_audio(None)
         if self._dispatch_thread is not None:
             self._dispatch_thread.join(timeout=1.0)
         self._dispatch_thread = None
 
-    def _put_event(self, event: tuple[str, Any] | None) -> None:
+    def _put_audio(self, audio: np.ndarray | None) -> None:
         try:
-            self._events.put_nowait(event)
+            self._audio_events.put_nowait(audio)
             return
         except Full:
             pass
         try:
-            self._events.get_nowait()
+            self._audio_events.get_nowait()
         except Empty:
             pass
+        else:
+            if audio is not None:
+                with self._event_lock:
+                    self._dropped_audio_blocks += 1
         try:
-            self._events.put_nowait(event)
+            self._audio_events.put_nowait(audio)
         except Full:
             return
+
+    def _put_level(self, level: float) -> None:
+        with self._event_lock:
+            self._latest_level = level
+
+    def _put_error(self, message: str) -> None:
+        try:
+            self._error_events.put_nowait(message)
+        except Full:
+            try:
+                self._error_events.get_nowait()
+            except Empty:
+                return
+            try:
+                self._error_events.put_nowait(message)
+            except Full:
+                return
 
     def _publish_audio(self, frames: np.ndarray) -> None:
         audio = self._normalise(frames)
@@ -193,8 +224,8 @@ class _CallbackDispatcher:
         # RMS is stable enough for a 100 ms level meter and is cheap to
         # calculate in the realtime callback.
         level = float(np.sqrt(np.mean(np.square(audio, dtype=np.float32))))
-        self._put_event(("audio", audio))
-        self._put_event(("level", level))
+        self._put_audio(audio)
+        self._put_level(level)
 
     @staticmethod
     def _normalise(frames: np.ndarray) -> np.ndarray:
@@ -208,33 +239,57 @@ class _CallbackDispatcher:
         return np.ascontiguousarray(audio, dtype=np.float32).copy()
 
     def _error(self, message: str) -> None:
-        self._put_event(("error", str(message)[:500]))
+        self._put_error(str(message)[:500])
+
+    def _dispatch_level(self) -> None:
+        with self._event_lock:
+            level, self._latest_level = self._latest_level, None
+        if level is not None and self._on_level is not None:
+            try:
+                self._on_level(level)
+            except Exception:
+                return
+
+    def _dispatch_errors(self) -> None:
+        while True:
+            try:
+                message = self._error_events.get_nowait()
+            except Empty:
+                return
+            if self._on_error is None:
+                continue
+            try:
+                self._on_error(message)
+            except Exception:
+                continue
 
     def _dispatch_loop(self) -> None:
         while True:
             try:
-                event = self._events.get(timeout=0.1)
+                audio = self._audio_events.get(timeout=0.05)
             except Empty:
                 if self._dispatch_stop.is_set():
                     return
+                self._dispatch_level()
+                self._dispatch_errors()
                 continue
-            if event is None:
+            if audio is None:
                 return
-            kind, value = event
-            callback: Callable[[Any], None] | None
-            if kind == "audio":
-                callback = self._on_audio
-            elif kind == "level":
-                callback = self._on_level
-            else:
-                callback = self._on_error
-            if callback is None:
-                continue
-            try:
-                callback(value)
-            except Exception:
-                # A consumer error must not kill capture or prevent stop().
-                continue
+            with self._event_lock:
+                dropped, self._dropped_audio_blocks = self._dropped_audio_blocks, 0
+            if dropped and self._on_gap is not None:
+                try:
+                    self._on_gap(dropped)
+                except Exception:
+                    pass
+            if self._on_audio is not None:
+                try:
+                    self._on_audio(audio)
+                except Exception:
+                    # A consumer error must not kill capture or prevent stop().
+                    pass
+            self._dispatch_level()
+            self._dispatch_errors()
 
 
 class AudioCapture(_CallbackDispatcher):
@@ -247,10 +302,11 @@ class AudioCapture(_CallbackDispatcher):
         on_audio: AudioCallback | None = None,
         on_level: LevelCallback | None = None,
         on_error: ErrorCallback | None = None,
+        on_gap: GapCallback | None = None,
     ) -> None:
         if kind not in {"microphone", "system"}:
             raise ValueError("kind must be 'microphone' or 'system'")
-        super().__init__(on_audio, on_level, on_error)
+        super().__init__(on_audio, on_level, on_error, on_gap)
         self.kind = kind
         self.device = device
         self._stream: Any = None
@@ -411,10 +467,12 @@ class MixedCapture:
         on_audio: AudioCallback | None = None,
         on_level: LevelCallback | None = None,
         on_error: ErrorCallback | None = None,
+        on_gap: GapCallback | None = None,
     ) -> None:
         self._on_audio = on_audio
         self._on_level = on_level
         self._on_error = on_error
+        self._on_gap = on_gap
         self._stop = Event()
         self._mic_q: Queue[np.ndarray] = Queue(maxsize=8)
         self._sys_q: Queue[np.ndarray] = Queue(maxsize=8)
@@ -424,12 +482,14 @@ class MixedCapture:
             device=microphone_device,
             on_audio=lambda audio: self._feed(self._mic_q, audio),
             on_error=lambda message: self._child_error("microphone", message),
+            on_gap=lambda dropped: self._gap(dropped),
         )
         self._sys = AudioCapture(
             kind="system",
             device=loopback_device,
             on_audio=lambda audio: self._feed(self._sys_q, audio),
             on_error=lambda message: self._child_error("system", message),
+            on_gap=lambda dropped: self._gap(dropped),
         )
 
     def start(self) -> None:
@@ -473,10 +533,16 @@ class MixedCapture:
             queue.get_nowait()
         except Empty:
             pass
+        else:
+            self._gap(1)
         try:
             queue.put_nowait(audio)
         except Full:
             return
+
+    def _gap(self, dropped: int) -> None:
+        if dropped > 0 and not self._stop.is_set() and self._on_gap is not None:
+            self._on_gap(dropped)
 
     def _child_error(self, source: str, message: str) -> None:
         if self._stop.is_set():
@@ -532,10 +598,11 @@ def open_live_capture(
     on_audio: AudioCallback | None = None,
     on_level: LevelCallback | None = None,
     on_error: ErrorCallback | None = None,
+    on_gap: GapCallback | None = None,
 ) -> AudioCapture | MixedCapture:
     """Build the capture object Live should start for ``kind``."""
 
-    callbacks = {"on_audio": on_audio, "on_level": on_level, "on_error": on_error}
+    callbacks = {"on_audio": on_audio, "on_level": on_level, "on_error": on_error, "on_gap": on_gap}
     if kind == "mixed":
         return MixedCapture(
             microphone_device=_coerce_device(settings.get("input_device")),
@@ -559,8 +626,9 @@ class StreamCapture(_CallbackDispatcher):
         on_audio: AudioCallback | None = None,
         on_level: LevelCallback | None = None,
         on_error: ErrorCallback | None = None,
+        on_gap: GapCallback | None = None,
     ) -> None:
-        super().__init__(on_audio, on_level, on_error)
+        super().__init__(on_audio, on_level, on_error, on_gap)
         self.url = self._validate_url(url)
         self._stop = Event()
         self._process: subprocess.Popen[bytes] | None = None

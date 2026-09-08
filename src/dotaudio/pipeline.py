@@ -45,6 +45,8 @@ FINAL_MERGE_LIMIT_SECONDS = 15.0
 SHORT_FINAL_SECONDS = 1.2
 PHRASE_CONTEXT_SECONDS = 2.0
 
+_PREVIEW_PUNCTUATION = str.maketrans("", "", ".,!?;:…«»\"“”()[]{}")
+
 DICTATION_PREVIEW_MIN_SECONDS = 0.8
 DICTATION_PREVIEW_INTERVAL_SECONDS = 0.8
 DICTATION_PREVIEW_WINDOW_SECONDS = 1.8
@@ -330,6 +332,13 @@ class LiveSession:
         self._stable_prefix = ""
         self._last_preview_offset = None
         self._last_final_text = ""
+        # A final has priority over a queued preview, but an uninterrupted
+        # stream can produce another final while that one is decoding.  Always
+        # taking finals in that case freezes the visible caption even though a
+        # fresh preview is waiting.  Live alternates one fresh preview between
+        # finals while capture is still open; stop() keeps draining finals.
+        self._last_task = ""
+        self._audio_gap_reported = False
         self._slow_reported = False
         self._worker_started = False
         self._done_emitted = False
@@ -346,6 +355,13 @@ class LiveSession:
         with self._input_lock:
             if self.capture is None:
                 self.buffer.detector = detector
+
+    def note_audio_gap(self, dropped_blocks: int) -> None:
+        """Surface capture overload without turning a Live session fatal."""
+
+        if dropped_blocks > 0 and not self.cancel.is_set() and not self._audio_gap_reported:
+            self._audio_gap_reported = True
+            self.on_status("live_audio_gap")
 
     def _mark_done(self):
         if self._done_emitted:
@@ -590,18 +606,35 @@ class LiveSession:
             self.on_done(self.failed, self.cancel.is_set())
 
     def _next_task(self):
+        # While Live is capturing, let one fresh preview through after a final.
+        # This preserves the screen cadence during continuous speech without
+        # allowing previews to starve final persistence. Once stop() closes the
+        # session, finals drain immediately so the saved transcript is complete.
+        if self.catch_up and not self.closed.is_set() and self._last_task == "final":
+            preview = self._take_preview()
+            if preview is not None:
+                self._last_task = "preview"
+                return "preview", preview
+
         # Finals must make progress even while capture keeps replacing previews.
         # Catch-up already bounds this queue to the newest unstarted phrase.
         try:
-            return "final", self.queue.get_nowait()
+            task = self.queue.get_nowait()
+            self._last_task = "final"
+            return "final", task
         except Empty:
             pass
+        preview = self._take_preview()
+        if preview is None:
+            return None
+        self._last_task = "preview"
+        return "preview", preview
+
+    def _take_preview(self):
         with self._preview_lock:
             preview = self._preview
             self._preview = None
-        if preview is None:
-            return None
-        return "preview", preview
+        return preview
 
     def _has_work(self):
         if not self.queue.empty():
@@ -648,7 +681,10 @@ class LiveSession:
         old_words, new_words = previous.split(), current.split()
         count = 0
         for old, new in zip(old_words, new_words):
-            if old != new:
+            # Whisper often settles capitalization and punctuation a decode
+            # later.  Those cosmetic corrections must not make already read
+            # words flash back into the provisional tail.
+            if old.casefold().translate(_PREVIEW_PUNCTUATION) != new.casefold().translate(_PREVIEW_PUNCTUATION):
                 break
             count += 1
         return " ".join(new_words[:count])

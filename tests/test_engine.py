@@ -303,7 +303,7 @@ def test_live_window_sizes_the_encoder_to_the_phrase(monkeypatch) -> None:
     # Four seconds of speech plus the two second silence margin, instead of the
     # 3000 frames Whisper would otherwise pad to.
     assert model.model.features.shape[-1] == 600
-    assert model.model.kwargs["beam_size"] == 1
+    assert model.model.kwargs["beam_size"] == 3
     assert model.model.kwargs["no_repeat_ngram_size"] == 3
 
 
@@ -406,7 +406,7 @@ def test_live_window_falls_back_once_when_internals_are_missing(monkeypatch) -> 
 
         def transcribe(self, _source, **kwargs):
             self.calls += 1
-            assert kwargs["beam_size"] == 1
+            assert kwargs["beam_size"] == 3
             return iter([_Segment(0, 1, "запасной путь")]), object()
 
     model = PlainModel()
@@ -469,10 +469,10 @@ def test_live_preview_recipe_uses_greedy_decoding(monkeypatch) -> None:
     assert result[0]["text"] == "черновик"
 
 
-def test_live_stream_recipe_skips_second_vad_and_uses_greedy(monkeypatch) -> None:
+def test_live_stream_recipe_skips_second_vad_and_uses_profile_beam(monkeypatch) -> None:
     class FakeModel:
         def transcribe(self, _source, **kwargs):
-            assert kwargs["beam_size"] == 1
+            assert kwargs["beam_size"] == 3
             assert kwargs["best_of"] == 1
             assert kwargs["temperature"] == 0.0
             assert kwargs["vad_filter"] is False
@@ -490,3 +490,10 @@ def test_live_stream_recipe_skips_second_vad_and_uses_greedy(monkeypatch) -> Non
         np.zeros(1600), RecognitionConfig(device="cpu", live_stream=True)
     )
     assert result[0]["text"] == "фраза"
+
+
+def test_live_final_beam_follows_the_selected_profile() -> None:
+    assert Engine._live_beam_size(RecognitionConfig(live_preview=True, profile="quality")) == 1
+    assert Engine._live_beam_size(RecognitionConfig(live_stream=True, profile="fast")) == 1
+    assert Engine._live_beam_size(RecognitionConfig(live_stream=True, profile="balanced")) == 3
+    assert Engine._live_beam_size(RecognitionConfig(live_stream=True, profile="quality")) == 5

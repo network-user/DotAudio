@@ -203,8 +203,10 @@ class RecognitionConfig:
     # Preview requests are short, disposable snapshots used only by Live UI.
     # They deliberately favour cadence over the final transcript's accuracy.
     live_preview: bool = False
-    # Live finals keep greedy decode and skip a second VAD pass: SpeechBuffer
-    # already endpointed the phrase.  Dictation and media keep the profile.
+    # Live finals skip a second VAD pass: SpeechBuffer already endpointed the
+    # phrase. Unlike disposable previews, they retain the selected profile's
+    # beam width so the stored transcript can improve without slowing every
+    # on-screen update.
     live_stream: bool = False
     # "speech" keeps the confidence gate: sound that the decoder does not
     # believe in (music, noise) is reported as nothing.  "everything" shows
@@ -412,8 +414,14 @@ class Engine:
             "quality": {"beam": 8, "patience": 1.5},
         }[config.profile]
         live_fast = config.live_preview or config.live_stream
-        if live_fast:
+        if config.live_preview:
             profile = {"beam": 1, "patience": 1.0}
+        elif config.live_stream:
+            # Keep the supported faster-whisper fallback aligned with the
+            # short CTranslate2 path below. Otherwise a version mismatch
+            # would silently make a final much slower than the live governor
+            # measured for it.
+            profile = {"beam": self._live_beam_size(config), "patience": 1.0}
         # Music commonly has speech-like instrumental fragments.  DotSound
         # keeps VAD off for this case.  Live already endpointed the phrase in
         # SpeechBuffer, so a second Silero pass only delays the caption.
@@ -535,7 +543,7 @@ class Engine:
                 result = model.model.generate(
                     storage,
                     [prompt],
-                    beam_size=1,
+                    beam_size=self._live_beam_size(config),
                     max_length=len(prompt) + budget,
                     # A cut-off window tempts the decoder into repeating the
                     # last phrase until the token budget runs out.
@@ -595,6 +603,14 @@ class Engine:
         if not scores:
             return True
         return float(scores[0]) >= LIVE_MIN_LOGPROB
+
+    @staticmethod
+    def _live_beam_size(config: RecognitionConfig) -> int:
+        """Keep previews responsive while finals honour the quality profile."""
+
+        if config.live_preview:
+            return 1
+        return {"fast": 1, "balanced": 3, "quality": 5}[config.profile]
 
     @staticmethod
     def _drop_restart(text: str) -> str:

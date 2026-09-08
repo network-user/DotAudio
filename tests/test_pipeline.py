@@ -110,6 +110,20 @@ def test_live_session_stop_before_start_still_completes() -> None:
     assert capture.started is False
 
 
+def test_live_session_reports_capture_gap_once_without_cancelling() -> None:
+    statuses: list[str] = []
+    session = LiveSession(
+        _Engine(), RecognitionConfig(), lambda _segment: None, statuses.append,
+        lambda _error, _cancelled: None, catch_up=True,
+    )
+
+    session.note_audio_gap(2)
+    session.note_audio_gap(1)
+
+    assert statuses == ["live_audio_gap"]
+    assert session.cancel.is_set() is False
+
+
 def test_live_session_drains_the_last_phrase_before_completion() -> None:
     completed = Event()
     segments: list[dict] = []
@@ -619,6 +633,12 @@ def test_preview_keeps_an_agreed_prefix_across_hypotheses() -> None:
     assert any(item["stable_text"] == "раз два" for item in partials)
 
 
+def test_preview_agreement_keeps_words_when_only_punctuation_changes() -> None:
+    assert LiveSession._common_word_prefix(
+        "сегодня будет дождь", "Сегодня, будет дождь. Потом солнце"
+    ) == "Сегодня, будет дождь."
+
+
 def test_preview_skips_a_snapshot_replaced_before_inference() -> None:
     class Engine:
         def __init__(self) -> None:
@@ -729,6 +749,48 @@ def test_catch_up_runs_a_final_even_when_a_newer_preview_waits() -> None:
     assert engine.calls == 1
     assert session.queue.empty()
     assert statuses == ["live_no_text"]
+
+
+def test_catch_up_yields_one_fresh_preview_between_finals_while_recording() -> None:
+    session = LiveSession(
+        _Engine(), RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: None, lambda _partial: None, catch_up=True,
+    )
+    first_final = (0.0, _speech(), None)
+    second_final = (1.0, _speech(), None)
+    preview = (1.0, _speech(), 0.0, 1)
+    session.queue.put_nowait(first_final)
+    kind, payload = session._next_task()
+    assert kind == "final"
+    assert payload is first_final
+    session.queue.put_nowait(second_final)
+    session._preview = preview
+
+    # A live caption remains fresh even when the next completed phrase is
+    # waiting. The following turn still persists that phrase.
+    kind, payload = session._next_task()
+    assert kind == "preview"
+    assert payload is preview
+    kind, payload = session._next_task()
+    assert kind == "final"
+    assert payload is second_final
+
+
+def test_catch_up_stop_drains_final_before_a_waiting_preview() -> None:
+    session = LiveSession(
+        _Engine(), RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: None, lambda _partial: None, catch_up=True,
+    )
+    final = (0.0, _speech(), None)
+    preview = (1.0, _speech(), 0.0, 1)
+    session._last_task = "final"
+    session.queue.put_nowait(final)
+    session._preview = preview
+    session.closed.set()
+
+    kind, payload = session._next_task()
+    assert kind == "final"
+    assert payload is final
 
 
 class _FakeVadSession:

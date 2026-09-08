@@ -74,6 +74,7 @@ def test_hotkey_options_are_valid_and_actions_do_not_overlap() -> None:
     assert DEFAULTS["caption_position"] == "bottom"
     assert DEFAULTS["caption_locked"] is True
     assert DEFAULTS["caption_autohide"] is False
+    assert DEFAULTS["reduce_motion"] is False
 
 
 def test_disk_status_describes_cache_without_downloading() -> None:

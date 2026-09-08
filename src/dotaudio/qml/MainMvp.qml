@@ -1544,6 +1544,11 @@ ApplicationWindow {
                                             Item { Layout.fillWidth: true }
                                             ToggleSwitch { text: "Закрепить (клики сквозь)"; checked: Boolean(bridge.settings.caption_locked); onToggled: bridge.setSetting("caption_locked", checked) }
                                         }
+                                        ToggleSwitch {
+                                            text: "Без анимации слов"
+                                            checked: Boolean(bridge.settings.reduce_motion)
+                                            onToggled: bridge.setSetting("reduce_motion", checked)
+                                        }
                                         Label {
                                             text: Boolean(bridge.settings.caption_locked)
                                                   ? "Субтитры не перехватывают мышь. Снимите закрепление, чтобы перетащить окно зала."

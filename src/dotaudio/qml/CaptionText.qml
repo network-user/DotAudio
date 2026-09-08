@@ -39,15 +39,19 @@ Item {
     // Индексы слов, ожидающих подтверждения волной.
     property var confirmQueue: []
     property int confirmStep: 24
+    // Confirmed и pending приходят одним сигналом контроллера, но QML меняет
+    // привязки по отдельности. Сводим их к одному кадру, чтобы не делать две
+    // раскладки и не показать промежуточное состояние строки.
+    property bool syncScheduled: false
 
     implicitHeight: lineHeight * Math.max(1, maxLines)
     clip: true
 
     // Один сигнал контроллера меняет обе привязки. Промежуточный снимок
     // содержит старый pending и новый confirmed и не должен попасть в модель.
-    onConfirmedChanged: Qt.callLater(root.sync)
-    onPendingChanged: Qt.callLater(root.sync)
-    onTextChanged: Qt.callLater(root.sync)
+    onConfirmedChanged: root.scheduleSync()
+    onPendingChanged: root.scheduleSync()
+    onTextChanged: root.scheduleSync()
     // Смена ширины или шрифта недействительна для всех застывших позиций.
     onWidthChanged: root.reflowAll()
     onPixelSizeChanged: root.reflowAll()
@@ -56,7 +60,7 @@ Item {
     onSpaceWidthChanged: root.reflowAll()
     onMaxLinesChanged: Qt.callLater(root.relayout)
     onAlignChanged: Qt.callLater(root.relayout)
-    Component.onCompleted: Qt.callLater(root.sync)
+    Component.onCompleted: root.scheduleSync()
 
     ListModel { id: words }
 
@@ -105,6 +109,16 @@ Item {
         for (var j = 0; j < live.length; j++)
             out.push({ "token": live[j], "soft": true })
         return out
+    }
+
+    function scheduleSync() {
+        if (root.syncScheduled)
+            return
+        root.syncScheduled = true
+        Qt.callLater(function() {
+            root.syncScheduled = false
+            root.sync()
+        })
     }
 
     function comparable(value) {

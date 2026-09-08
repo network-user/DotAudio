@@ -67,6 +67,7 @@ DEFAULTS = {
     "caption_overlay": True, "caption_size": "md", "caption_contrast": "normal",
     "caption_position": "bottom", "caption_x": -1, "caption_y": -1,
     "caption_screen": -1, "caption_autohide": False, "caption_locked": True,
+    "reduce_motion": False,
     "live_sensitivity": "speech",
     "dictate_hotkey": "Ctrl+Alt+Space", "island_hotkey": "Ctrl+Alt+O",
     "paste_last_hotkey": "Shift+Alt+Z", "dictate_hold": False,
@@ -77,7 +78,7 @@ DEFAULTS = {
 LIVE_SETTINGS = {
     "caption_overlay", "caption_size", "caption_contrast",
     "caption_position", "caption_x", "caption_y", "caption_screen",
-    "caption_autohide", "caption_locked",
+    "caption_autohide", "caption_locked", "reduce_motion",
     "island_opacity", "island_snap",
 }
 
@@ -102,6 +103,7 @@ STATUS_LABELS = {
     "model_ready": "Модель подготовлена",
     "remote_model_managed_by_server": "Модель подготовит удалённый сервер",
     "live_backlog": "Догоняем живой звук…",
+    "live_audio_gap": "Пропущена часть аудио из-за перегрузки захвата. Субтитры продолжаются.",
     "live_no_text": "Звук есть, но речь не распознана. Проверьте источник и язык.",
     "live_slow": "Модель считает дольше, чем длится речь. Выберите профиль «Быстро».",
     "live_unrecognized": "Звук есть, но речи не распознаём. Музыка или шум?",
@@ -582,7 +584,7 @@ class Controller(QObject):
             return
         if name in (
             "caption_overlay", "auto_paste", "dictate_hold", "island_click_through",
-            "island_snap", "caption_autohide", "caption_locked",
+            "island_snap", "caption_autohide", "caption_locked", "reduce_motion",
         ):
             value = bool(value)
         if name in ("caption_x", "caption_y", "caption_screen"):
@@ -738,6 +740,9 @@ class Controller(QObject):
                 elif value.startswith("transcribing_"):
                     self._live_phase = "decoding"
                 elif value == "live_backlog":
+                    self._live_phase = "backlog"
+                    self._live_diagnostic = value
+                elif value == "live_audio_gap":
                     self._live_phase = "backlog"
                     self._live_diagnostic = value
                 elif value == "live_no_text":
@@ -1365,7 +1370,18 @@ class Controller(QObject):
                         self.captureStarted.emit(sid, time.monotonic() - len(audio) / SAMPLE_RATE)
                     live.feed(audio)
 
-                args = {"on_audio": on_audio, "on_level": self.levelArrived.emit, "on_error": audio_error}
+                def on_gap(dropped, sid=sid, live=live):
+                    live.note_audio_gap(int(dropped))
+                    self.logArrived.emit(
+                        "warning", f"Захват Live пропустил {int(dropped)} блок(а) аудио."
+                    )
+
+                args = {
+                    "on_audio": on_audio,
+                    "on_level": self.levelArrived.emit,
+                    "on_error": audio_error,
+                    "on_gap": on_gap,
+                }
                 if url:
                     capture = StreamCapture(url, **args)
                 else:

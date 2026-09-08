@@ -38,6 +38,17 @@ Rectangle {
     readonly property string stageHint: bridge.liveActive
         ? bridge.liveStatusText
         : "Нажмите «Слушать» - фраза появится здесь"
+    // Это измеренное отставание последнего принятого фрагмента, а не обещание
+    // скорости модели. После первой фразы оно помогает сразу увидеть, успевает
+    // ли выбранный профиль за текущим источником.
+    readonly property string latencyLabel: {
+        var ms = Math.max(0, Number(bridge.liveLatencyMs))
+        if (!bridge.liveActive || ms < 1)
+            return ""
+        return ms < 1000 ? "≈ " + Math.round(ms) + " мс"
+                         : "≈ " + (Math.round(ms / 100) / 10) + " с"
+    }
+    readonly property string sourceCheckText: String(bridge.deviceTest.message || "")
 
     ColumnLayout {
         anchors.fill: parent
@@ -74,6 +85,17 @@ Rectangle {
                 Behavior on opacity { NumberAnimation { duration: Theme.baseMs } }
             }
 
+            Label {
+                visible: root.latencyLabel.length > 0
+                text: root.latencyLabel
+                color: Theme.faint
+                font.family: Theme.monoFamily
+                font.pixelSize: Theme.fsSmall
+                ToolTip.visible: latencyHover.containsMouse
+                ToolTip.text: "Отставание последнего текста от аудио"
+                HoverHandler { id: latencyHover }
+            }
+
             PillButton {
                 compact: true
                 text: bridge.liveSourceLabel
@@ -90,6 +112,17 @@ Rectangle {
                 onClicked: bridge.toggleLiveSensitivity()
                 ToolTip.visible: hovered
                 ToolTip.text: "«Речь» показывает только речь, «Всё» - любой звук, включая песни"
+            }
+
+            PillButton {
+                compact: true
+                visible: !bridge.recording && !bridge.busy
+                text: bridge.deviceTest.phase === "starting" || bridge.deviceTest.phase === "listening"
+                    ? "Проверяем…" : "Проверить"
+                enabled: bridge.deviceTest.phase !== "starting" && bridge.deviceTest.phase !== "listening"
+                onClicked: bridge.testLiveSource()
+                ToolTip.visible: hovered
+                ToolTip.text: "Коротко проверить выбранный источник без сохранения записи"
             }
 
             IconButton {
@@ -123,6 +156,19 @@ Rectangle {
                 ToolTip.visible: hovered
                 ToolTip.text: "Свернуть в остров"
             }
+        }
+
+        // Перед стартом результат проверки остаётся рядом с кнопкой запуска:
+        // не нужно уходить в настройки, чтобы понять, слышит ли Live источник.
+        Label {
+            Layout.fillWidth: true
+            visible: !bridge.liveActive && root.sourceCheckText.length > 0
+            text: root.sourceCheckText
+            color: bridge.deviceTest.phase === "error" || bridge.deviceTest.phase === "silent"
+                ? Theme.rec : Theme.muted
+            font.pixelSize: Theme.fsSmall
+            font.family: Theme.fontFamily
+            wrapMode: Text.Wrap
         }
 
         // Пустое место собирается над лентой, поэтому текст всегда прижат к
@@ -224,6 +270,7 @@ Rectangle {
             pixelSize: root.embedded ? Theme.fsStageSm : Theme.fsStage
             maxLines: 3
             align: Text.AlignLeft
+            animateWords: !Boolean(bridge.settings.reduce_motion)
         }
 
         // Пока фраз нет, сцена стоит по центру: пустой экран не должен
