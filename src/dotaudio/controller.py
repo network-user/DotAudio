@@ -592,6 +592,10 @@ class Controller(QObject):
                 value = int(value)
             except (TypeError, ValueError):
                 return
+        source_changed = (
+            name in {"live_source", "input_device", "loopback_device", "output_device"}
+            and self._settings.get(name) != value
+        )
         self._settings[name] = value
         if name == "live_source":
             self._settings["source"] = value if value in ("microphone", "system") else "system"
@@ -603,6 +607,11 @@ class Controller(QObject):
             # everyday profile can afford the model that actually writes
             # Russian.  On tiny "русской речи" comes back as "меру с каиричев".
             self._settings["model"] = MODEL_BY_PROFILE[value]
+        if source_changed:
+            # Проверка относится ровно к тому устройству, которое было открыто.
+            # После смены входа старый «готово» нельзя оставлять рядом с кнопкой
+            # запуска - пользователь мог выбрать совершенно другой источник.
+            self._device_test = {"phase": "idle", "message": "", "level": 0.0}
         self.store.save_settings(self._settings)
         if name == "model":
             self._model_state = {

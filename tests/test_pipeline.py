@@ -639,6 +639,37 @@ def test_preview_agreement_keeps_words_when_only_punctuation_changes() -> None:
     ) == "Сегодня, будет дождь."
 
 
+def test_rolling_preview_keeps_a_stable_overlap_after_its_window_moves() -> None:
+    engine = _ScriptedEngine("раз два три четыре", "Два, три четыре. пять")
+    partials: list[dict] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: None, partials.append, catch_up=True,
+    )
+    session._preview_generation = 1
+
+    session._transcribe_preview(0.0, _speech(1.8), 0.0, 1)
+    session._transcribe_preview(0.8, _speech(1.8), 0.0, 1)
+
+    assert [part["stable_text"] for part in partials] == ["", "Два, три четыре."]
+
+
+def test_rolling_preview_does_not_confirm_one_word_or_nonoverlapping_audio() -> None:
+    engine = _ScriptedEngine("раз два три", "три четыре", "три четыре пять")
+    partials: list[dict] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: None, partials.append, catch_up=True,
+    )
+    session._preview_generation = 1
+
+    session._transcribe_preview(0.0, _speech(1.0), 0.0, 1)
+    session._transcribe_preview(0.5, _speech(1.0), 0.0, 1)
+    session._transcribe_preview(2.0, _speech(1.0), 0.0, 1)
+
+    assert [part["stable_text"] for part in partials] == ["", "", ""]
+
+
 def test_preview_skips_a_snapshot_replaced_before_inference() -> None:
     class Engine:
         def __init__(self) -> None:

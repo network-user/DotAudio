@@ -331,6 +331,7 @@ class LiveSession:
         self._last_preview_text = ""
         self._stable_prefix = ""
         self._last_preview_offset = None
+        self._last_preview_end = None
         self._last_final_text = ""
         # A final has priority over a queued preview, but an uninterrupted
         # stream can produce another final while that one is decoding.  Always
@@ -689,6 +690,26 @@ class LiveSession:
             count += 1
         return " ".join(new_words[:count])
 
+    @staticmethod
+    def _overlapping_word_prefix(previous, current):
+        """Return the current prefix that agrees with the old window tail.
+
+        Rolling previews deliberately shift their audio start on long speech.
+        Comparing two whole strings then loses agreement at every shift even
+        though most of the audible words are shared.  One matching word is too
+        weak for Russian filler words, so only a two-word overlap is stable.
+        """
+
+        old_words, new_words = previous.split(), current.split()
+        for count in range(min(len(old_words), len(new_words)), 1, -1):
+            if all(
+                old_words[-count + index].casefold().translate(_PREVIEW_PUNCTUATION)
+                == new_words[index].casefold().translate(_PREVIEW_PUNCTUATION)
+                for index in range(count)
+            ):
+                return " ".join(new_words[:count])
+        return ""
+
     def _transcribe_preview(self, offset, audio, requested_at, generation):
         # A capture callback can replace the snapshot after _next_task() has
         # selected it but before native inference starts.  Do not spend a
@@ -713,18 +734,21 @@ class LiveSession:
         text = self._text(received)
         if not text:
             return
-        if offset != self._last_preview_offset:
-            self._last_preview_text = ""
-            self._stable_prefix = ""
-            self._last_preview_offset = offset
-        agreed = self._common_word_prefix(self._last_preview_text, text)
+        final_end = offset + len(audio) / SAMPLE_RATE
+        if offset == self._last_preview_offset:
+            agreed = self._common_word_prefix(self._last_preview_text, text)
+        elif self._last_preview_end is not None and offset < self._last_preview_end:
+            agreed = self._overlapping_word_prefix(self._last_preview_text, text)
+        else:
+            agreed = ""
         self._last_preview_text = text
+        self._last_preview_offset = offset
+        self._last_preview_end = final_end
         # Agreement can grow while the decoder preserves the same words. If
         # it revises them, the old prefix is no longer confirmed: publishing
         # it beside the new hypothesis would splice two different sentences.
         self._stable_prefix = agreed
         stable_text = self._stable_prefix
-        final_end = offset + len(audio) / SAMPLE_RATE
         try:
             self.on_partial({
                 "start": offset,
@@ -741,6 +765,7 @@ class LiveSession:
         self._last_preview_text = ""
         self._stable_prefix = ""
         self._last_preview_offset = None
+        self._last_preview_end = None
         emitted = False
         end = offset + len(audio) / SAMPLE_RATE
 

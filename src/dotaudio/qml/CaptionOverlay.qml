@@ -61,14 +61,31 @@ Window {
     readonly property int stageHeight: stage.implicitHeight
     readonly property bool highContrast: String(bridge.settings.caption_contrast) === "high"
 
+    function bounded(value, lower, upper) {
+        return Math.max(lower, Math.min(upper, value))
+    }
+
     function placeOnScreen() {
         if (overlay.dragging)
             return
         var screen = overlay.hostScreen
         var pos = String(bridge.settings.caption_position)
         if (pos === "floating" && Number(bridge.settings.caption_x) >= 0) {
-            overlay.x = Number(bridge.settings.caption_x)
-            overlay.y = Number(bridge.settings.caption_y)
+            // Монитор мог отключиться, сменить DPI или получить другую
+            // виртуальную координату. Оставляем хотя бы узкий край окна в
+            // пределах выбранного экрана, чтобы субтитры не «пропали» вне
+            // видимой области и их можно было вернуть мышью.
+            var visibleEdge = 24
+            overlay.x = overlay.bounded(
+                Number(bridge.settings.caption_x),
+                screen.virtualX - overlay.width + visibleEdge,
+                screen.virtualX + screen.width - visibleEdge
+            )
+            overlay.y = overlay.bounded(
+                Number(bridge.settings.caption_y),
+                screen.virtualY - overlay.height + visibleEdge,
+                screen.virtualY + screen.height - visibleEdge
+            )
             return
         }
         overlay.x = screen.virtualX + Math.round((screen.width - overlay.width) / 2)

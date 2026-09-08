@@ -222,6 +222,25 @@ def test_reset_caption_position_clears_only_saved_floating_coordinates() -> None
     assert controller.changed.count == 1
 
 
+def test_changing_live_source_clears_a_stale_source_check() -> None:
+    controller = Controller.__new__(Controller)
+    controller._jobs = {}
+    controller._settings = dict(DEFAULTS)
+    controller._device_test = {"phase": "ready", "message": "Источник отвечает.", "level": 0.42}
+    controller.store = type("Store", (), {"save_settings": staticmethod(lambda _settings: None)})()
+    controller._record_log = lambda *_args: None
+    controller.changed = _Signal()
+
+    Controller.setSetting(controller, "live_source", "microphone")
+
+    assert controller._settings["live_source"] == "microphone"
+    assert controller._device_test == {"phase": "idle", "message": "", "level": 0.0}
+
+    controller._device_test = {"phase": "ready", "message": "Источник отвечает.", "level": 0.42}
+    Controller.setSetting(controller, "caption_size", "lg")
+    assert controller._device_test["phase"] == "ready"
+
+
 def test_unrecognized_sound_is_named_and_silence_clears_captions() -> None:
     controller = type("ControllerState", (), {})()
     controller._jobs = {"live": {"mode": "live"}}
