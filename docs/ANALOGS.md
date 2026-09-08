@@ -1,6 +1,7 @@
 # Аналоги и принципы адаптации
 
-Дата обзора: 2026-09-07. Источники внешние; решения DotAudio остаются своими.
+Дата обзора: 2026-09-07; дополнение PasteTalk 2026-09-08.
+Источники внешние; решения DotAudio остаются своими.
 Код и контракты чужих приложений не копировать. Брать проверяемые идеи:
 поток данных, состояния, ошибки, окна, модели.
 
@@ -23,7 +24,7 @@
 
 | Слой DotAudio | Ближайшие примеры | Что у них обычно нет |
 |---|---|---|
-| Диктовка + вставка | Wispr Flow, Superwhisper, Handy | Live-зал, караоке, эфир |
+| Диктовка + вставка | Wispr Flow, Superwhisper, Handy, PasteTalk | Live-зал, караоке, эфир |
 | Live-субтитры | LiveTranslate, Windows Live Captions, jt-live-whisper | Безопасная диктовка, редактор |
 | Медиа + караоке | Buzz, Vibe, faster-whisper-GUI, MacWhisper | Остров, WASAPI live |
 | Эфир + ключевые слова | скрипты radio/scanner, jt-live-whisper | Desktop-продукт с историей |
@@ -51,6 +52,7 @@
 | [whispaste/whispaste](https://github.com/whispaste/whispaste) | OSS, MIT | Flutter | Overlay с waveform, snippets, Store |
 | [malashkadev/aura](https://github.com/malashkadev/aura) | OSS, AGPL, Windows | whisper.cpp, Parakeet | Focus Guard, словарь, история |
 | [gurjar1/OmniDictate](https://github.com/gurjar1/OmniDictate) | OSS ~153 | Python, faster-whisper | Ближайший стек к DotAudio для диктовки |
+| [DanT2000/PasteTalk](https://github.com/DanT2000/PasteTalk) | OSS ~12, MIT, RU-first | Electron + Python `faster-whisper` (отдельный процесс), установщик | Процесс ASR, cuBLAS по требованию, UIPI, фильтр галлюцинаций, watchdog; не Live/зал |
 | [primaprashant/awesome-voice-typing](https://github.com/primaprashant/awesome-voice-typing) | каталог | - | Карта OSS-диктовок |
 
 ### Live-субтитры и overlay
@@ -103,8 +105,9 @@
 | [speaches-ai/speaches](https://github.com/speaches-ai/speaches) | OpenAI-compatible STT-сервер на faster-whisper, SSE, unload модели |
 | [ahmetoner/whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice) | FastAPI STT: openai-whisper / faster-whisper / whisperX, word timestamps, Docker CPU/GPU |
 | [Purfview/whisper-standalone-win](https://github.com/Purfview/whisper-standalone-win) | Готовые CUDA/cuDNN DLL для Windows рядом с бинарём |
+| [DanT2000/PasteTalk](https://github.com/DanT2000/PasteTalk) `cuda_libs` | Докачка cuBLAS/cuDNN из win_amd64-колёс PyPI по требованию, не в установщике |
 | [salute-developers/GigaAM](https://github.com/salute-developers/GigaAM) | MIT, SOTA на чистом русском, CPU, уже в Handy |
-| [Qt for Python](https://doc.qt.io/qtforpython-6.8/index.html) | Текущий UI-стек |
+| [Qt for Python](https://doc.qt.io/qtforpython-6.8/index.html) | Текущий UI-стек. Electron-оболочку PasteTalk не копировать |
 
 ## Языки проектов
 
@@ -141,8 +144,10 @@
 | [Nite01007/RadioTranscriber](https://github.com/Nite01007/RadioTranscriber) | CLI | нет | faster-whisper |
 
 Вывод: live-overlay и файловые GUI вокруг faster-whisper почти все на Python.
-Массовые диктовки (Handy, Aura, Whispering) ушли в Rust/Tauri. DotAudio
-остаётся в Python-кластере вместе с Buzz, LiveTranslate и faster-whisper-GUI.
+Массовые диктовки (Handy, Aura, Whispering) ушли в Rust/Tauri; PasteTalk -
+Electron + Python-worker. DotAudio остаётся в Python/Qt-кластере вместе с
+Buzz, LiveTranslate и faster-whisper-GUI; у PasteTalk берём изоляцию
+движка, не оболочку.
 
 ### Полная таблица языков
 
@@ -153,6 +158,7 @@
 | [Aura](https://github.com/malashkadev/aura) | Rust | TypeScript (Tauri 2) | whisper.cpp, sherpa-onnx | нет |
 | [Epicenter Whispering](https://github.com/EpicenterHQ/epicenter) | TypeScript | Svelte + Tauri | whisper.cpp / Parakeet | нет |
 | [OpenWhispr](https://github.com/OpenWhispr/openwhispr) | JavaScript | Electron | Whisper.cpp, Parakeet | нет |
+| [PasteTalk](https://github.com/DanT2000/PasteTalk) | JavaScript | Electron + капсула | Python faster-whisper (отдельный процесс → exe) | частично, engine |
 | [VoiceInk](https://github.com/Beingpax/VoiceInk) | Swift | native macOS | WhisperKit | нет |
 | [WhisPaste](https://github.com/whispaste/whispaste) | Dart | Flutter | Whisper / Parakeet | нет |
 | [Buzz](https://github.com/chidiwilliams/buzz) | Python | Qt | Whisper, whisper.cpp, faster-whisper | да |
@@ -195,19 +201,19 @@ Live-субтитры с WASAPI и файловые GUI с faster-whisper ост
 
 ### Счёт
 
-В полной таблице 38 аналогов (без DotAudio и без каталога awesome-voice-typing).
+В полной таблице 39 аналогов (без DotAudio и без каталога awesome-voice-typing).
 
 | Категория | Число | Доля |
 |---|---|---|
-| Python целиком | **19** | 50% |
-| Python частично (worker / исходник exe) | **3** | 8% |
-| Не Python | **16** | 42% |
+| Python целиком | **19** | 49% |
+| Python частично (worker / исходник exe) | **4** | 10% |
+| Не Python | **16** | 41% |
 
 Из 19 Python-проектов: 8 desktop-приложений, 2 HTTP-сервера, 6 библиотек, 3 скрипта/CLI.
 
-Desktop-приложения в каталоге: 8 на Python из 22 (Buzz, faster-whisper-GUI, LiveTranslate, jt-live-whisper, OmniDictate, realtime-captions, Hearsay, SystemCaptioner). Остальные диктовки - Rust/Tauri, Electron, Swift, Flutter или закрытый native.
+Desktop-приложения в каталоге: 8 на Python из 23 (Buzz, faster-whisper-GUI, LiveTranslate, jt-live-whisper, OmniDictate, realtime-captions, Hearsay, SystemCaptioner). Остальные диктовки - Rust/Tauri, Electron (в т.ч. PasteTalk), Swift, Flutter или закрытый native.
 
-Частично Python: Whishper (Go UI + Python worker), watch-duty, Purfview (Python → exe).
+Частично Python: Whishper (Go UI + Python worker), PasteTalk (Electron + Python engine), watch-duty, Purfview (Python → exe).
 
 ---
 
@@ -267,9 +273,25 @@ sensitive-полей **не брать**, пока нет надёжного Win
 Handy, OpenWhispr, Superwhisper, README DotAudio.
 `engine.py` `initial_prompt`. **есть**. Не слать словарь на remote без явной настройки.
 
-**1.10 LLM-правка сказанного - отдельный выключатель, выключен по умолчанию.**
-Wispr Smart Formatting, Superwhisper AI modes, Handy post-process.
-RESEARCH.md. **не брать** в дефолт: меняет текст, добавляет задержку, нужен ключ.
+**1.10 LLM-правка сказанного - не в продукте DotAudio.**
+Wispr Smart Formatting, Superwhisper AI modes, Handy post-process,
+PasteTalk improve (Ollama / LM Studio / облако).
+Решение 2026-09-08: **не брать** целиком (ни дефолт, ни опциональный режим).
+Меняет текст, тянет ключи/агентов, размывает локальный Whisper-фокус статьи.
+
+**1.11 Пустая диктовка отменяется молча.**
+PasteTalk: если `ever_spoke` ложь, в буфер ничего не кладётся.
+**взять.** Сейчас тишина может дать пустой/мусорный сегмент.
+
+**1.12 Перед Ctrl+V проверять UIPI (окно «от администратора»).**
+PasteTalk `paste.js`: SendInput в elevated-окно молча проглатывается;
+человек видит «продиктовал, а не вставилось». Нужно заранее сказать:
+текст в буфере, вставьте сами.
+`desktop.py`. **взять.**
+
+**1.13 Конфликт горячей клавиши при переназначении.**
+PasteTalk: пробная регистрация до сохранения; занятое не даёт сохранить.
+**есть** частично (ошибки регистрации). **взять** явный «занято» в UI настроек.
 
 ### 2. Live-пайплайн
 
@@ -421,6 +443,26 @@ LiveTranslate wizard (HF / ModelScope), Superwhisper sidebar, Handy manual drop.
 Сейчас загрузка при первом распознавании.
 **взять.** Не скачивать все модели сразу.
 
+**5.6 Фильтр галлюцинаций Whisper (концовки роликов / подписи субтитров).**
+PasteTalk `cleanup.py`: «Субтитры создавал…», «Продолжение следует…»,
+подписи площадок + связка `no_speech_prob` / `avg_logprob`.
+В Live уже есть порог log_prob; для диктовки и файлов - отдельный
+чёрный список типовых фраз с журналом отброшенного.
+**взять.** Не копировать список дословно без проверки на русских эталонах.
+
+**5.7 ASR в отдельном процессе от GUI.**
+PasteTalk: Electron main + `pastetalk-engine` по HTTP localhost с токеном;
+падение CUDA / зависание CTranslate2 не роняет UI; deep-sleep отдаёт
+VRAM и commit. DotAudio держит inference в worker-потоках того же
+процесса - force-stop через `os._exit` уже нужен.
+**взять:** оставить PySide6/QML, вынести `engine` в subprocess (локальный
+сокет/HTTP), сохранить текущий контракт сегментов. Полный переход на
+Electron **не брать**.
+
+**5.8 Watchdog и честный отказ движка.**
+PasteTalk: health каждые 30 с, до 10 рестартов / 30 мин, диалог человеку.
+**взять** после изоляции процесса. Без отдельного процесса watchdog слабее.
+
 ### 6. Медиа, редактор, караоке
 
 **6.1 Word timestamps для медиа, не для live-preview.**
@@ -479,39 +521,56 @@ HANDOFF. **есть.** 503 для занятого сервера - норма, 
 **9.1 SendInput вместо устаревшего `keybd_event`.**
 HANDOFF, Aura/whisper-local. `desktop.py`. **есть.**
 
-**9.2 CUDA/cuDNN класть рядом с приложением.**
+**9.2 CUDA/cuDNN рядом с приложением или докачка по требованию.**
 [Purfview libs](https://github.com/Purfview/whisper-standalone-win/releases/tag/libs),
-faster-whisper README.
-**взять** на этапе установщика. Не требовать системный CUDA у читателя статьи
-без инструкции.
+PasteTalk `cuda_libs.py` (колёса `nvidia-cublas-cu12` с PyPI, ~0.5 ГБ,
+не в установщике для всех). На этой машине CTranslate2 без
+`cublas64_12.dll` молча уходит на CPU - HANDOFF.
+**взять** раньше установщика: проверка DLL → докачка с прогрессом →
+явный статус GPU/CPU. Не требовать системный CUDA Toolkit у читателя.
 
 **9.3 FFmpeg для MP4 - отдельная зависимость, не «внутри Python всегда».**
 README. **есть** как требование PATH. **взять** app-local ffmpeg в установщике.
 
 **9.4 Установщик и winget - после ручного чеклиста на устройстве.**
-Handy уже в winget. HANDOFF: сначала устройство, потом упаковка.
+Handy / PasteTalk Setup.exe. HANDOFF: сначала устройство, потом упаковка.
+Авто-update PasteTalk **взять** идею позже; не сейчас.
+
+**9.5 Масштаб UI 100 / 125 / 150 % одним множителем.**
+PasteTalk: всё окно и капсула, превью размера до применения.
+**взять** после стабилизации токенов Theme.js; DPI Windows ≠ эта настройка.
 
 ---
 
 ## Очередь: что брать сначала
 
-Не начинать с нового движка. Сначала довести то, что аналоги считают гигиеной UX.
+Решение 2026-09-08 (после разбора PasteTalk): оболочка остаётся PySide6/QML;
+ASR уходит в отдельный процесс. LLM-чистка, Android и Telegram - вне scope.
+Порядок ниже - гигиена диктовки и GPU, не новый UI-стек.
 
-1. **Диктовка как у Wispr/Handy, без облака.** **есть.**
-2. **Зал как у Live Captions / LiveTranslate.** **есть** (положение, экран,
-   auto-hide, закрепление/перетаскивание). Замеры DPI на устройстве остаются.
-3. **Live устойчивее Whisper-нарезки.** **есть** hysteresis + grow-only prefix.
-   Отдельный Silero на входе и RTF-замеры - после ручного чеклиста.
-4. **Менеджер моделей.** **есть** кеш на диске, подготовка, отмена. GigaAM
-   только после замера на русском.
-5. **Сервер как Speaches по форме, не по объёму.** **есть**
-   `POST /v1/audio/transcriptions` рядом с `/v1/transcribe`. localhost.
-6. **Эфир.** Кулдаун keywords **есть**. WhisperX alignment - позже.
+1. **cuBLAS по требованию + честный статус GPU/CPU.** PasteTalk `cuda_libs`,
+   HANDOFF silent fallback. Без этого «GPU» врёт.
+2. **UIPI перед вставкой, тихая отмена пустой диктовки, фильтр галлюцинаций.**
+   PasteTalk paste/cleanup/session. Малый объём, высокий UX.
+3. **ASR subprocess** с тем же контрактом сегментов + health. PasteTalk
+   engine isolation. После этого - watchdog и deep-sleep на CUDA.
+4. **Конфликт hotkey в UI, масштаб окна.** После пунктов 1–3.
+5. **Установщик / app-local FFmpeg.** После ручного чеклиста на устройстве.
+6. **Live / зал / менеджер моделей / эфир.** Уже в основном **есть**; дальше -
+   замеры на железе, не копирование чужих оболочек.
+7. **GigaAM / WhisperX** - только после замера на русском и медиа.
+
+Закрытые ранее пункты очереди (hold/toggle, paste-last, SendInput, зал,
+Live catch-up, OpenAI-compatible путь сервера) остаются **есть** - см. HANDOFF.
 
 ## Что не брать, даже если «так делают все»
 
 - Облако как единственный путь (Wispr).
-- Авторедактура LLM по умолчанию.
+- Авторедактура LLM (PasteTalk improve, Wispr Smart Formatting) - ни
+  дефолт, ни опциональный режим в DotAudio (решение 2026-09-08).
+- Телефон / Android-клиент и Telegram-бот PasteTalk - другой продукт.
+- Переписывание UI на Electron «как PasteTalk» ради диктовки: Live, зал и
+  QML-сцена дороже выгоды; достаточно вынести ASR в процесс.
 - Восстановление старого буфера после вставки.
 - Авто-Enter.
 - Цветные «AI» темы и фейковый эквалайзер.
@@ -532,6 +591,10 @@ Handy уже в winget. HANDOFF: сначала устройство, потом
 как ближайший FastAPI-собрат optional HTTP. Обзор помечен Partial:
 Aqua Voice, Spokenly, TypeWhisper (C#) в том проходе не разбирались
 до того же уровня.
+
+2026-09-08: [DanT2000/PasteTalk](https://github.com/DanT2000/PasteTalk)
+добавлен как ближайший RU-first OSS по диктовке + упаковке (Electron +
+отдельный faster-whisper). Полного аналога DotAudio по-прежнему нет.
 
 ## Исследование .звук
 
