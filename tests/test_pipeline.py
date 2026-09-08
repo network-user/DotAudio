@@ -543,11 +543,17 @@ def test_preview_interval_follows_a_slow_machine() -> None:
     )
     assert session._preview_interval() == session._preview_interval_samples
 
-    session._note_decode(2.0)
+    session._note_decode(0.6)
 
-    # Where a window takes two seconds to decode, asking twice a second only
-    # queues snapshots that are stale before inference starts.
-    assert session._preview_interval() == int(2.0 * 1.5 * SAMPLE_RATE)
+    # Where a window takes 0.6 s to decode, asking twice a second only queues
+    # snapshots that are stale before inference starts.
+    assert session._preview_interval() == int(0.6 * 1.5 * SAMPLE_RATE)
+
+    session._note_decode(6.0)
+
+    # Но пауза между черновиками не может стать длиннее половины фразы: иначе
+    # одна медленная расшифровка выключила бы черновики до конца реплики.
+    assert session._preview_interval() == session.buffer.limit // 2
 
 
 def test_dictation_keeps_its_own_preview_cadence() -> None:
@@ -651,11 +657,15 @@ def test_rolling_preview_keeps_a_stable_overlap_after_its_window_moves() -> None
     session._transcribe_preview(0.0, _speech(1.8), 0.0, 1)
     session._transcribe_preview(0.8, _speech(1.8), 0.0, 1)
 
-    assert [part["stable_text"] for part in partials] == ["", "Два, три четыре."]
+    # Окно сдвинулось, и «раз» из него вышло. Слово не исчезает с экрана:
+    # оно уже сказано и больше не уточняется, поэтому идёт впереди
+    # подтверждённого перекрытия.
+    assert [part["stable_text"] for part in partials] == ["", "раз Два, три четыре."]
+    assert partials[-1]["text"] == "раз Два, три четыре. пять"
 
 
-def test_rolling_preview_does_not_confirm_one_word_or_nonoverlapping_audio() -> None:
-    engine = _ScriptedEngine("раз два три", "три четыре", "три четыре пять")
+def test_rolling_preview_does_not_confirm_a_single_matching_word() -> None:
+    engine = _ScriptedEngine("раз два три", "три четыре")
     partials: list[dict] = []
     session = LiveSession(
         engine, RecognitionConfig(), lambda _segment: None, lambda _status: None,
@@ -665,9 +675,55 @@ def test_rolling_preview_does_not_confirm_one_word_or_nonoverlapping_audio() -> 
 
     session._transcribe_preview(0.0, _speech(1.0), 0.0, 1)
     session._transcribe_preview(0.5, _speech(1.0), 0.0, 1)
+
+    # Одно совпавшее слово - не согласие двух окон: где кончается сказанное,
+    # по нему не определить. Такое окно не показывается вовсе, иначе на экран
+    # вместо реплики попал бы её обрывок.
+    assert [part["text"] for part in partials] == ["раз два три"]
+    assert partials[0]["stable_text"] == ""
+
+
+def test_preview_window_that_skipped_ahead_keeps_the_speech_it_passed() -> None:
+    """На медленной машине окно может перескочить через сказанное.
+
+    Между окнами [0,1] и [2,3] лежит речь той же фразы. Она уже прозвучала и
+    не уточняется, так что предыдущее окно переходит в подтверждённую часть,
+    а не пропадает из субтитра.
+    """
+
+    engine = _ScriptedEngine("раз два", "пять шесть")
+    partials: list[dict] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: None, partials.append, catch_up=True,
+    )
+    session._preview_generation = 1
+
+    session._transcribe_preview(0.0, _speech(1.0), 0.0, 1)
     session._transcribe_preview(2.0, _speech(1.0), 0.0, 1)
 
-    assert [part["stable_text"] for part in partials] == ["", "", ""]
+    assert partials[-1]["stable_text"] == "раз два"
+    assert partials[-1]["text"] == "раз два пять шесть"
+
+
+def test_new_phrase_starts_the_caption_from_nothing() -> None:
+    engine = _ScriptedEngine("раз два три четыре", "Два, три четыре. пять", "новая фраза")
+    partials: list[dict] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: None, partials.append, catch_up=True,
+    )
+    session._preview_generation = 1
+
+    session._transcribe_preview(0.0, _speech(1.8), 0.0, 1)
+    session._transcribe_preview(0.8, _speech(1.8), 0.0, 1)
+    # Фраза закончилась: перенесённое начало относится к ней и не должно
+    # приклеиться к следующей.
+    session._transcribe_final(2.6, _speech(1.0))
+    session._transcribe_preview(3.6, _speech(1.0), 0.0, 1)
+
+    assert partials[-1]["text"] == "новая фраза"
+    assert partials[-1]["stable_text"] == ""
 
 
 def test_preview_skips_a_snapshot_replaced_before_inference() -> None:

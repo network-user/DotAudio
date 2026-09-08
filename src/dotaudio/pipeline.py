@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import replace
+from difflib import SequenceMatcher
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from time import monotonic
@@ -23,7 +24,13 @@ LIVE_SPEECH_THRESHOLD = 0.0015
 # waits for its final: on a speaker who never pauses, a phrase settles when it
 # hits this many seconds, so a long monologue keeps producing finals and the
 # preview has covered every line the whole way.
-LIVE_PHRASE_SECONDS = 6.0
+# Фраза держится короче, чем прежние 6 секунд, и это решение про скорость
+# чтения, а не про память. Черновик распознаёт всю активную фразу целиком,
+# поэтому её длина - это и есть стоимость одного черновика: на 6 секундах
+# он доходил до секунды и текст шёл рывками. На 4 секундах черновик
+# укладывается примерно в 600 мс на этой машине, а сказанное чаще уходит
+# готовой фразой в поток речи, где его и читают.
+LIVE_PHRASE_SECONDS = 4.0
 LIVE_SILENCE_SECONDS = 0.42
 # A rolling caption that respects the confidence gate needs at least this much
 # real speech before it has words worth showing.  Below it Whisper mostly
@@ -31,7 +38,13 @@ LIVE_SILENCE_SECONDS = 0.42
 # gate itself still decides whether what the decoder wrote is speech.
 LIVE_PREVIEW_MIN_SECONDS = 0.9
 LIVE_PREVIEW_INTERVAL_SECONDS = 0.45
-LIVE_PREVIEW_WINDOW_SECONDS = 6.0
+# Окно черновика равно длине фразы: пока фраза целиком попадает в окно,
+# показанный текст всегда полный. Окно короче фразы пробовали - оно держит
+# задержку ровной, но на окне, начавшемся посреди фразы, декодер иногда
+# переставляет слова, границу сказанного тогда не найти, и на экран попадает
+# обрывок вместо реплики. Читать обрывки хуже, чем ждать лишние сто
+# миллисекунд, поэтому длину черновика ограничивает сама фраза.
+LIVE_PREVIEW_WINDOW_SECONDS = LIVE_PHRASE_SECONDS
 # Previews may not use the whole machine.  Asking for a new one before the
 # previous decode has had time to finish only grows the backlog, so the
 # interval follows the measured decode time on slower hardware.
@@ -51,6 +64,18 @@ SHORT_FINAL_SECONDS = 1.2
 PHRASE_CONTEXT_SECONDS = 2.0
 
 _PREVIEW_PUNCTUATION = str.maketrans("", "", ".,!?;:…«»\"“”()[]{}")
+
+# Сравнение слов двух окон идёт без регистра и знаков: модель уточняет
+# пунктуацию на следующем декоде, и это не повод считать слово другим.
+MIN_SHIFT_OVERLAP_WORDS = 2
+# Насколько глубоко в новом окне может начинаться общая с прежним речь. Окно
+# сдвигается вперёд, поэтому совпадение обязано быть у самого его начала;
+# найденное дальше значит, что окна говорят о разном.
+MAX_SHIFT_HEAD_DRIFT = 2
+
+
+def _preview_key(word: str) -> str:
+    return word.casefold().translate(_PREVIEW_PUNCTUATION)
 
 DICTATION_PREVIEW_MIN_SECONDS = 0.8
 DICTATION_PREVIEW_INTERVAL_SECONDS = 0.8
@@ -335,6 +360,10 @@ class LiveSession:
         self._decode_seconds = 0.0
         self._last_preview_text = ""
         self._stable_prefix = ""
+        # Речь текущей фразы, которая уже вышла из окна предпросмотра. Окно
+        # короче фразы, поэтому её начало нужно помнить отдельно, иначе
+        # субтитр показывал бы только последние секунды сказанного.
+        self._phrase_head = ""
         self._last_preview_offset = None
         self._last_preview_end = None
         self._last_final_text = ""
@@ -696,8 +725,8 @@ class LiveSession:
         return " ".join(new_words[:count])
 
     @staticmethod
-    def _overlapping_word_prefix(previous, current):
-        """Return the current prefix that agrees with the old window tail.
+    def _overlap_words(previous, current):
+        """How many words the old window tail and the new window head share.
 
         Rolling previews deliberately shift their audio start on long speech.
         Comparing two whole strings then loses agreement at every shift even
@@ -712,8 +741,70 @@ class LiveSession:
                 == new_words[index].casefold().translate(_PREVIEW_PUNCTUATION)
                 for index in range(count)
             ):
-                return " ".join(new_words[:count])
-        return ""
+                return count
+        return 0
+
+    @classmethod
+    def _overlapping_word_prefix(cls, previous, current):
+        count = cls._overlap_words(previous, current)
+        return " ".join(current.split()[:count]) if count else ""
+
+    @classmethod
+    def _shift_cut(cls, previous, current):
+        """Where the new window starts inside the text of the old one.
+
+        The rolling window decodes only the recent seconds of a phrase, so on a
+        long phrase its beginning leaves the window.  Those words are not gone
+        from the phrase - they are settled, and the caption keeps them in front
+        of what the decoder says now.  Finding them means finding where the two
+        windows describe the same speech.
+
+        Comparing the two texts word by word from a fixed offset is not enough:
+        inside the audio they share the decoder both revises words and changes
+        how many there are ("чак-чак" comes back as "чак чак"), and one such
+        split throws every later word out of step.  Sequence matching survives
+        that, so the cut is taken from the first run of words that the new
+        window shares with the old one.
+
+        Returns ``None`` when the new window does not open on shared speech,
+        which means the boundary is unknown: guessing it would either duplicate
+        or drop words.
+        """
+
+        old_words = [_preview_key(word) for word in previous.split()]
+        new_words = [_preview_key(word) for word in current.split()]
+        if not old_words or not new_words:
+            return None
+        blocks = [
+            block
+            for block in SequenceMatcher(None, old_words, new_words, autojunk=False)
+            .get_matching_blocks()
+            if block.size >= MIN_SHIFT_OVERLAP_WORDS
+        ]
+        if not blocks:
+            return None
+        # The run that starts earliest in the new window is the one that tells
+        # where this window begins inside the previous text.
+        block = min(blocks, key=lambda item: (item.b, -item.size))
+        if block.b > MAX_SHIFT_HEAD_DRIFT:
+            return None
+        return max(0, block.a - block.b)
+
+    @classmethod
+    def _settled_by_shift(cls, previous, current):
+        """The part of the old window text that the new window no longer covers."""
+
+        old_words = previous.split()
+        if not old_words:
+            return ""
+        cut = cls._shift_cut(previous, current)
+        if cut is None:
+            return None
+        return " ".join(old_words[:cut])
+
+    @staticmethod
+    def _join(head, tail):
+        return " ".join(part for part in (head.strip(), tail.strip()) if part)
 
     def _transcribe_preview(self, offset, audio, requested_at, generation):
         # A capture callback can replace the snapshot after _next_task() has
@@ -743,8 +834,20 @@ class LiveSession:
         if offset == self._last_preview_offset:
             agreed = self._common_word_prefix(self._last_preview_text, text)
         elif self._last_preview_end is not None and offset < self._last_preview_end:
+            # The window slid forward over the same speech: what left it is
+            # settled and moves in front of the current hypothesis.
+            settled = self._settled_by_shift(self._last_preview_text, text)
+            if settled is None:
+                # Где кончается уже сказанное - неизвестно. Показать одно это
+                # окно значит выбросить начало реплики с экрана; лучше оставить
+                # прежний субтитр до следующего окна, финал всё равно придёт
+                # полным.
+                return
             agreed = self._overlapping_word_prefix(self._last_preview_text, text)
+            self._phrase_head = self._join(self._phrase_head, settled)
         else:
+            # No shared audio at all, so the previous window is complete.
+            self._phrase_head = self._join(self._phrase_head, self._last_preview_text)
             agreed = ""
         self._last_preview_text = text
         self._last_preview_offset = offset
@@ -753,13 +856,12 @@ class LiveSession:
         # it revises them, the old prefix is no longer confirmed: publishing
         # it beside the new hypothesis would splice two different sentences.
         self._stable_prefix = agreed
-        stable_text = self._stable_prefix
         try:
             self.on_partial({
                 "start": offset,
                 "end": final_end,
-                "text": text,
-                "stable_text": stable_text,
+                "text": self._join(self._phrase_head, text),
+                "stable_text": self._join(self._phrase_head, agreed),
                 "latency_ms": round((monotonic() - requested_at) * 1000),
             })
         except Exception:
@@ -769,6 +871,7 @@ class LiveSession:
     def _transcribe_final(self, offset, audio, lead=None):
         self._last_preview_text = ""
         self._stable_prefix = ""
+        self._phrase_head = ""
         self._last_preview_offset = None
         self._last_preview_end = None
         emitted = False
