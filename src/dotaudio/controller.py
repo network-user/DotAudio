@@ -99,8 +99,16 @@ DEFAULTS = {
     # "off" не грузит ничего. Ни один из движков не входит в базовую
     # установку, и интерфейс показывает, как поставить выбранный.
     "diarize_engine": "nemo",
+    # Локальный ассистент. Пустая модель означает «ещё не выбрана»: тогда
+    # страница предлагает ту, что подходит этому устройству.
+    "assistant_model": "",
+    # "auto" отдаёт предпочтение уже запущенному Ollama, если нужная модель
+    # есть у него: она уже в памяти, второй копии в нашем процессе не нужно.
+    "assistant_runtime": "auto",
     # Kept in local settings so terminology and snippets never leave the PC.
     "dictionary": [], "snippets": [],
+    # Баннер про GPU: скрывается по кнопке или после успешной настройки.
+    "gpu_hint_dismissed": False,
 }
 
 # Подписи движков голосов для интерфейса и журнала.
@@ -115,6 +123,9 @@ LIVE_SETTINGS = {
     "caption_position", "caption_x", "caption_y", "caption_screen",
     "caption_autohide", "caption_locked", "reduce_motion",
     "island_opacity", "island_snap",
+    # Выбор модели ассистента к записи не относится: его можно менять и во
+    # время записи, загрузка модели всё равно отдельное действие.
+    "assistant_model", "assistant_runtime",
 }
 
 # vosk-модели, доступные для живого распознавания, по ключу выбора размера.
@@ -279,25 +290,29 @@ def _cuda_device_count() -> int:
     """
 
     try:
-        import ctranslate2
+        from dotaudio.cuda_runtime import register_cuda_dll_directories, verify_cuda_devices
 
-        return max(0, int(ctranslate2.get_cuda_device_count()))
+        register_cuda_dll_directories()
+        return verify_cuda_devices()
     except Exception:
-        return 0
+        try:
+            import ctranslate2
+
+            return max(0, int(ctranslate2.get_cuda_device_count()))
+        except Exception:
+            return 0
 
 
-def hardware_summary() -> dict:
-    """Фактическая сводка устройства для страницы моделей."""
+def hardware_summary(*, refresh: bool = False) -> dict:
+    """Фактическая сводка устройства для страницы моделей и настроек."""
 
-    threads = os.cpu_count() or 0
-    ram = _physical_memory_gb()
-    cuda = _cuda_device_count()
-    return {
-        "threads": threads,
-        "ram_gb": ram,
-        "cuda_devices": cuda,
-        "compute_label": "Видеокарта (CUDA)" if cuda > 0 else "Процессор (CPU)",
-    }
+    from dotaudio.cuda_runtime import compute_advice
+    from dotaudio.hardware import probe
+
+    profile = probe(refresh=refresh)
+    summary = profile.as_dict()
+    summary.update(compute_advice(profile))
+    return summary
 
 
 def model_fit(model: str, hardware: dict) -> dict:
@@ -332,10 +347,18 @@ def recommended_model(hardware: dict) -> str:
 
     «small» на этом языке держит ритм Live начиная примерно с 4 потоков
     CPU (замер итерации скорости Live); слабее - «base». GPU снимает
-    вопрос для всех карточек.
+    вопрос для типичных карточек; при ≥6 ГБ VRAM предлагаем medium.
     """
 
     if int(hardware.get("cuda_devices") or 0) > 0:
+        vram = hardware.get("gpuVramGb")
+        if vram is None:
+            vram = hardware.get("vram_gb")
+        try:
+            if vram is not None and float(vram) >= 6.0:
+                return "medium"
+        except (TypeError, ValueError):
+            pass
         return "small"
     threads = int(hardware.get("threads") or 0)
     if threads >= 4:
@@ -381,6 +404,9 @@ class Controller(QObject):
     transcribeChanged = Signal()
     transcribeStatus = Signal(str)
     diarizeProbed = Signal("QVariantMap")
+    gpuSetupProgress = Signal("QVariantMap")
+    gpuSetupFinished = Signal("QVariantMap")
+    hardwareArrived = Signal(object)
 
     def __init__(self, data_dir: Path, desktop):
         super().__init__()
@@ -471,8 +497,30 @@ class Controller(QObject):
         self._model_library = [Engine.disk_status(name) for name in ("tiny", "base", "small", "medium", "large-v3", "turbo")]
         # Сводка железа приехает фоном: импорт ctranslate2 для проверки CUDA
         # стоит сотни миллисекунд и не должен задерживать первый кадр окна.
-        self._hardware = {"threads": os.cpu_count() or 0, "ram_gb": None, "cuda_devices": 0, "compute_label": ""}
+        self._hardware = {
+            "threads": os.cpu_count() or 0,
+            "ram_gb": None,
+            "cuda_devices": 0,
+            "compute_label": "",
+            "computeAdvice": "",
+            "computeHint": "",
+            "computeAction": "",
+            "nvidiaPresent": False,
+            "cudaReady": False,
+            "manualSteps": [],
+            "installCommand": "",
+            "helpUrl": "",
+        }
         self._recommended_model = recommended_model(self._hardware)
+        self._gpu_setup = {
+            "phase": "idle",
+            "percent": 0.0,
+            "message": "",
+            "busy": False,
+            "error": "",
+            "restartRequired": False,
+        }
+        self._gpu_setup_cancel = threading.Event()
         threading.Thread(target=self._probe_hardware, daemon=True, name="hardware-probe").start()
         self._edit_undo: list[tuple[int, str, str]] = []
         self._edit_redo: list[tuple[int, str, str]] = []
@@ -501,6 +549,9 @@ class Controller(QObject):
         self.renderFinished.connect(self._on_render_finished)
         self.realignReady.connect(self._on_realign_ready)
         self.diarizeProbed.connect(self._on_diarize_probed)
+        self.gpuSetupProgress.connect(self._on_gpu_setup_progress)
+        self.gpuSetupFinished.connect(self._on_gpu_setup_finished)
+        self.hardwareArrived.connect(self._on_hardware_arrived)
         desktop.dictate.connect(self.hotkeyRecord)
         desktop.island.connect(self.islandRequested)
         desktop.paste_last.connect(self.pasteLastTranscript)
@@ -613,10 +664,329 @@ class Controller(QObject):
     def _probe_hardware(self) -> None:
         """Фоновая проба железа: обновляет сводку и рекомендацию."""
 
-        summary = hardware_summary()
-        self._hardware = summary
-        self._recommended_model = recommended_model(summary)
+        try:
+            summary = hardware_summary(refresh=True)
+        except Exception:
+            summary = {
+                "threads": os.cpu_count() or 0,
+                "ram_gb": None,
+                "cuda_devices": 0,
+                "compute_label": "Процессор (CPU)",
+                "computeAdvice": "cpu_only",
+                "computeHint": "Не удалось опросить устройство.",
+                "computeAction": "",
+                "nvidiaPresent": False,
+                "cudaReady": False,
+                "manualSteps": [],
+                "installCommand": "",
+                "helpUrl": "",
+            }
+        try:
+            self.hardwareArrived.emit(summary)
+        except RuntimeError:
+            return
+
+    def _on_hardware_arrived(self, summary) -> None:
+        self._hardware = dict(summary or {})
+        self._recommended_model = recommended_model(self._hardware)
         self.changed.emit()
+
+    @Property("QVariantMap", notify=changed)
+    def gpuSetup(self):
+        return self._gpu_setup
+
+    @Property(bool, notify=changed)
+    def showGpuHint(self):
+        """Баннер первого запуска / рекомендации GPU."""
+
+        if bool(self._settings.get("gpu_hint_dismissed")):
+            return False
+        if self._gpu_setup.get("busy"):
+            return True
+        advice = str(self._hardware.get("computeAdvice") or "")
+        return advice in {"ready", "needs_runtime"}
+
+    @Property(str, notify=changed)
+    def gpuHintTitle(self):
+        advice = str(self._hardware.get("computeAdvice") or "")
+        name = str(self._hardware.get("gpuLabel") or self._hardware.get("gpuName") or "NVIDIA")
+        if advice == "needs_runtime":
+            return f"Найдена {name}"
+        if advice == "ready":
+            return f"Видеокарта готова · {name}"
+        return "Ускорение на видеокарте"
+
+    @Property(str, notify=changed)
+    def gpuHintBody(self):
+        if self._gpu_setup.get("busy"):
+            return str(self._gpu_setup.get("message") or "Настраиваем GPU…")
+        hint = str(self._hardware.get("computeHint") or "")
+        if hint:
+            return hint
+        return "Whisper может работать быстрее на CUDA."
+
+    @Slot()
+    def dismissGpuHint(self):
+        self._settings["gpu_hint_dismissed"] = True
+        self.store.save_settings(self._settings)
+        self.changed.emit()
+
+    @Slot(str)
+    def selectComputeDevice(self, device):
+        """Выбор Авто / CPU / GPU. GPU запускает полную настройку."""
+
+        value = str(device or "")
+        if value not in ("auto", "cpu", "cuda"):
+            return
+        if value == "cuda":
+            self.setupGpu()
+            return
+        self.setSetting("device", value)
+
+    @Slot()
+    def setupGpu(self):
+        """Скачать CUDA runtime при необходимости, включить GPU и прогреть модель."""
+
+        if self._jobs or self._model_preparing or self._gpu_setup.get("busy"):
+            self._notice = "Дождитесь окончания текущей операции, затем настройте GPU."
+            self.changed.emit()
+            return
+        self._gpu_setup_cancel = threading.Event()
+        self._gpu_setup = {
+            "phase": "check",
+            "percent": 0.0,
+            "message": "Проверяем видеокарту…",
+            "busy": True,
+            "error": "",
+            "restartRequired": False,
+        }
+        self._record_log("info", "Настройка GPU для Whisper начата.")
+        self.changed.emit()
+
+        def run():
+            from dotaudio.cuda_runtime import setup_whisper_cuda
+            from dotaudio.hardware import reset_cache
+
+            try:
+                def progress(info):
+                    # Runtime install - первая половина; подготовка модели - вторая.
+                    phase = str(info.get("phase") or "")
+                    raw = float(info.get("percent") or 0.0)
+                    if phase in {"check", "runtime", "register"}:
+                        scaled = min(55.0, raw * 0.55)
+                    else:
+                        scaled = 55.0 + min(45.0, raw * 0.45)
+                    payload = {
+                        "phase": phase or "runtime",
+                        "percent": scaled,
+                        "message": str(info.get("message") or ""),
+                        "busy": True,
+                        "error": "",
+                        "restartRequired": False,
+                    }
+                    self.gpuSetupProgress.emit(payload)
+
+                result = setup_whisper_cuda(progress, self._gpu_setup_cancel)
+                reset_cache()
+                summary = hardware_summary(refresh=True)
+                self.hardwareArrived.emit(summary)
+                if not result.get("ok"):
+                    self.gpuSetupFinished.emit(
+                        {
+                            "ok": False,
+                            "message": str(result.get("message") or "GPU недоступна"),
+                            "restartRequired": bool(result.get("restart_required")),
+                            "prepareModel": False,
+                        }
+                    )
+                    return
+                self.gpuSetupFinished.emit(
+                    {
+                        "ok": True,
+                        "message": str(result.get("message") or "CUDA готова"),
+                        "restartRequired": False,
+                        "prepareModel": True,
+                    }
+                )
+            except Exception as exc:
+                self.gpuSetupFinished.emit(
+                    {
+                        "ok": False,
+                        "message": str(exc),
+                        "restartRequired": False,
+                        "prepareModel": False,
+                    }
+                )
+
+        threading.Thread(target=run, name="dotaudio-gpu-setup", daemon=True).start()
+
+    def _on_gpu_setup_progress(self, info) -> None:
+        payload = dict(info or {})
+        if "busy" not in payload:
+            payload["busy"] = True
+        self._gpu_setup = payload
+        self.changed.emit()
+
+    def _on_gpu_setup_finished(self, result) -> None:
+        payload = dict(result or {})
+        ok = bool(payload.get("ok"))
+        message = str(payload.get("message") or "")
+        restart = bool(payload.get("restartRequired"))
+        self._gpu_setup = {
+            "phase": "ready" if ok else "error",
+            "percent": 100.0 if ok else float(self._gpu_setup.get("percent") or 0.0),
+            "message": message,
+            "busy": False,
+            "error": "" if ok else message,
+            "restartRequired": restart,
+        }
+        if ok:
+            self._settings["device"] = "cuda"
+            self._settings["gpu_hint_dismissed"] = True
+            # На GPU с запасом VRAM предлагаем более точную модель, но не
+            # переключаем large без спроса.
+            recommended = recommended_model(self._hardware)
+            current = str(self._settings.get("model") or "small")
+            rank = ("tiny", "base", "small", "medium", "turbo", "large-v3")
+            if current in rank and recommended in rank and rank.index(current) < rank.index(recommended):
+                if recommended == "medium" and current in ("tiny", "base", "small"):
+                    self._settings["model"] = recommended
+                    self._settings["profile"] = "balanced"
+                    self._model_state = {
+                        "phase": "idle",
+                        "model": recommended,
+                        "message": f"Для GPU выбрана модель {recommended}",
+                    }
+                    self._record_log("info", f"Для GPU выбрана модель {recommended}.")
+            self.store.save_settings(self._settings)
+            self._record_log("success", message or "GPU готова.")
+            self._notice = ""
+            self.changed.emit()
+            if payload.get("prepareModel"):
+                # Прогрев модели на CUDA с тем же прогресс-баром загрузки файлов.
+                self._continue_gpu_model_prepare()
+            return
+        self._notice = message
+        self._record_log("error", message)
+        self.changed.emit()
+
+    def _continue_gpu_model_prepare(self) -> None:
+        """После CUDA — скачать/прогреть выбранную Whisper-модель на видеокарте."""
+
+        if self._jobs or self._model_preparing:
+            return
+        self._idle_model_release.stop()
+        config = self._config(live_stream=True)
+        # Явно CUDA: настройка только что подтвердила runtime.
+        config = replace(config, device="cuda")
+        model = config.model
+        self._prepare_cancel = threading.Event()
+        self._model_prepare_done.clear()
+        self._prepared_model = ""
+        self._model_prepare_error = ""
+        self._model_preparing = True
+        self._gpu_setup = {
+            "phase": "model",
+            "percent": 55.0,
+            "message": f"Готовим модель {model} на видеокарте…",
+            "busy": True,
+            "error": "",
+            "restartRequired": False,
+        }
+        self._model_state = {
+            "phase": "downloading",
+            "model": model,
+            "message": "Проверяем кэш и готовим модель на GPU…",
+        }
+        self._record_log("info", f"Подготовка модели {model} на CUDA.")
+        self.changed.emit()
+
+        def prepare():
+            try:
+                self.modelProgressArrived.emit(model, "Загружаем или проверяем файлы модели…")
+
+                def progress(info):
+                    raw = float((info or {}).get("percent") or 0.0)
+                    self.modelDownloadProgress.emit(model, info)
+                    self.gpuSetupProgress.emit(
+                        {
+                            "phase": "model",
+                            "percent": 55.0 + min(45.0, raw * 0.45),
+                            "message": str((info or {}).get("message") or f"Модель {model}…"),
+                            "busy": True,
+                            "error": "",
+                            "restartRequired": False,
+                        }
+                    )
+
+                device = self.engine.prepare(
+                    config,
+                    lambda status: self.statusArrived.emit(status),
+                    progress,
+                )
+                if self._prepare_cancel.is_set():
+                    self.modelFinished.emit(model, "", "Подготовка отменена")
+                    self.gpuSetupFinished.emit(
+                        {
+                            "ok": False,
+                            "message": "Подготовка модели отменена",
+                            "restartRequired": False,
+                            "prepareModel": False,
+                        }
+                    )
+                    return
+            except Exception as exc:
+                self.modelFinished.emit(model, "", str(exc))
+                self.gpuSetupFinished.emit(
+                    {
+                        "ok": False,
+                        "message": str(exc),
+                        "restartRequired": False,
+                        "prepareModel": False,
+                    }
+                )
+            else:
+                self.modelFinished.emit(model, device, "")
+                self.gpuSetupFinished.emit(
+                    {
+                        "ok": True,
+                        "message": f"Модель {model} готова на {device}",
+                        "restartRequired": False,
+                        "prepareModel": False,
+                    }
+                )
+
+        threading.Thread(target=prepare, name="dotaudio-gpu-model", daemon=True).start()
+
+    @Slot()
+    def cancelGpuSetup(self):
+        if not self._gpu_setup.get("busy"):
+            return
+        self._gpu_setup_cancel.set()
+        self._prepare_cancel.set()
+        self._gpu_setup = {
+            **self._gpu_setup,
+            "message": "Отменяем настройку GPU…",
+        }
+        self.changed.emit()
+
+    @Slot()
+    def copyCudaInstallCommand(self):
+        command = str(self._hardware.get("installCommand") or "")
+        if not command:
+            from dotaudio.cuda_runtime import install_command
+
+            command = install_command()
+        QApplication.clipboard().setText(command)
+        self._notice = "Команда установки CUDA скопирована."
+        self.changed.emit()
+
+    @Slot()
+    def openCudaHelp(self):
+        url = str(self._hardware.get("helpUrl") or "https://developer.nvidia.com/cuda-downloads")
+        from PySide6.QtGui import QDesktopServices
+
+        QDesktopServices.openUrl(QUrl(url))
 
     @Property(str, notify=changed)
     def mediaUrl(self): return self._media_url
@@ -720,10 +1090,22 @@ class Controller(QObject):
 
     @Slot(str)
     def selectPage(self, page):
-        if page in ("dictation", "live", "media", "monitor", "models", "history", "settings", "transcript"):
+        if page in (
+            "dictation", "live", "media", "monitor", "models",
+            "history", "settings", "transcript", "assistant",
+        ):
             self._page = page
             self._record_log("info", f"Открыт раздел: {page}")
             self.changed.emit()
+
+    def setting(self, name, default=None):
+        """Одно значение настроек для соседних контроллеров.
+
+        Настройки лежат одним словарём: писать их в обход контроллера нельзя,
+        иначе следующее сохранение затрёт чужую правку.
+        """
+
+        return self._settings.get(name, DEFAULTS.get(name, default))
 
     @Slot(str, "QVariant")
     def setSetting(self, name, value):
@@ -745,6 +1127,7 @@ class Controller(QObject):
             "caption_contrast": ("normal", "high"),
             "caption_position": ("top", "bottom", "floating"),
             "live_size": ("small", "standard", "wide", "tall"),
+            "assistant_runtime": ("auto", "llama_cpp", "ollama"),
         }
         if name in choices and value not in choices[name]:
             return
@@ -752,7 +1135,7 @@ class Controller(QObject):
             "caption_overlay", "auto_paste", "dictate_hold", "island_click_through",
             "island_snap", "caption_autohide", "caption_locked", "reduce_motion",
             "live_auto_window", "live_show_times", "live_locked",
-            "live_greedy_finals",
+            "live_greedy_finals", "gpu_hint_dismissed",
         ):
             value = bool(value)
         if name in ("caption_x", "caption_y", "caption_screen"):
@@ -1924,6 +2307,7 @@ class Controller(QObject):
         if error:
             self._notice = error
             self._record_log("error", error)
+        empty_dictation = False
         if job["mode"] == "dictation" and not cancelled and not error:
             session = self.store.get_session(sid)
             raw_text = " ".join(s["text"].strip() for s in session["segments"])
@@ -1937,6 +2321,11 @@ class Controller(QObject):
                 )
                 if self._settings["auto_paste"] and job.get("hotkey"):
                     QTimer.singleShot(250, self._paste)
+            else:
+                # PasteTalk: silent cancel when nothing was said — no clipboard noise.
+                empty_dictation = True
+                self._notice = ""
+                self._record_log("info", "Пустая диктовка: в буфер ничего не записано.")
         if not self._jobs:
             self._state = "idle"
             self._level = 0
@@ -1949,8 +2338,17 @@ class Controller(QObject):
                 self._caption_revision += 1
                 self.captionChanged.emit()
                 self.liveStateChanged.emit()
-            self._status = "Остановлено" if cancelled else "Ошибка обработки" if error else "Готово · история сохранена"
-            if not error:
+            if empty_dictation:
+                self._status = "Ничего не сказано"
+            else:
+                self._status = (
+                    "Остановлено"
+                    if cancelled
+                    else "Ошибка обработки"
+                    if error
+                    else "Готово · история сохранена"
+                )
+            if not error and not empty_dictation:
                 self._record_log("success", self._status)
             self._arm_idle_model_release()
         self.refreshHistory(self._query)
@@ -1962,6 +2360,12 @@ class Controller(QObject):
         inserted = self.desktop.paste()
         if inserted:
             self._notice = "Текст вставлен и сохранён в буфере."
+        elif getattr(self.desktop, "last_paste_block", "") == "elevated":
+            shortcut = str(self._settings.get("paste_last_hotkey") or "Shift+Alt+Z")
+            self._notice = (
+                "Целевое окно запущено от имени администратора — вставка "
+                f"заблокирована системой. Текст в буфере: Ctrl+V или {shortcut}."
+            )
         else:
             shortcut = str(self._settings.get("paste_last_hotkey") or "Shift+Alt+Z")
             self._notice = (

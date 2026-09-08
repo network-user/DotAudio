@@ -71,6 +71,11 @@ class _INPUT(ctypes.Structure):
 
 INPUT_KEYBOARD = 1
 
+# UIPI: SendInput into a higher-integrity window looks successful but is dropped.
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+TOKEN_QUERY = 0x0008
+TOKEN_INTEGRITY_LEVEL = 25
+
 
 def combo_is_held(key_down, hotkey: Hotkey) -> bool:
     """Return True when every modifier and the action key are currently down.
@@ -88,6 +93,102 @@ def combo_is_held(key_down, hotkey: Hotkey) -> bool:
     if hotkey.modifiers & MOD_WIN and not (key_down(VK_LWIN) or key_down(VK_RWIN)):
         return False
     return bool(key_down(hotkey.key))
+
+
+def _token_integrity_level(process_handle) -> int | None:
+    """Mandatory integrity level of a process, or None when the query fails."""
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    token = wintypes.HANDLE()
+    open_token = advapi32.OpenProcessToken
+    open_token.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    open_token.restype = wintypes.BOOL
+    if not open_token(process_handle, TOKEN_QUERY, ctypes.byref(token)):
+        return None
+    try:
+
+        class _SID_AND_ATTRIBUTES(ctypes.Structure):
+            _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
+
+        class _TOKEN_MANDATORY_LABEL(ctypes.Structure):
+            _fields_ = [("Label", _SID_AND_ATTRIBUTES)]
+
+        # Extra room: the SID bytes live inside this buffer; Label.Sid points in.
+        size = ctypes.sizeof(_TOKEN_MANDATORY_LABEL) + 256
+        buffer = ctypes.create_string_buffer(size)
+        needed = wintypes.DWORD()
+        get_info = advapi32.GetTokenInformation
+        get_info.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        get_info.restype = wintypes.BOOL
+        if not get_info(token, TOKEN_INTEGRITY_LEVEL, buffer, size, ctypes.byref(needed)):
+            return None
+        label = ctypes.cast(buffer, ctypes.POINTER(_TOKEN_MANDATORY_LABEL)).contents
+        sid = label.Label.Sid
+        if not sid:
+            return None
+        count_fn = advapi32.GetSidSubAuthorityCount
+        count_fn.argtypes = [ctypes.c_void_p]
+        count_fn.restype = ctypes.POINTER(ctypes.c_ubyte)
+        count_ptr = count_fn(sid)
+        if not count_ptr:
+            return None
+        count = count_ptr.contents.value
+        auth_fn = advapi32.GetSidSubAuthority
+        auth_fn.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+        auth_fn.restype = ctypes.POINTER(wintypes.DWORD)
+        level_ptr = auth_fn(sid, count - 1)
+        if not level_ptr:
+            return None
+        # Keep buffer alive until after the SID reads above complete.
+        _ = buffer.raw
+        return int(level_ptr.contents.value)
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def foreground_is_elevated(user32) -> bool:
+    """True when the foreground window runs above this process (UIPI).
+
+    Any failure returns False: better a no-op paste than blocking a working one.
+    """
+
+    if not user32 or sys.platform != "win32":
+        return False
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        own = _token_integrity_level(kernel32.GetCurrentProcess())
+        if own is None:
+            return False
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return False
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not handle:
+            return False
+        try:
+            target = _token_integrity_level(handle)
+            return target is not None and target > own
+        finally:
+            kernel32.CloseHandle(handle)
+    except (OSError, AttributeError, ValueError, TypeError):
+        return False
 
 
 class Desktop(QObject, QAbstractNativeEventFilter):
@@ -108,6 +209,8 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         # потому что пользователь переопределяет только dictate/island/пасту
         # последнего, а quit обязан пережить это переназначение.
         self._quit_hotkey = Hotkey(MOD_NOREPEAT | MOD_ALT | MOD_CONTROL, 0x58)
+        # Why the last paste() returned False: "" | "no_target" | "focus" | "elevated" | "sendinput".
+        self.last_paste_block = ""
         if sys.platform == "win32":
             self.user32 = ctypes.WinDLL("user32", use_last_error=True)
             self._configure_win32_functions()
@@ -251,18 +354,27 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         return int(pid.value) == os.getpid()
 
     def paste(self):
+        self.last_paste_block = ""
         if not self.user32 or not self.target or not self.user32.IsWindow(self.target):
+            self.last_paste_block = "no_target"
             return False
         foreground = self.user32.GetForegroundWindow()
         if foreground != self.target:
             # The island is our window.  If it stole focus, return it to the
             # remembered target.  If the user switched to another app, do not paste.
             if not self._is_current_process(foreground):
+                self.last_paste_block = "focus"
                 return False
             if not self.user32.SetForegroundWindow(self.target):
+                self.last_paste_block = "focus"
                 return False
             if self.user32.GetForegroundWindow() != self.target:
+                self.last_paste_block = "focus"
                 return False
+        if foreground_is_elevated(self.user32):
+            # UIPI silently drops synthetic input into elevated windows.
+            self.last_paste_block = "elevated"
+            return False
         # Called after the shortcut modifiers are released; no Enter is ever sent.
         inputs = (_INPUT * 4)(
             self._keyboard_input(VK_CONTROL),
@@ -282,6 +394,7 @@ class Desktop(QObject, QAbstractNativeEventFilter):
                 self._keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
             )
             self.user32.SendInput(len(release), release, ctypes.sizeof(_INPUT))
+        self.last_paste_block = "sendinput"
         return False
 
     @staticmethod

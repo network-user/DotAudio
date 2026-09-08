@@ -4,6 +4,7 @@ from dotaudio.desktop import (
     MOD_WIN,
     Hotkey,
     combo_is_held,
+    foreground_is_elevated,
 )
 
 
@@ -20,3 +21,7 @@ def test_combo_is_held_accepts_either_windows_key() -> None:
     assert combo_is_held({0x11, 0x5B, 0x20}.__contains__, hotkey) is True
     assert combo_is_held({0x11, 0x5C, 0x20}.__contains__, hotkey) is True
     assert combo_is_held({0x11, 0x20}.__contains__, hotkey) is False
+
+
+def test_foreground_is_elevated_safe_without_user32() -> None:
+    assert foreground_is_elevated(None) is False

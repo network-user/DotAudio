@@ -17,12 +17,23 @@ dependencies = [
 server = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "python-multipart>=0.0.20,<1"]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1", "httpx>=0.28,<1"]
 build = ["pyinstaller>=6.12,<7"]
-# Идентификация голосов при транскрибации файла. Тяжёлое/нативное, поэтому
-# опционально: без него приложение работает, только говорящие не определяются.
+# Запасной движок голосов: один эмбеддинг на фразу и кластеризация. Тянет
+# torch, поэтому опционален. Движок по умолчанию (NVIDIA NeMo) сюда не
+# входит вовсе: это нативный рантайм NeMo-Speech.cpp, он ставится своим
+# установщиком и не является пакетом Python. Пакет `nemo_toolkit` здесь
+# неприменим - Windows у него в статусе «No support yet».
 diarize = ["torch>=2.3", "speechbrain>=1.0"]
 # Лёгкий Kaldi-движок Live для очень слабого CPU. Выбирается вручную в
 # настройках; по умолчанию Live идёт на faster-whisper.
 vosk = ["vosk>=0.3.45,<1"]
+# CUDA runtime для Whisper на Windows без полного Toolkit. Ставится из UI
+# («Настроить GPU») или вручную: pip install -e ".[cuda]".
+cuda = [
+  "nvidia-cublas-cu12",
+  "nvidia-cuda-runtime-cu12",
+  "nvidia-cudnn-cu12",
+  "nvidia-cuda-nvrtc-cu12",
+]
 
 [project.scripts]
 dotaudio = "dotaudio.app:main"

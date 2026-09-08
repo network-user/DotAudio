@@ -42,7 +42,9 @@ ApplicationWindow {
     readonly property int liveLocked: Boolean(bridge.settings.live_locked)
     property real dragGrabDx: 0
     property real dragGrabDy: 0
-    property var pageKeys: ["live", "dictation", "media", "models", "history", "settings", "transcript"]
+    property var pageKeys: [
+        "live", "dictation", "media", "models", "history", "settings", "transcript", "assistant"
+    ]
     // Страница не переключается в тот же кадр: содержимое сначала гаснет,
     // затем новое приезжает снизу. Индекс меняет сам переход.
     property int pageIndex: 0
@@ -339,7 +341,7 @@ ApplicationWindow {
         }
     }
 
-    // Страницы переключаются с клавиатуры: Ctrl+1…6 по порядку разделов,
+    // Страницы переключаются с клавиатуры: Ctrl+1…8 по порядку разделов,
     // Ctrl+Tab по кругу. Это работает, пока окно приложения в фокусе, и не
     // мешает глобальным горячим клавишам системы.
     // Instantiator, а не Repeater: Repeater создаёт только Item, и сочетания
@@ -490,7 +492,8 @@ ApplicationWindow {
                         readonly property int rowGap: 6
                         readonly property int current: Math.max(0, root.pageKeys.indexOf(bridge.page))
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 7 * rowH + 6 * rowGap
+                        Layout.preferredHeight: root.pageKeys.length * rowH
+                                                + (root.pageKeys.length - 1) * rowGap
 
                         function step(delta) {
                             var next = navBox.current + delta
@@ -528,7 +531,8 @@ ApplicationWindow {
                                     { key: "models", icon: "models", title: "Модели", detail: "Whisper" },
                                     { key: "history", icon: "history", title: "История", detail: "Сессии" },
                                     { key: "settings", icon: "settings", title: "Среда", detail: "Устройства" },
-                                    { key: "transcript", icon: "media", title: "Транскрибация", detail: "Файл + голоса" }
+                                    { key: "transcript", icon: "media", title: "Транскрибация", detail: "Файл + голоса" },
+                                    { key: "assistant", icon: "assistant", title: "Ассистент", detail: "Чат по записи" }
                                 ]
                                 delegate: Button {
                                     id: nav
@@ -592,7 +596,7 @@ ApplicationWindow {
                         text: (bridge.hotkeysAvailable
                                ? bridge.settings.dictate_hotkey + " диктовка\n" + bridge.settings.island_hotkey + " остров\n" + bridge.settings.paste_last_hotkey + " вставить"
                                : "Горячие клавиши недоступны")
-                              + "\nCtrl+1…7 разделы\nEsc в остров"
+                              + "\nCtrl+1…8 разделы\nEsc в остров"
                         color: Theme.muted
                         font.pixelSize: Theme.fsMicro
                         wrapMode: Text.Wrap
@@ -640,7 +644,8 @@ ApplicationWindow {
                                 monitor: "Мониторинг эфиров",
                                 models: "Модели Whisper",
                                 history: "История",
-                                settings: "Настройки"
+                                settings: "Настройки",
+                                assistant: "Ассистент"
                             })[bridge.page]
                             color: Theme.text
                             font.pixelSize: Theme.fsHead
@@ -700,6 +705,117 @@ ApplicationWindow {
                             wrapMode: Text.Wrap
                         }
                         IconButton { iconName: "close"; onClicked: bridge.clearNotice() }
+                    }
+                }
+                Rectangle {
+                    id: gpuHintCard
+                    visible: bridge.showGpuHint
+                    Layout.fillWidth: true
+                    implicitHeight: gpuHintBody.implicitHeight + 2 * Theme.padCard
+                    radius: Theme.radiusMd
+                    color: Theme.surface
+                    border.width: 1
+                    border.color: Theme.borderHi
+                    NumberAnimation on opacity {
+                        running: gpuHintCard.visible
+                        from: 0
+                        to: 1
+                        duration: Theme.baseMs
+                        easing.type: Easing.Bezier
+                        easing.bezierCurve: Theme.easeOut
+                    }
+                    ColumnLayout {
+                        id: gpuHintBody
+                        anchors.fill: parent
+                        anchors.margins: Theme.padCard
+                        spacing: Theme.gapSm
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.gapSm
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+                                Label {
+                                    text: bridge.gpuHintTitle
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fsTitle
+                                    font.weight: Font.DemiBold
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: bridge.gpuHintBody
+                                    color: Theme.muted
+                                    font.pixelSize: Theme.fsLabel
+                                    wrapMode: Text.Wrap
+                                }
+                            }
+                            IconButton {
+                                visible: !bridge.gpuSetup.busy
+                                iconName: "close"
+                                onClicked: bridge.dismissGpuHint()
+                                ToolTip.visible: hovered
+                                ToolTip.text: "Скрыть подсказку"
+                            }
+                        }
+                        Rectangle {
+                            visible: bridge.gpuSetup.busy || Number(bridge.gpuSetup.percent) > 0
+                            Layout.fillWidth: true
+                            height: 6
+                            radius: 3
+                            color: Theme.fill
+                            Rectangle {
+                                width: parent.width * Math.max(0, Math.min(1, Number(bridge.gpuSetup.percent) / 100))
+                                height: parent.height
+                                radius: 3
+                                color: Theme.text
+                                Behavior on width { NumberAnimation { duration: Theme.baseMs } }
+                            }
+                        }
+                        Label {
+                            visible: bridge.gpuSetup.busy || String(bridge.gpuSetup.phase) === "error"
+                            Layout.fillWidth: true
+                            text: {
+                                var p = Number(bridge.gpuSetup.percent)
+                                var msg = String(bridge.gpuSetup.message || "")
+                                if (bridge.gpuSetup.busy && p > 0)
+                                    return Math.round(p) + "% · " + msg
+                                return msg
+                            }
+                            color: Theme.faint
+                            font.pixelSize: Theme.fsSmall
+                            font.family: Theme.monoFamily
+                            elide: Text.ElideRight
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.gapSm
+                            PillButton {
+                                text: bridge.gpuSetup.busy ? "Отмена" : (String(bridge.hardware.computeAdvice) === "needs_runtime" ? "Настроить GPU" : "Включить видеокарту")
+                                primary: !bridge.gpuSetup.busy
+                                enabled: !bridge.busy && !bridge.recording
+                                onClicked: bridge.gpuSetup.busy ? bridge.cancelGpuSetup() : bridge.setupGpu()
+                            }
+                            PillButton {
+                                visible: String(bridge.hardware.computeAdvice) === "needs_runtime" && !bridge.gpuSetup.busy
+                                text: "Инструкция"
+                                onClicked: bridge.openCudaHelp()
+                            }
+                            PillButton {
+                                visible: String(bridge.hardware.computeAdvice) === "needs_runtime" && !bridge.gpuSetup.busy
+                                text: "Команда pip"
+                                onClicked: bridge.copyCudaInstallCommand()
+                                ToolTip.visible: hovered
+                                ToolTip.text: "Скопировать pip install для CUDA runtime"
+                            }
+                            Item { Layout.fillWidth: true }
+                            Label {
+                                visible: Boolean(bridge.hardware.gpuLabel)
+                                text: String(bridge.hardware.gpuLabel || "")
+                                color: Theme.faint
+                                font.pixelSize: Theme.fsSmall
+                                font.family: Theme.monoFamily
+                            }
+                        }
                     }
                 }
                 StackLayout {
@@ -975,8 +1091,58 @@ ApplicationWindow {
                                             spacing: Theme.gapLg
                                             HwStat { label: "Потоки CPU"; value: bridge.hardware.threads > 0 ? String(bridge.hardware.threads) : "-" }
                                             HwStat { label: "ОЗУ"; value: bridge.hardware.ram_gb ? bridge.hardware.ram_gb + " ГБ" : "-" }
+                                            HwStat {
+                                                label: "GPU"
+                                                value: bridge.hardware.gpuLabel && String(bridge.hardware.gpuLabel).length ? String(bridge.hardware.gpuLabel) : "—"
+                                            }
                                             HwStat { label: "CUDA"; value: bridge.hardware.cuda_devices > 0 ? "есть" : "нет" }
                                             HwStat { label: "Рекомендуем"; value: bridge.recommendedModel }
+                                        }
+                                        Label {
+                                            Layout.fillWidth: true
+                                            visible: {
+                                                var h = bridge.hardware
+                                                return h.computeHint && h.computeHint.length
+                                            }
+                                            text: bridge.hardware.computeHint || ""
+                                            color: Theme.muted
+                                            font.pixelSize: Theme.fsSmall
+                                            wrapMode: Text.Wrap
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: Theme.gapSm
+                                            visible: bridge.showGpuHint || bridge.gpuSetup.busy || String(bridge.hardware.computeAdvice) === "needs_runtime"
+                                            PillButton {
+                                                text: bridge.gpuSetup.busy
+                                                       ? ("Настройка… " + Math.round(bridge.gpuSetup.percent || 0) + "%")
+                                                       : (bridge.hardware.computeAction === "use_gpu" ? "Включить GPU" : "Настроить GPU")
+                                                enabled: !bridge.gpuSetup.busy && !bridge.modelPreparing && !bridge.recording
+                                                onClicked: bridge.setupGpu()
+                                            }
+                                            PillButton {
+                                                text: "Инструкция"
+                                                visible: String(bridge.hardware.computeAdvice) === "needs_runtime" && !bridge.gpuSetup.busy
+                                                onClicked: bridge.openCudaHelp()
+                                            }
+                                            PillButton {
+                                                text: "Команда pip"
+                                                visible: String(bridge.hardware.computeAdvice) === "needs_runtime" && !bridge.gpuSetup.busy
+                                                onClicked: bridge.copyCudaInstallCommand()
+                                            }
+                                            PillButton {
+                                                text: "Скрыть"
+                                                visible: !bridge.gpuSetup.busy && bridge.showGpuHint
+                                                onClicked: bridge.dismissGpuHint()
+                                            }
+                                        }
+                                        Label {
+                                            Layout.fillWidth: true
+                                            visible: bridge.gpuSetup.error && bridge.gpuSetup.error.length
+                                            text: bridge.gpuSetup.error || ""
+                                            color: Theme.muted
+                                            font.pixelSize: Theme.fsSmall
+                                            wrapMode: Text.Wrap
                                         }
                                         Label {
                                             Layout.fillWidth: true
@@ -1447,6 +1613,116 @@ ApplicationWindow {
                                 spacing: Theme.gapMd
                                 Rectangle {
                                     Layout.fillWidth: true
+                                    implicitHeight: computeBox.implicitHeight + 2 * Theme.padCard
+                                    radius: Theme.radiusLg
+                                    color: Theme.surface
+                                    border.width: 1
+                                    border.color: Theme.border
+                                    ColumnLayout {
+                                        id: computeBox
+                                        anchors.fill: parent
+                                        anchors.margins: Theme.padCard
+                                        spacing: Theme.gapSm
+                                        Label { text: "Вычисления Whisper"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: {
+                                                var label = bridge.hardware.compute_label || "Определяем…"
+                                                var tip = bridge.hardware.computeHint || ""
+                                                return "Сейчас: " + label + (tip.length ? ". " + tip : "")
+                                            }
+                                            color: Theme.muted
+                                            font.pixelSize: Theme.fsLabel
+                                            wrapMode: Text.Wrap
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: Theme.gapSm
+                                            PillButton {
+                                                text: "Авто"
+                                                primary: String(bridge.settings.device) === "auto"
+                                                enabled: !bridge.gpuSetup.busy && !bridge.recording
+                                                onClicked: bridge.selectComputeDevice("auto")
+                                                ToolTip.visible: hovered
+                                                ToolTip.text: "CUDA если доступна, иначе CPU"
+                                            }
+                                            PillButton {
+                                                text: "Процессор"
+                                                primary: String(bridge.settings.device) === "cpu"
+                                                enabled: !bridge.gpuSetup.busy && !bridge.recording
+                                                onClicked: bridge.selectComputeDevice("cpu")
+                                            }
+                                            PillButton {
+                                                text: "Видеокарта"
+                                                primary: String(bridge.settings.device) === "cuda"
+                                                enabled: !bridge.gpuSetup.busy && !bridge.recording
+                                                onClicked: bridge.selectComputeDevice("cuda")
+                                                ToolTip.visible: hovered
+                                                ToolTip.text: Boolean(bridge.hardware.cudaReady)
+                                                              ? "Использовать CUDA"
+                                                              : "Скачает CUDA runtime и подготовит модель"
+                                            }
+                                            Item { Layout.fillWidth: true }
+                                            Label {
+                                                text: bridge.hardware.gpuLabel || ""
+                                                color: Theme.faint
+                                                font.pixelSize: Theme.fsSmall
+                                                font.family: Theme.monoFamily
+                                            }
+                                        }
+                                        Rectangle {
+                                            visible: bridge.gpuSetup.busy || (Number(bridge.gpuSetup.percent) > 0 && String(bridge.gpuSetup.phase) !== "idle")
+                                            Layout.fillWidth: true
+                                            height: 6
+                                            radius: 3
+                                            color: Theme.fill
+                                            Rectangle {
+                                                width: parent.width * Math.max(0, Math.min(1, Number(bridge.gpuSetup.percent) / 100))
+                                                height: parent.height
+                                                radius: 3
+                                                color: Theme.text
+                                                Behavior on width { NumberAnimation { duration: Theme.baseMs } }
+                                            }
+                                        }
+                                        Label {
+                                            visible: bridge.gpuSetup.busy || String(bridge.gpuSetup.error || "").length > 0
+                                            Layout.fillWidth: true
+                                            text: {
+                                                if (bridge.gpuSetup.busy)
+                                                    return Math.round(Number(bridge.gpuSetup.percent || 0)) + "% · " + String(bridge.gpuSetup.message || "")
+                                                return String(bridge.gpuSetup.error || bridge.gpuSetup.message || "")
+                                            }
+                                            color: Theme.faint
+                                            font.pixelSize: Theme.fsSmall
+                                            font.family: Theme.monoFamily
+                                            wrapMode: Text.Wrap
+                                        }
+                                        ColumnLayout {
+                                            visible: String(bridge.hardware.computeAdvice) === "needs_runtime" && !bridge.gpuSetup.busy
+                                            Layout.fillWidth: true
+                                            spacing: 2
+                                            Repeater {
+                                                model: bridge.hardware.manualSteps || []
+                                                delegate: Label {
+                                                    required property var modelData
+                                                    Layout.fillWidth: true
+                                                    text: "· " + modelData
+                                                    color: Theme.faint
+                                                    font.pixelSize: Theme.fsSmall
+                                                    wrapMode: Text.Wrap
+                                                }
+                                            }
+                                            RowLayout {
+                                                spacing: Theme.gapSm
+                                                PillButton { text: "Настроить GPU"; primary: true; onClicked: bridge.setupGpu() }
+                                                PillButton { text: "Инструкция"; onClicked: bridge.openCudaHelp() }
+                                                PillButton { text: "Команда pip"; onClicked: bridge.copyCudaInstallCommand() }
+                                            }
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    Layout.fillWidth: true
                                     implicitHeight: dictEngineBox.implicitHeight + 2 * Theme.padCard
                                     radius: Theme.radiusLg
                                     color: Theme.surface
@@ -1458,7 +1734,7 @@ ApplicationWindow {
                                         anchors.margins: Theme.padCard
                                         spacing: Theme.gapSm
                                         Label { text: "Движок распознавания Live"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
-                                        Text { Layout.fillWidth: true; text: "Vosk - лёгкая потоковая Kaldi-модель для слабого CPU (по умолчанию). Whisper - точнее, но заметно тяжелее. Диктовка и медиа всегда на Whisper."; color: Theme.muted; font.pixelSize: Theme.fsLabel; wrapMode: Text.Wrap }
+                                        Text { Layout.fillWidth: true; text: "Vosk - лёгкая потоковая Kaldi-модель для слабого CPU. Whisper - точнее, но заметно тяжелее. Диктовка и медиа всегда на Whisper."; color: Theme.muted; font.pixelSize: Theme.fsLabel; wrapMode: Text.Wrap }
                                         RowLayout {
                                             Layout.fillWidth: true
                                             PillButton { text: "Vosk"; primary: String(bridge.settings.live_engine) === "vosk"; onClicked: bridge.setSetting("live_engine", "vosk") }
@@ -1913,6 +2189,9 @@ ApplicationWindow {
                         }
                     }
                     TranscriptView { Layout.fillWidth: true; Layout.fillHeight: true }
+                    // Ассистент грузится вместе со страницей: список записей и
+                    // каталог моделей приходят из своего контроллера в фоне.
+                    AssistantPage { Layout.fillWidth: true; Layout.fillHeight: true }
                 }
             }
         }

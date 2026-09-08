@@ -481,6 +481,15 @@ class Engine:
                 text = str(getattr(raw, "text", "")).strip()
                 if not text:
                     continue
+                from dotaudio.hallucination import looks_invented
+
+                reason = looks_invented(
+                    text,
+                    float(getattr(raw, "no_speech_prob", 0.0) or 0.0),
+                    float(getattr(raw, "avg_logprob", 0.0) or 0.0),
+                )
+                if reason:
+                    continue
                 segment: Segment = {
                     "start": float(getattr(raw, "start", 0.0)),
                     "end": float(getattr(raw, "end", 0.0)),
@@ -845,6 +854,18 @@ class Engine:
 
     def _get_or_load_model(self, model_name: str, device: str) -> Any:
         key = (model_name, device)
+        with self._model_lock:
+            cached = self._models.get(key)
+            if cached is not None:
+                self._models.move_to_end(key)
+                return cached
+        if device == "cuda":
+            # Register NVIDIA DLL dirs before CT2 loads CUDA.  Packages are
+            # installed from the UI «Настроить GPU» action; loading only hooks
+            # what is already on disk so a cold auto path can still fall back.
+            from dotaudio.cuda_runtime import register_cuda_dll_directories
+
+            register_cuda_dll_directories()
         with self._model_lock:
             cached = self._models.get(key)
             if cached is not None:

@@ -469,6 +469,25 @@ def test_live_preview_recipe_uses_greedy_decoding(monkeypatch) -> None:
     assert result[0]["text"] == "черновик"
 
 
+def test_local_engine_drops_youtube_credit_hallucinations(monkeypatch) -> None:
+    class FakeModel:
+        def transcribe(self, _source, **_kwargs):
+            return iter(
+                [
+                    _Segment(0, 0.5, "Привет"),
+                    _Segment(0.5, 1.0, "Субтитры создавал DimaTorzok"),
+                ]
+            ), object()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=lambda *_args, **_kwargs: FakeModel()),
+    )
+    result = Engine().transcribe(np.zeros(1600, dtype=np.float32), RecognitionConfig(device="cpu"))
+    assert [segment["text"] for segment in result] == ["Привет"]
+
+
 def test_live_stream_recipe_skips_second_vad_and_uses_profile_beam(monkeypatch) -> None:
     class FakeModel:
         def transcribe(self, _source, **kwargs):
