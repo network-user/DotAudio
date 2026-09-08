@@ -3,9 +3,9 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "Theme.js" as Theme
 
-// РћС‚РґРµР»СЊРЅС‹Р№ СЂРµР¶РёРј В«РўСЂР°РЅСЃРєСЂРёР±Р°С†РёСЏВ»: С„Р°Р№Р» -> СЂР°СЃС€РёС„СЂРѕРІРєР° СЃ С‚Р°Р№РјРєРѕРґР°РјРё Рё
-// РіРѕРІРѕСЂСЏС‰РёРјРё. Р’РµСЃСЊ РѕР±РјРµРЅ РёРґС‘С‚ С‡РµСЂРµР· РјРѕСЃС‚ bridge.*; СЂР°СЃРїРѕР·РЅР°РІР°РЅРёРµ РІСЃРµРіРґР°
-// Р»РѕРєР°Р»СЊРЅРѕ (bridge.runTranscript РЅРёРєРѕРіРґР° РЅРµ РІС‹Р±РёСЂР°РµС‚ СЃРµСЂРІРµСЂ).
+// Отдельный режим «Транскрибация»: файл -> расшифровка с таймкодами и
+// говорящими. Весь обмен идёт через мост bridge.*; распознавание всегда
+// локально (bridge.runTranscript никогда не выбирает сервер).
 Rectangle {
     id: view
     color: "transparent"
@@ -37,7 +37,7 @@ Rectangle {
         anchors.fill: parent
         spacing: Theme.gapMd
 
-        // РџР°РЅРµР»СЊ РІС‹Р±РѕСЂР° Рё Р·Р°РїСѓСЃРєР°.
+        // Панель выбора и запуска.
         Rectangle {
             Layout.fillWidth: true
             implicitHeight: topRow.implicitHeight + 2 * Theme.padCard
@@ -57,7 +57,7 @@ Rectangle {
                         Layout.fillWidth: true
                         spacing: 3
                         Label {
-                            text: view.file.length ? view.file : "Р Р°СЃС€РёС„СЂРѕРІРєР° Р°СѓРґРёРѕ РёР»Рё РІРёРґРµРѕ"
+                            text: view.file.length ? view.file : "Расшифровка аудио или видео"
                             color: Theme.text
                             font.pixelSize: Theme.fsTitle
                             font.weight: Font.DemiBold
@@ -65,22 +65,22 @@ Rectangle {
                         }
                         Label {
                             text: view.file.length
-                                  ? "РћР±СЂР°Р±РѕС‚РєР° Р»РѕРєР°Р»СЊРЅРѕ. РђСѓРґРёРѕ РЅРµ РїРѕРєРёРґР°РµС‚ СЌС‚РѕС‚ РєРѕРјРїСЊСЋС‚РµСЂ."
-                                  : "РћС‚РєСЂРѕР№С‚Рµ Р·Р°РїРёСЃСЊ, РїРѕР»СѓС‡РёС‚Рµ СЃР»РѕРІР° СЃ С‚Р°Р№РјРєРѕРґР°РјРё Рё РјРµС‚РєРё РіРѕРІРѕСЂСЏС‰РёС…."
+                                  ? "Обработка локально. Аудио не покидает этот компьютер."
+                                  : "Откройте запись, получите слова с таймкодами и метки говорящих."
                             color: Theme.muted
                             font.pixelSize: Theme.fsSmall
                             wrapMode: Text.Wrap
                         }
                     }
-                    PillButton { text: "РћС‚РєСЂС‹С‚СЊ"; enabled: !view.busyPhase; onClicked: bridge.pickTranscriptFile() }
-                    PillButton { text: view.busyPhase ? "РЎС‚РѕРї" : "РўСЂР°РЅСЃРєСЂРёР±РёСЂРѕРІР°С‚СЊ"; primary: !view.busyPhase; enabled: view.file.length > 0; onClicked: view.busyPhase ? bridge.stopTranscript() : bridge.runTranscript() }
-                    PillButton { text: "РћС‡РёСЃС‚РёС‚СЊ"; enabled: (view.file.length > 0 || view.segs.length > 0) && !view.busyPhase; onClicked: bridge.clearTranscript() }
-                    PillButton { text: "РЎРѕС…СЂР°РЅРёС‚СЊвЂ¦"; enabled: view.segs.length > 0 && !view.busyPhase; onClicked: bridge.transcriptExport() }
+                    PillButton { text: "Открыть"; enabled: !view.busyPhase; onClicked: bridge.pickTranscriptFile() }
+                    PillButton { text: view.busyPhase ? "Стоп" : "Транскрибировать"; primary: !view.busyPhase; enabled: view.file.length > 0; onClicked: view.busyPhase ? bridge.stopTranscript() : bridge.runTranscript() }
+                    PillButton { text: "Очистить"; enabled: (view.file.length > 0 || view.segs.length > 0) && !view.busyPhase; onClicked: bridge.clearTranscript() }
+                    PillButton { text: "Сохранить…"; enabled: view.segs.length > 0 && !view.busyPhase; onClicked: bridge.transcriptExport() }
                 }
                 Label {
                     visible: view.busyPhase
                     Layout.fillWidth: true
-                    text: "Р Р°СЃРїРѕР·РЅР°С‘Рј РЅР° РїСЂРѕС†РµСЃСЃРѕСЂРµвЂ¦ РїРѕСЃР»Рµ СЃР»РѕРІ СЃС‚Р°РІРёРј С‚Р°Р№РјРєРѕРґС‹ Рё РѕРїСЂРµРґРµР»СЏРµРј РіРѕР»РѕСЃР°. Р­С‚Рѕ Р·Р°РЅРёРјР°РµС‚ РІСЂРµРјСЏ РЅР° РґР»РёРЅРЅРѕР№ Р·Р°РїРёСЃРё."
+                    text: "Распознаём на процессоре… после слов ставим таймкоды и определяем голоса. Это занимает время на длинной записи."
                     color: Theme.faint
                     font.pixelSize: Theme.fsSmall
                     wrapMode: Text.Wrap
@@ -88,7 +88,7 @@ Rectangle {
             }
         }
 
-        // Р›РµРіРµРЅРґР° РіРѕРІРѕСЂСЏС‰РёС… (РїРµСЂРµРёРјРµРЅРѕРІР°РЅРёРµ: РєР»РёРє Рё РїСЂР°РІРєР°).
+        // Легенда говорящих (переименование: клик и правка).
         Rectangle {
             Layout.fillWidth: true
             visible: view.speakers.length > 0
@@ -112,34 +112,44 @@ Rectangle {
                             if (label.length) bridge.renameTranscriptSpeaker(Number(modelData.key), label)
                         }
                         width: Math.min(210, Math.max(120, nameField.implicitWidth + labelTail.width + 34))
-                                        implicitHeight: 34
-                                        radius: Theme.radiusLg
-                                        color: Theme.fill
-                                        border.width: 1
-                                        border.color: Theme.hairline
-                                        RowLayout {
-                                            anchors.fill: parent
-                                            anchors.margins: 10
-                                            spacing: 8
-                                            Label { text: String(modelData.key) + "."; color: Theme.muted; font.family: Theme.monoFamily; font.pixelSize: Theme.fsSmall }
-                                            TextField {
-                                                id: nameField
-                                                Layout.fillWidth: true
-                                                text: String(modelData.label || "")
-                                                color: Theme.text
-                                                font.pixelSize: Theme.fsSmall
-                                                onActiveFocusChanged: if (!activeFocus) chip.commit()
-                                                onEditingFinished: chip.commit()
-                                                background: Item {}
-                                            }
-                                            Label { id: labelTail; text: "В· РіРѕСЃС‚СЊ"; color: Theme.faint; font.pixelSize: Theme.fsSmall }
-                                        }
-                                }
+                        implicitHeight: 34
+                        radius: Theme.radiusLg
+                        color: Theme.fill
+                        border.width: 1
+                        border.color: Theme.hairline
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.margins: 10
+                            spacing: 8
+                            Label {
+                                text: String(chip.modelData.key) + "."
+                                color: Theme.muted
+                                font.family: Theme.monoFamily
+                                font.pixelSize: Theme.fsSmall
+                            }
+                            TextField {
+                                id: nameField
+                                Layout.fillWidth: true
+                                text: String(chip.modelData.label || "")
+                                color: Theme.text
+                                font.pixelSize: Theme.fsSmall
+                                onActiveFocusChanged: if (!activeFocus) chip.commit()
+                                onEditingFinished: chip.commit()
+                                background: Item {}
+                            }
+                            Label {
+                                id: labelTail
+                                text: "· гость"
+                                color: Theme.faint
+                                font.pixelSize: Theme.fsSmall
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // РЎРїРёСЃРѕРє С„СЂР°Р· СЃ РіРѕРІРѕСЂСЏС‰РёРј Рё С‚Р°Р№РјРєРѕРґРѕРј.
+        // Список фраз с говорящим и таймкодом.
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -151,7 +161,7 @@ Rectangle {
                 spacing: Theme.gapSm
                 Label {
                     Layout.alignment: Qt.AlignHCenter
-                    text: "Р“РѕС‚РѕРІРѕ Рє С‚СЂР°РЅСЃРєСЂРёР±Р°С†РёРё"
+                    text: "Готово к транскрибации"
                     color: Theme.text
                     font.pixelSize: Theme.fsLead
                     font.weight: Font.DemiBold
@@ -160,7 +170,7 @@ Rectangle {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
-                    text: "Р­С‚РѕС‚ СЂР°Р·РґРµР» РЅРµ РєР°СЃР°РµС‚СЃСЏ РєР°СЂР°РѕРєРµ: РІС‹Р±РёСЂР°РµС‚СЃСЏ Р·Р°РїРёСЃСЊ, Р° РїСЂРё Р¶РµР»Р°РЅРёРё РѕРїСЂРµРґРµР»СЏРµС‚СЃСЏ, РєС‚Рѕ РёР· РіРѕРІРѕСЂСЏС‰РёС… С‡С‚Рѕ РїСЂРѕРёР·РЅС‘СЃ."
+                    text: "Этот раздел не касается караоке: выбирается запись, а при желании определяется, кто из говорящих что произнёс."
                     color: Theme.muted
                     font.pixelSize: Theme.fsBody
                 }
@@ -170,7 +180,7 @@ Rectangle {
                 visible: view.segs.length === 0 && view.file.length && !view.busyPhase
                 spacing: Theme.gapSm
                 Label {
-                    text: "Р¤Р°Р№Р» РІС‹Р±СЂР°РЅ"
+                    text: "Файл выбран"
                     color: Theme.text
                     font.pixelSize: Theme.fsLead
                     font.weight: Font.DemiBold
@@ -178,7 +188,7 @@ Rectangle {
                 Label {
                     color: Theme.muted
                     font.pixelSize: Theme.fsBody
-                    text: "РћРїСЂРµРґРµР»РµРЅРёРµ РіРѕР»РѕСЃРѕРІ Р·Р°СЂР°Р±РѕС‚Р°РµС‚ РїРѕСЃР»Рµ СЂР°СЃРїРѕР·РЅР°РІР°РЅРёСЏ."
+                    text: "Определение голосов заработает после распознавания."
                 }
             }
             ListView {
@@ -216,7 +226,7 @@ Rectangle {
                                 Layout.fillWidth: true
                                 spacing: Theme.gapSm
                                 Label {
-                                    text: view.timecode(modelData.start) + " вЂ“ " + view.timecode(modelData.end)
+                                    text: view.timecode(modelData.start) + " – " + view.timecode(modelData.end)
                                     color: Theme.muted
                                     font.family: Theme.monoFamily
                                     font.pixelSize: Theme.fsSmall

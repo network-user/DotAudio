@@ -77,7 +77,7 @@ Rectangle {
         return { row: segAt(a), wi: j, word: ws[j], rowI: a }
     }
 
-    function setMode(i, w) { root.focusIndex = i; root.focusWord = w; refreshFields() }
+    function setMode(i, w) { root.focusIndex = i; root.focusWord = w; refresh() }
 
     function playPhraseFrag(i, w) {
         var ws = wordsAt(i)
@@ -129,7 +129,7 @@ Rectangle {
     }
     function commitEdge(fromStart) {
         var c = currentWord()
-        if (!c || !bridgeAvailable()) { refresh() }
+        if (!c || !bridgeAvailable()) { refresh(); return }
         var t = fromStart ? startField.text : endField.text
         var v = parseTime(t)
         if (!isFinite(v)) { refresh(); return }

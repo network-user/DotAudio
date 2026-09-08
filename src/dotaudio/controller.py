@@ -74,11 +74,11 @@ DEFAULTS = {
     "reduce_motion": False,
     "live_sensitivity": "speech",
     "live_greedy_finals": False,
-    # Живой движок распознавания. "vosk" - лёгкая потоковая Kaldi-модель,
-    # рассчитанная на слабый CPU без GPU (см. docs/STT_METHODS.md). По
-    # умолчанию vosk: именно Live-суттитры делаются этим лёгким движком на
-    # слабом железе; диктовка и медиа остаются на faster-whisper до миграции.
-    "live_engine": "vosk",
+    # Живой движок распознавания. Whisper по умолчанию: на замерах этого
+    # проекта он даёт WER 8% против 52% у vosk на той же записи, а vosk -
+    # необязательный пакет, которого на чистой установке может не быть.
+    # "vosk" остаётся явным выбором для очень слабого CPU (docs/STT_METHODS.md).
+    "live_engine": "whisper",
     # Размер vosk-модели для Live. "small" - vosk-model-small-ru-0.22 (~44 МБ),
     # "big" - vosk-model-ru-0.42 (~1,8 ГБ, точнее, но тяжелее).
     "vosk_size": "small",
@@ -2416,6 +2416,10 @@ class Controller(QObject):
             if int(sp["key"]) == int(key):
                 sp["label"] = label
         for seg in state["segments"]:
+            # Диаризация может пройти частично: у фразы без определённого
+            # голоса роли нет, и переименование не должно её трогать.
+            if seg.get("role") is None:
+                continue
             if int(seg["role"]) == int(key):
                 seg["speaker"] = label
         self.transcribeChanged.emit()
@@ -2438,7 +2442,9 @@ class Controller(QObject):
         # Говорящий выносим в текст перед экспортом (без права менять из строк).
         rows = []
         for seg in payload:
-            rows.append({**seg, "text": f"[{seg.get('speaker','')}] {seg.get('text','')}".strip()})
+            speaker = str(seg.get("speaker") or "").strip()
+            text = str(seg.get("text") or "").strip()
+            rows.append({**seg, "text": f"[{speaker}] {text}".strip() if speaker else text})
         try:
             Path(path).write_text(export_transcript(rows, fmt), encoding="utf-8")
             self.transcribeStatus.emit(f"Сохранено: {Path(path).name}")

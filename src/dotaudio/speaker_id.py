@@ -44,9 +44,9 @@ def decode_audio(source: str | Path | np.ndarray, sample_rate: int = SAMPLE_RATE
         return np.ascontiguousarray(audio.reshape(-1))
     if isinstance(source, Path):
         source = str(source)
-    from faster_whisper.utils import decode_audio  # already a core dependency
+    from faster_whisper.audio import decode_audio as _decode  # already a core dependency
 
-    audio = decode_audio(source, sampling_rate=sample_rate)
+    audio = _decode(source, sampling_rate=sample_rate)
     audio = np.asarray(audio, dtype=np.float32)
     if audio.ndim == 2:
         audio = audio.mean(axis=1)
