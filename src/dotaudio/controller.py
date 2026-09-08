@@ -684,7 +684,7 @@ class Controller(QObject):
 
     @Slot(str)
     def selectPage(self, page):
-        if page in ("dictation", "live", "media", "monitor", "models", "history", "settings"):
+        if page in ("dictation", "live", "media", "monitor", "models", "history", "settings", "transcript"):
             self._page = page
             self._record_log("info", f"Открыт раздел: {page}")
             self.changed.emit()
