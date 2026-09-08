@@ -299,3 +299,60 @@ def test_force_stop_releases_cancelled_jobs_without_waiting_for_timer() -> None:
     assert controller._cancel_release.stopped
     assert events == ["warning:Запрошена принудительная остановка.", "cancel", "release"]
     assert "Нераспознанный хвост" in controller._notice
+
+
+def test_abort_emergency_idle_returns_to_idle_and_stops_workers() -> None:
+    class IdleRelease:
+        def stop(self):
+            self.stopped = True
+
+        stopped = False
+
+    release = IdleRelease()
+    controller = type("ControllerState", (), {})()
+    controller._closing = False
+    controller._jobs = {}
+    controller._model_preparing = True
+    controller._state = "recording"
+    controller._level = 0.6
+    controller._idle_model_release = release
+    events: list[str] = []
+    controller.forceStop = lambda: events.append("force")
+    controller._arm_idle_model_release = lambda: events.append("arm")
+
+    Controller.abortEmergency(controller)
+
+    assert controller._closing is True
+    assert controller._state == "idle"
+    assert controller._level == 0.0
+    assert controller._model_preparing is False
+    assert events == ["arm"]  # без активных работ модель не отжимается принудительно
+    assert release.stopped is True
+
+
+def test_abort_emergency_cancels_running_jobs_when_capture_is_active() -> None:
+    class IdleRelease:
+        def stop(self):
+            self.stopped = True
+
+        stopped = False
+
+    release = IdleRelease()
+    controller = type("ControllerState", (), {})()
+    controller._closing = False
+    controller._jobs = {"live": object()}
+    controller._model_preparing = False
+    controller._state = "recording"
+    controller._level = 0.6
+    controller._idle_model_release = release
+    events: list[str] = []
+    controller.forceStop = lambda: events.append("force")
+    controller._arm_idle_model_release = lambda: events.append("arm")
+
+    Controller.abortEmergency(controller)
+
+    assert controller._closing is True
+    assert controller._state == "idle"
+    assert controller._level == 0.0
+    assert events == ["force"]
+    assert release.stopped is True

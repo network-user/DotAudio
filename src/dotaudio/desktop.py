@@ -24,7 +24,7 @@ VK_RWIN = 0x5C
 KEYEVENTF_KEYUP = 0x0002
 _ASYNC_DOWN = 0x8000
 
-_HOTKEY_IDS = {"dictate": 41, "island": 42, "paste_last": 43}
+_HOTKEY_IDS = {"dictate": 41, "island": 42, "paste_last": 43, "quit": 44}
 _REQUIRED_HOTKEYS = {"dictate", "island"}
 _ALLOWED_MODIFIERS = MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN | MOD_NOREPEAT
 
@@ -94,6 +94,7 @@ class Desktop(QObject, QAbstractNativeEventFilter):
     dictate = Signal()
     island = Signal()
     paste_last = Signal()
+    quit_requested = Signal()
 
     def __init__(self, app):
         QObject.__init__(self)
@@ -103,6 +104,10 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         self.target = 0
         self.user32 = None
         self._registered_hotkeys: dict[str, Hotkey] = {}
+        # Ctrl+Alt+X - мгновенный выход без подтверждения. Хранится отдельно,
+        # потому что пользователь переопределяет только dictate/island/пасту
+        # последнего, а quit обязан пережить это переназначение.
+        self._quit_hotkey = Hotkey(MOD_NOREPEAT | MOD_ALT | MOD_CONTROL, 0x58)
         if sys.platform == "win32":
             self.user32 = ctypes.WinDLL("user32", use_last_error=True)
             self._configure_win32_functions()
@@ -112,6 +117,7 @@ class Desktop(QObject, QAbstractNativeEventFilter):
                     "dictate": Hotkey(MOD_NOREPEAT | MOD_ALT | MOD_CONTROL, 0x20),
                     "island": Hotkey(MOD_NOREPEAT | MOD_ALT | MOD_CONTROL, 0x4F),
                     "paste_last": Hotkey(MOD_NOREPEAT | MOD_SHIFT | MOD_ALT, 0x5A),
+                    "quit": self._quit_hotkey,
                 }
             )
 
@@ -155,6 +161,15 @@ class Desktop(QObject, QAbstractNativeEventFilter):
             raise ValueError("Hotkey bindings must define dictate and island actions")
         if any(not isinstance(hotkey, Hotkey) for hotkey in bindings.values()):
             raise TypeError("Hotkey bindings must contain Hotkey values")
+        if "quit" in bindings and isinstance(bindings["quit"], Hotkey):
+            # A caller may explicitly set a different emergency shortcut.
+            self._quit_hotkey = bindings["quit"]
+        # The emergency quit is never dropped when the UI reassigns only the
+        # dictate/island/paste-last combos: it is merged back here so a rebind
+        # on the hotkeys page cannot silently unregister the exit shortcut.
+        merged = dict(bindings)
+        merged.setdefault("quit", self._quit_hotkey)
+        bindings = merged
         if len({(hotkey.modifiers, hotkey.key) for hotkey in bindings.values()}) != len(bindings):
             raise ValueError("DotAudio actions cannot use the same hotkey")
         if not self.user32:
@@ -206,6 +221,8 @@ class Desktop(QObject, QAbstractNativeEventFilter):
                     self.island.emit()
                 elif msg.wParam == 43:
                     self.paste_last.emit()
+                elif msg.wParam == 44:
+                    self.quit_requested.emit()
         return False, 0
 
     def remember_target(self):

@@ -1485,6 +1485,34 @@ class Controller(QObject):
             self._on_finished(sid, "", True)
 
     @Slot()
+    def abortEmergency(self):
+        """Abort every active job now and bring the UI back to idle.
+
+        This is the exit path for Ctrl+C in the console and for the dedicated
+        quit hotkey.  It stops capture and cancels native decoder work as fast
+        as possible (the same semantics as the island force-stop), frees the
+        model cache afterwards, and never waits for a slow decode to return
+        before the process may close.  Workers are daemon threads, so a native
+        call still running simply dies with the process.
+        """
+
+        self._closing = True
+        if self._jobs:
+            try:
+                self.forceStop()
+            except Exception:
+                pass
+        else:
+            self._arm_idle_model_release()
+        self._idle_model_release.stop()
+        # forceStop() already closed the sessions; the model stays resident in
+        # memory until the process exits, which on the emergency path happens
+        # a moment later.
+        self._model_preparing = False
+        self._state = "idle"
+        self._level = 0
+
+    @Slot()
     def importFile(self):
         if self._jobs:
             return

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -58,6 +59,53 @@ def main():
     app.setPalette(palette)
     desktop = Desktop(app)
     controller = Controller(args.data_dir or user_data_path("DotAudio", "DotCore"), desktop)
+
+    # Экстренный выход. Ctrl+C / Ctrl+Break в консоли запуска (python -m
+    # dotaudio, dotaudio.exe) и глобальная Ctrl+Alt+X обязаны закрыть программу
+    # целиком, даже если модель занята распознаванием. Полный выход сразу:
+    # останавливаем захват/декодер через controller.abortEmergency, а если за
+    # grace-интервал нативный compute не вернул управление - процесс всё равно
+    # завершается (workers - daemon threads, они умирают вместе с процессом).
+    aborted = {"once": False}
+
+    def force_exit():
+        os._exit(0)
+
+    def finish_abort():
+        if aborted["once"]:
+            force_exit()
+            return
+        aborted["once"] = True
+        try:
+            controller.abortEmergency()
+        except Exception:
+            pass
+        app.quit()
+        # Qt app.quit() завершает цикл, но native decode в демон-потоке может
+        # не отпустить GIL быстро. Даём короткую паузу и закрываемся жёстко.
+        QTimer.singleShot(2500, force_exit)
+
+    def request_abort(*_unused):
+        # Сигнал приходит на границе интерпретатора, ещё во время Qt-цикла.
+        # Не трогаем QML прямо из обработчика: прокладываем в event loop через
+        # singleShot, а heartbeat ниже будит цикл, если приложение молчит.
+        QTimer.singleShot(0, finish_abort)
+
+    if not args.smoke_test and not args.screenshot:
+        # Ctrl+C (SIGINT) и Ctrl+Break (SIGBREAK) в консоли.
+        signal.signal(signal.SIGINT, request_abort)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, request_abort)
+
+    # Heartbeat Qt-сообщениями: пока нативный Qt-цикл ждёт события, обработчик
+    # SIGINT добирается до Python только когда исполняется байткод. Лёгкий таймер
+    # с интервалом ~250 мс гарантирует, что сигнал доставят в течение долей секунды.
+    heartbeat = QTimer()
+    heartbeat.setInterval(250)
+    heartbeat.timeout.connect(lambda: None)
+    heartbeat.start()
+
+    desktop.quit_requested.connect(finish_abort)
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("bridge", controller)
     engine.load(QUrl.fromLocalFile(str(Path(__file__).parent / "qml" / "MainMvp.qml")))
