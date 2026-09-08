@@ -16,7 +16,9 @@ Button {
     // подсказки: иначе экранный диктор читает пустую кнопку.
     Accessible.role: Accessible.Button
     Accessible.name: control.ToolTip.text.length ? control.ToolTip.text : control.iconName
-    scale: control.down ? 0.92 : control.hovered && control.enabled ? 1.06 : 1
+    // Наведение отвечает фоном кружка, а не ростом иконки: панель из десятка
+    // кнопок не должна пульсировать под курсором.
+    scale: control.down ? 0.92 : 1
     opacity: control.enabled ? 1 : 0.45
 
     Behavior on scale {

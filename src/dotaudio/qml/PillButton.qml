@@ -12,9 +12,10 @@ Button {
     leftPadding: compact ? 11 : 14
     rightPadding: compact ? 11 : 14
     hoverEnabled: true
-    // Нажатие проседает, наведение чуть приподнимает: отклик виден до
-    // того, как отработает само действие.
-    scale: control.down ? 0.96 : control.hovered && control.enabled ? 1.02 : 1
+    // Нажатие проседает; наведение показывает себя фоном, а не масштабом.
+    // Раздувание каждой кнопки под курсором заставляло интерфейс шевелиться
+    // от одного движения мыши по панели.
+    scale: control.down ? 0.96 : 1
     opacity: control.enabled ? 1 : 0.5
 
     Behavior on scale {

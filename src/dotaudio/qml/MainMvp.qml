@@ -140,14 +140,16 @@ ApplicationWindow {
         }
     }
 
-    // Ширина едет с лёгким перелётом - это и читается как morph острова.
-    // Высота идёт без отката, иначе содержимое подрезается на возврате.
+    // Морф меняет размер настоящего окна, а не прямоугольника на экране:
+    // каждый кадр анимации - это запрос к оконной системе. Поэтому здесь нет
+    // перелёта: пружина по ширине заставляла окно проехать мимо цели и
+    // вернуться, и на этом возврате содержимое заметно дёргалось.
     Behavior on width {
         enabled: root.morphGeo && !root.dragging
         NumberAnimation {
             duration: Theme.morphMs
             easing.type: Easing.Bezier
-            easing.bezierCurve: Theme.easeSpring
+            easing.bezierCurve: Theme.easeOut
         }
     }
     Behavior on height {
