@@ -174,8 +174,12 @@ Item {
             root.confirmStep = Math.max(16, Math.min(48, Math.round(360 / wave.length)))
             root.confirmQueue = wave
         } else {
-            for (var w = 0; w < wave.length; w++)
+            for (var w = 0; w < wave.length; w++) {
                 words.setProperty(wave[w], "soft", false)
+                var c = rows.itemAt(wave[w])
+                if (c)
+                    c.confirmIn()
+            }
         }
         confirmTicker.running = root.confirmQueue.length > 0
         root.frozenCount = keep
@@ -187,6 +191,9 @@ Item {
             var idx = root.confirmQueue.shift()
             if (idx < words.count && words.get(idx).soft) {
                 words.setProperty(idx, "soft", false)
+                var chip = rows.itemAt(idx)
+                if (chip)
+                    chip.confirmIn()
                 break
             }
         }
@@ -279,7 +286,8 @@ Item {
                 required property string token
                 required property bool soft
                 property real enter: root.animateWords ? 0 : 1
-                property real softness: chip.soft ? root.pendingOpacity : 1
+                property real lit: chip.soft ? root.pendingOpacity : 1
+                property real rise: 0
 
                 objectName: "captionWord"
                 text: chip.token
@@ -290,21 +298,36 @@ Item {
                 font.pixelSize: root.pixelSize
                 // Подтверждение не меняет ширину слова и переносы строк.
                 font.weight: root.weight
-                opacity: chip.softness * chip.enter
+                opacity: chip.lit * chip.enter
+                // Сдвиг вниз - только отрисовка (translate), раскладку не
+                // двигает: соседние слова не разъезжаются при подтверждении.
+                transform: Translate { y: chip.rise }
 
-                Behavior on softness {
+                Behavior on lit {
                     NumberAnimation {
                         duration: Theme.wordMs
                         easing.type: Easing.Bezier
                         easing.bezierCurve: Theme.easeOut
                     }
                 }
+                // Новое слово всплывает снизу на своё место; подтверждение
+                // «дозревает» коротким опусканием с ростом проявления.
                 Component.onCompleted: {
                     if (!root.animateWords) {
                         chip.enter = 1
                         return
                     }
+                    chip.enter = 0
+                    chip.rise = -Theme.wordRise
                     wordIn.start()
+                    wordRise.start()
+                }
+
+                // Однократное дозревание готового слова: из черновика в
+                // строку. Вызывается явно из confirmNext / small-wave пути.
+                function confirmIn() {
+                    chip.rise = Theme.confirmRise
+                    confirmFall.start()
                 }
 
                 NumberAnimation {
@@ -312,6 +335,24 @@ Item {
                     target: chip
                     property: "enter"
                     to: 1
+                    duration: Theme.wordMs
+                    easing.type: Easing.Bezier
+                    easing.bezierCurve: Theme.easeOut
+                }
+                NumberAnimation {
+                    id: wordRise
+                    target: chip
+                    property: "rise"
+                    to: 0
+                    duration: Theme.wordMs
+                    easing.type: Easing.Bezier
+                    easing.bezierCurve: Theme.easeOut
+                }
+                NumberAnimation {
+                    id: confirmFall
+                    target: chip
+                    property: "rise"
+                    to: 0
                     duration: Theme.wordMs
                     easing.type: Easing.Bezier
                     easing.bezierCurve: Theme.easeOut

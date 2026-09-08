@@ -167,13 +167,17 @@ Rectangle {
             }
 
             add: Transition {
-                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.baseMs }
-                NumberAnimation {
-                    property: "y"
-                    from: 18
-                    duration: Theme.slowMs
-                    easing.type: Easing.Bezier
-                    easing.bezierCurve: Theme.easeOut
+                // Готовая фраза не выпрыгивает: она проявляется на своём
+                // конечном месте, затем лента плавно сдвигается под неё.
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.baseMs; easing.type: Easing.Bezier; easing.bezierCurve: Theme.easeOut }
+                    NumberAnimation {
+                        property: "y"
+                        from: 26
+                        duration: Theme.slowMs
+                        easing.type: Easing.Bezier
+                        easing.bezierCurve: Theme.easeOut
+                    }
                 }
             }
             displaced: Transition {

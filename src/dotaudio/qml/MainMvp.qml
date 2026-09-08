@@ -387,8 +387,10 @@ ApplicationWindow {
                         Rectangle {
                             Layout.preferredWidth: 34
                             Layout.preferredHeight: 34
-                            radius: 12
+                            radius: Theme.radiusSm
                             color: Theme.text
+                            border.width: 1
+                            border.color: Theme.borderHi
                             Text {
                                 anchors.centerIn: parent
                                 text: ".а"
@@ -528,8 +530,29 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     spacing: Theme.gapMd
                     ColumnLayout {
+                        id: titleColumn
                         spacing: 2
                         opacity: root.pageFade
+                        // Заголовок приезжает со сменой раздела вместе с
+                        // содержимым, а не просто растворяется на месте.
+                        transform: Translate { y: titleColumn.titleRise }
+                        property real titleRise: 0
+                        Connections {
+                            target: root
+                            function onTargetPageIndexChanged() {
+                                titleColumn.titleRise = 8
+                                titleIn.restart()
+                            }
+                        }
+                        NumberAnimation {
+                            id: titleIn
+                            target: titleColumn
+                            property: "titleRise"
+                            to: 0
+                            duration: Theme.slowMs
+                            easing.type: Easing.Bezier
+                            easing.bezierCurve: Theme.easeOut
+                        }
                         Label {
                             text: ({
                                 live: "Живые субтитры",
@@ -893,15 +916,34 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
 
-                                Label {
+                                ColumnLayout {
                                     anchors.centerIn: parent
                                     width: Math.min(parent.width - 60, 360)
                                     visible: bridge.history.length === 0
-                                    horizontalAlignment: Text.AlignHCenter
-                                    wrapMode: Text.Wrap
-                                    text: "Сессии появятся здесь после первой диктовки, Live или разбора файла."
-                                    color: Theme.muted
-                                    font.pixelSize: Theme.fsBody
+                                    spacing: Theme.gapSm
+                                    Icon {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        name: "history"
+                                        ink: Theme.faint
+                                        width: 30
+                                        height: 30
+                                    }
+                                    Label {
+                                        Layout.fillWidth: true
+                                        horizontalAlignment: Text.AlignHCenter
+                                        text: "Пока нет сессий"
+                                        color: Theme.text
+                                        font.pixelSize: Theme.fsLead
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Label {
+                                        Layout.fillWidth: true
+                                        horizontalAlignment: Text.AlignHCenter
+                                        wrapMode: Text.Wrap
+                                        text: "Сессии появятся здесь после первой диктовки, Live или разбора файла."
+                                        color: Theme.muted
+                                        font.pixelSize: Theme.fsBody
+                                    }
                                 }
 
                                 ListView {

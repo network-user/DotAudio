@@ -337,7 +337,12 @@ Rectangle {
         enabled: shown
         opacity: shown ? 1 : 0
         scale: shown ? 1 : 0.97
+        // Смена фазы читается как лёгкий подъём новой панели: вместе с
+        // масштабом это отделяет морф контента от морфа самой геометрии.
+        transform: Translate { y: yShift }
+        property real yShift: 3
         z: 1
+        onShownChanged: yShift = shown ? 3 : 0
         Behavior on opacity {
             NumberAnimation {
                 duration: shown ? Theme.baseMs : Theme.fastMs
@@ -346,6 +351,13 @@ Rectangle {
             }
         }
         Behavior on scale {
+            NumberAnimation {
+                duration: Theme.baseMs
+                easing.type: Easing.Bezier
+                easing.bezierCurve: Theme.easeOut
+            }
+        }
+        Behavior on yShift {
             NumberAnimation {
                 duration: Theme.baseMs
                 easing.type: Easing.Bezier
@@ -402,8 +414,15 @@ Rectangle {
                 visible: bridge.recording
                 opacity: 0.25 + 0.5 * Theme.levelShape(bridge.level)
                 scale: 1 + 0.3 * Theme.levelShape(bridge.level)
-                Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
-                Behavior on opacity { NumberAnimation { duration: 120 } }
+                Behavior on scale {
+                    NumberAnimation {
+                        duration: Theme.fastMs
+                        easing.type: Easing.OutQuad
+                    }
+                }
+                Behavior on opacity {
+                    NumberAnimation { duration: Theme.fastMs }
+                }
             }
             Rectangle {
                 anchors.fill: parent

@@ -34,7 +34,7 @@ Item {
     Text {
         id: promoted
         objectName: "previousCaption"
-        visible: stage.showPrevious && stage.previous.length > 0
+        visible: stage.showPrevious && stage.previous.length > 0 && opacity > 0.01
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: live.top
@@ -48,7 +48,49 @@ Item {
         elide: Text.ElideRight
         maximumLineCount: 1
         wrapMode: Text.NoWrap
-        opacity: Theme.historyAlpha
+        opacity: stage.previous.length > 0 ? Theme.historyAlpha : 0
+        // Прежняя фраза не возникал внезапно: она проявляется с лёгким
+        // сдвигом вверх, как строка, уходящая в историю поверх сцены.
+        transform: Translate { y: promoted.riseAnim }
+        property real riseAnim: 2
+        Behavior on riseAnim {
+            NumberAnimation {
+                duration: Theme.promoteMs
+                easing.type: Easing.Bezier
+                easing.bezierCurve: Theme.easeOut
+            }
+        }
+        onTextChanged: if (stage.previous.length) {
+            promoted.opacity = 0
+            promoted.riseAnim = 8
+            promoteIn.restart()
+            promoteRise.restart()
+        }
+        Behavior on opacity {
+            NumberAnimation {
+                duration: Theme.promoteMs
+                easing.type: Easing.Bezier
+                easing.bezierCurve: Theme.easeOut
+            }
+        }
+        NumberAnimation {
+            id: promoteIn
+            target: promoted
+            property: "opacity"
+            to: Theme.historyAlpha
+            duration: Theme.promoteMs
+            easing.type: Easing.Bezier
+            easing.bezierCurve: Theme.easeOut
+        }
+        NumberAnimation {
+            id: promoteRise
+            target: promoted
+            property: "riseAnim"
+            to: 0
+            duration: Theme.promoteMs
+            easing.type: Easing.Bezier
+            easing.bezierCurve: Theme.easeOut
+        }
     }
 
     CaptionText {
