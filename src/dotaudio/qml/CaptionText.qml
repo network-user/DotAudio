@@ -1,10 +1,10 @@
 import QtQuick
 import "Theme.js" as Theme
 
-// Живая строка субтитра. Текст растёт словами: подтверждённый префикс
-// остаётся на месте и не анимируется повторно, а уточняемый хвост
-// приглушён. Перенос строки и сдвиг слов при новом переносе - анимация
-// позиции, а не мгновенный прыжок.
+// Живая строка субтитра. Подтверждённые слова застывают на своих местах:
+// переписанный хвост меняет текст на месте, не сдвигая уже прочитанное и
+// не пересобирая строку заново. Строка едет вверх только когда появляется
+// новая строка, а не на каждом черновике.
 Item {
     id: root
 
@@ -18,28 +18,45 @@ Item {
     property color ink: Theme.text
     property real pendingOpacity: Theme.pendingAlpha
     property int maxLines: 2
-    property int align: Text.AlignHCenter
-    property real lineHeightFactor: 1.26
+    property int align: Text.AlignLeft
+    property real lineHeightFactor: Theme.captionLineFactor
     property bool animateWords: true
 
     readonly property real lineHeight: Math.round(pixelSize * lineHeightFactor)
-    readonly property real spaceWidth: Math.max(3, spacedMetrics.advanceWidth - tightMetrics.advanceWidth)
+    // Пробел берётся из метрик шрифта, но если метрика недоступна, ширина
+    // считается от кегля: без этого слова слипались в одну строку.
+    readonly property real spaceWidth: {
+        var measured = spacedMetrics.advanceWidth - tightMetrics.advanceWidth
+        return measured > 1 ? measured : Math.round(pixelSize * 0.28)
+    }
     readonly property bool empty: words.count === 0
 
     property int lineCount: 1
-    property int sequence: 0
+    property int firstWordIndex: 0
+    // Слово с индексом ниже frozenCount уже стоит на своём месте: позиция
+    // переживает любой черновик, живой хвост продолжается от его конца.
+    property int frozenCount: 0
+    // Индексы слов, ожидающих подтверждения волной.
+    property var confirmQueue: []
+    property int confirmStep: 24
 
-    implicitHeight: lineHeight * Math.min(maxLines, Math.max(1, lineCount))
+    implicitHeight: lineHeight * Math.max(1, maxLines)
     clip: true
 
-    onConfirmedChanged: root.sync()
-    onPendingChanged: root.sync()
-    onTextChanged: root.sync()
-    onWidthChanged: Qt.callLater(root.relayout)
-    onPixelSizeChanged: Qt.callLater(root.relayout)
+    // Один сигнал контроллера меняет обе привязки. Промежуточный снимок
+    // содержит старый pending и новый confirmed и не должен попасть в модель.
+    onConfirmedChanged: Qt.callLater(root.sync)
+    onPendingChanged: Qt.callLater(root.sync)
+    onTextChanged: Qt.callLater(root.sync)
+    // Смена ширины или шрифта недействительна для всех застывших позиций.
+    onWidthChanged: root.reflowAll()
+    onPixelSizeChanged: root.reflowAll()
+    onWeightChanged: root.reflowAll()
+    onLineHeightChanged: root.reflowAll()
+    onSpaceWidthChanged: root.reflowAll()
     onMaxLinesChanged: Qt.callLater(root.relayout)
     onAlignChanged: Qt.callLater(root.relayout)
-    Component.onCompleted: root.sync()
+    Component.onCompleted: Qt.callLater(root.sync)
 
     ListModel { id: words }
 
@@ -57,6 +74,14 @@ Item {
         font.pixelSize: root.pixelSize
         font.weight: root.weight
         text: "н н"
+    }
+
+    Timer {
+        id: confirmTicker
+        interval: root.confirmStep > 0 ? root.confirmStep : 24
+        repeat: true
+        running: false
+        onTriggered: root.confirmNext()
     }
 
     function split(value) {
@@ -82,68 +107,151 @@ Item {
         return out
     }
 
-    // Обновление без пересборки: совпадающий префикс переиспользуется, и
-    // его слова не проигрывают появление снова. Меняется только состояние
-    // "уточняется / подтверждено" и добавляется новый хвост.
-    function sync() {
-        var next = root.tokens()
-        var keep = 0
-        while (keep < words.count && keep < next.length && words.get(keep).token === next[keep].token) {
-            if (words.get(keep).soft !== next[keep].soft)
-                words.setProperty(keep, "soft", next[keep].soft)
-            keep++
-        }
-        while (words.count > keep)
-            words.remove(words.count - 1)
-        for (var i = keep; i < next.length; i++) {
-            words.append({
-                "token": next[i].token,
-                "soft": next[i].soft,
-                "seq": i - keep
-            })
-        }
+    function comparable(value) {
+        // Пунктуация и регистр часто уточняются при финализации фразы.
+        return String(value).toLowerCase().replace(/[.,!?;:…«»\"“”()[\]{}]+/g, "")
+    }
+
+    function reflowAll() {
+        root.frozenCount = 0
         Qt.callLater(root.relayout)
     }
 
+    // Обновление без пересборки: совпадающий префикс переиспользуется, его
+    // слова не проигрывают появление снова. Переписанный хвост меняет текст
+    // в уже существующих словах, поэтому черновик не мигает всей строкой.
+    function sync() {
+        var next = root.tokens()
+        // История остаётся в контроллере; сцене нужен только конец фразы.
+        var first = Math.max(0, next.length - Theme.captionWordLimit)
+        next = next.slice(first)
+        if (first !== root.firstWordIndex) {
+            var dropped = first - root.firstWordIndex
+            if (dropped > 0 && dropped < words.count)
+                words.remove(0, dropped)
+            else
+                words.clear()
+            root.firstWordIndex = first
+        }
+        var keep = 0
+        var wave = []
+        while (keep < words.count && keep < next.length
+               && root.comparable(words.get(keep).token) === root.comparable(next[keep].token)) {
+            if (words.get(keep).token !== next[keep].token)
+                words.setProperty(keep, "token", next[keep].token)
+            if (words.get(keep).soft !== next[keep].soft) {
+                if (!next[keep].soft)
+                    wave.push(keep)
+                else
+                    words.setProperty(keep, "soft", next[keep].soft)
+            }
+            keep++
+        }
+        var overlap = Math.min(next.length, words.count) - keep
+        for (var r = 0; r < overlap; r++) {
+            var idx = keep + r
+            if (words.get(idx).token !== next[idx].token)
+                words.setProperty(idx, "token", next[idx].token)
+            if (words.get(idx).soft !== next[idx].soft) {
+                if (!next[idx].soft)
+                    wave.push(idx)
+                else
+                    words.setProperty(idx, "soft", next[idx].soft)
+            }
+        }
+        if (words.count > keep + overlap)
+            words.remove(keep + overlap, words.count - keep - overlap)
+        for (var i = keep + overlap; i < next.length; i++) {
+            words.append({
+                "token": next[i].token,
+                "soft": next[i].soft
+            })
+        }
+        // Крупное подтверждение читается волной по словам: взгляд видит,
+        // какие слова финализированы, а не ловит мгновенную смену строки.
+        root.confirmQueue = []
+        if (wave.length > Theme.confirmWaveWords) {
+            root.confirmStep = Math.max(16, Math.min(48, Math.round(360 / wave.length)))
+            root.confirmQueue = wave
+        } else {
+            for (var w = 0; w < wave.length; w++)
+                words.setProperty(wave[w], "soft", false)
+        }
+        confirmTicker.running = root.confirmQueue.length > 0
+        root.frozenCount = keep
+        root.relayout()
+    }
+
+    function confirmNext() {
+        while (root.confirmQueue.length) {
+            var idx = root.confirmQueue.shift()
+            if (idx < words.count && words.get(idx).soft) {
+                words.setProperty(idx, "soft", false)
+                break
+            }
+        }
+        confirmTicker.running = root.confirmQueue.length > 0
+    }
+
+    // Раскладка инкрементальная: застывшие слова задают точку продолжения,
+    // живой хвост заполняет строку дальше и переносится, когда она полна.
     function relayout() {
         if (root.width <= 1)
             return
-        var lines = []
-        var current = []
-        var lineWidth = 0
+        var row = 0
+        var x = 0
+        var placed = []
+        var frozen = Math.min(root.frozenCount, rows.count)
         for (var i = 0; i < rows.count; i++) {
             var chip = rows.itemAt(i)
             if (!chip)
                 continue
-            var chipWidth = chip.implicitWidth
-            if (current.length && lineWidth + root.spaceWidth + chipWidth > root.width) {
-                lines.push({ "items": current, "width": lineWidth })
-                current = []
-                lineWidth = 0
+            if (i < frozen) {
+                row = Math.round(chip.y / root.lineHeight)
+                x = chip.x + chip.width + root.spaceWidth
+            } else {
+                var chipWidth = Math.min(root.width, chip.implicitWidth)
+                if (x > 0 && x + chipWidth > root.width) {
+                    row++
+                    x = 0
+                }
+                chip.x = Math.round(x)
+                chip.y = Math.round(row * root.lineHeight)
+                x += chipWidth + root.spaceWidth
             }
-            if (current.length)
-                lineWidth += root.spaceWidth
-            current.push({ "chip": chip, "offset": lineWidth })
-            lineWidth += chipWidth
+            placed.push({ "chip": chip, "row": row })
         }
-        if (current.length)
-            lines.push({ "items": current, "width": lineWidth })
-        root.lineCount = Math.max(1, lines.length)
-        for (var l = 0; l < lines.length; l++) {
-            var slack = Math.max(0, root.width - lines[l].width)
-            var indent = root.align === Text.AlignHCenter ? slack / 2
-                       : root.align === Text.AlignRight ? slack : 0
-            for (var k = 0; k < lines[l].items.length; k++) {
-                var item = lines[l].items[k]
-                var placed = item.chip.placed
-                item.chip.x = Math.round(indent + item.offset)
-                item.chip.y = Math.round(l * root.lineHeight)
-                if (!placed)
-                    item.chip.placed = true
-            }
-        }
+        var lines = row + 1
+        root.lineCount = Math.max(1, lines)
         // Видны последние maxLines строк: сцена уезжает вверх, как лента.
-        flow.shift = -Math.max(0, lines.length - root.maxLines) * root.lineHeight
+        var visibleFrom = Math.max(0, lines - Math.max(1, root.maxLines))
+        for (var k = 0; k < placed.length; k++)
+            placed[k].chip.visible = placed[k].row >= visibleFrom
+        if (root.align !== Text.AlignLeft)
+            root.indentRows(placed, lines)
+        flow.shift = -Math.max(0, lines - Math.max(1, root.maxLines)) * root.lineHeight
+    }
+
+    function indentRows(placed, lines) {
+        var widths = []
+        for (var l = 0; l < lines; l++)
+            widths.push({ "min": -1, "max": 0 })
+        for (var k = 0; k < placed.length; k++) {
+            var row = placed[k].row
+            var chip = placed[k].chip
+            if (widths[row].min < 0 || chip.x < widths[row].min)
+                widths[row].min = chip.x
+            widths[row].max = Math.max(widths[row].max, chip.x + chip.width)
+        }
+        for (var n = 0; n < placed.length; n++) {
+            var item = placed[n]
+            var extent = widths[item.row]
+            if (extent.min < 0)
+                continue
+            var slack = Math.max(0, root.width - (extent.max - extent.min))
+            var indent = root.align === Text.AlignHCenter ? slack / 2 : slack
+            item.chip.x = Math.round(item.chip.x + indent - extent.min)
+        }
     }
 
     Item {
@@ -152,6 +260,8 @@ Item {
         height: root.lineHeight * Math.max(1, root.lineCount)
         property real shift: 0
         y: shift
+        // Сдвиг происходит один раз на новую строку, поэтому лента едет
+        // спокойно, а не дёргается на каждом черновике.
         Behavior on y {
             NumberAnimation {
                 duration: Theme.reflowMs
@@ -168,86 +278,43 @@ Item {
                 id: chip
                 required property string token
                 required property bool soft
-                required property int seq
-
-                property bool placed: false
                 property real enter: root.animateWords ? 0 : 1
-                property real rise: 0
                 property real softness: chip.soft ? root.pendingOpacity : 1
 
+                objectName: "captionWord"
                 text: chip.token
+                width: Math.min(root.width, implicitWidth)
+                elide: Text.ElideRight
                 color: root.ink
                 font.family: Theme.fontFamily
                 font.pixelSize: root.pixelSize
+                // Подтверждение не меняет ширину слова и переносы строк.
                 font.weight: root.weight
                 opacity: chip.softness * chip.enter
-                transform: Translate { y: chip.rise }
 
                 Behavior on softness {
                     NumberAnimation {
-                        duration: Theme.baseMs
+                        duration: Theme.wordMs
                         easing.type: Easing.Bezier
                         easing.bezierCurve: Theme.easeOut
                     }
                 }
-                Behavior on x {
-                    enabled: chip.placed
-                    NumberAnimation {
-                        duration: Theme.reflowMs
-                        easing.type: Easing.Bezier
-                        easing.bezierCurve: Theme.easeOut
-                    }
-                }
-                Behavior on y {
-                    enabled: chip.placed
-                    NumberAnimation {
-                        duration: Theme.reflowMs
-                        easing.type: Easing.Bezier
-                        easing.bezierCurve: Theme.easeOut
-                    }
-                }
-
                 Component.onCompleted: {
                     if (!root.animateWords) {
                         chip.enter = 1
                         return
                     }
-                    chip.rise = Math.round(root.pixelSize * 0.4)
-                    chip.scale = 0.94
                     wordIn.start()
                 }
 
-                SequentialAnimation {
+                NumberAnimation {
                     id: wordIn
-                    PauseAnimation {
-                        duration: Math.min(Theme.wordStaggerCapMs, Math.max(0, chip.seq) * Theme.wordStaggerMs)
-                    }
-                    ParallelAnimation {
-                        NumberAnimation {
-                            target: chip
-                            property: "enter"
-                            to: 1
-                            duration: Theme.wordMs
-                            easing.type: Easing.Bezier
-                            easing.bezierCurve: Theme.easeOut
-                        }
-                        NumberAnimation {
-                            target: chip
-                            property: "rise"
-                            to: 0
-                            duration: Theme.wordMs
-                            easing.type: Easing.Bezier
-                            easing.bezierCurve: Theme.easeOut
-                        }
-                        NumberAnimation {
-                            target: chip
-                            property: "scale"
-                            to: 1
-                            duration: Theme.wordMs
-                            easing.type: Easing.Bezier
-                            easing.bezierCurve: Theme.easeOut
-                        }
-                    }
+                    target: chip
+                    property: "enter"
+                    to: 1
+                    duration: Theme.wordMs
+                    easing.type: Easing.Bezier
+                    easing.bezierCurve: Theme.easeOut
                 }
             }
         }

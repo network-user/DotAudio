@@ -1,3 +1,5 @@
+import time
+
 from dotaudio.capture import next_live_source
 from dotaudio.controller import (
     DEFAULTS,
@@ -5,6 +7,7 @@ from dotaudio.controller import (
     MODEL_BY_PROFILE,
     STATUS_LABELS,
     Controller,
+    sensitivity_label,
 )
 from dotaudio.engine import Engine
 
@@ -12,6 +15,14 @@ from dotaudio.engine import Engine
 class _Signal:
     def emit(self, *_args) -> None:
         pass
+
+
+class _Counting:
+    def __init__(self) -> None:
+        self.count = 0
+
+    def emit(self, *_args) -> None:
+        self.count += 1
 
 
 def test_live_source_defaults_to_system_audio() -> None:
@@ -27,6 +38,14 @@ def test_caption_overlay_settings_are_local_and_sized() -> None:
     assert DEFAULTS["caption_overlay"] is True
     assert DEFAULTS["caption_size"] == "md"
     assert DEFAULTS["caption_contrast"] == "normal"
+
+
+def test_segments_have_a_dedicated_qt_notify_signal() -> None:
+    """Frequent Live status updates must not rebuild the whole transcript list."""
+    meta = Controller.staticMetaObject
+    prop = meta.property(meta.indexOfProperty("segments"))
+
+    assert bytes(prop.notifySignal().name()).decode() == "segmentsChanged"
 
 
 def test_engine_statuses_have_russian_labels() -> None:
@@ -98,6 +117,106 @@ def test_late_live_final_does_not_replace_a_newer_preview() -> None:
     assert controller._confirmed_caption == "новая фраза"
     assert controller._partial_caption == "продолжается"
     assert controller._caption_revision == 3
+
+
+def test_live_decode_statuses_do_not_touch_interface_bindings() -> None:
+    """A decode pair arrives twice a second; only the phase may react to it."""
+
+    controller = type("ControllerState", (), {})()
+    controller._jobs = {"live": {"mode": "live"}}
+    controller.liveActive = True
+    controller.recording = True
+    controller._live_phase = "speech"
+    controller._live_diagnostic = ""
+    controller._status = "Слушаю"
+    controller._last_status = ""
+    controller._record_log = lambda *_args: None
+    controller.changed = _Counting()
+    controller.liveStateChanged = _Counting()
+
+    for _ in range(3):
+        Controller._set_status(controller, "transcribing_cpu")
+        Controller._set_status(controller, "completed")
+
+    assert controller._live_phase == "listening"
+    assert controller._status == "Слушаю"
+    assert controller.changed.count == 0
+    assert controller.liveStateChanged.count == 6
+
+    Controller._set_status(controller, "live_slow")
+    assert controller._live_diagnostic == "live_slow"
+    assert controller._status == STATUS_LABELS["live_slow"]
+    assert controller.changed.count == 1
+
+
+def test_live_sensitivity_stays_speech_outside_live() -> None:
+    controller = type("ControllerState", (), {})()
+    controller._settings = {
+        key: DEFAULTS[key]
+        for key in ("model", "device", "language", "task", "backend", "server_url", "profile", "live_sensitivity")
+    }
+    controller._settings["live_sensitivity"] = "everything"
+    controller.dictionary = []
+
+    live = Controller._config(controller, live_stream=True)
+    dictation = Controller._config(controller)
+
+    assert live.live_sensitivity == "everything"
+    # Диктовка и медиа не имеют своего «всё подряд»: настройка только для Live.
+    assert dictation.live_sensitivity == "speech"
+
+
+def test_sensitivity_label_and_toggle_round_trip() -> None:
+    # Настоящий класс без __init__: методу toggle нужен self.setSetting.
+    controller = Controller.__new__(Controller)
+    controller._jobs = {}
+    controller._settings = dict(DEFAULTS)
+    controller.store = type("Store", (), {"save_settings": staticmethod(lambda _s: None)})()
+    controller._record_log = lambda *_args: None
+    controller.changed = _Signal()
+
+    assert sensitivity_label(controller._settings["live_sensitivity"]) == "Речь"
+    Controller.toggleLiveSensitivity(controller)
+    assert controller._settings["live_sensitivity"] == "everything"
+    assert sensitivity_label(controller._settings["live_sensitivity"]) == "Всё"
+    Controller.toggleLiveSensitivity(controller)
+    assert controller._settings["live_sensitivity"] == "speech"
+
+
+def test_unrecognized_sound_is_named_and_silence_clears_captions() -> None:
+    controller = type("ControllerState", (), {})()
+    controller._jobs = {"live": {"mode": "live"}}
+    controller.liveActive = True
+    controller.recording = True
+    controller._capture_started_at = time.monotonic() - 30
+    controller._level = 0.5
+    controller._last_signal_at = time.monotonic() - 1
+    controller._last_caption_at = time.monotonic() - 30
+    controller._live_diagnostic = ""
+    controller.displayCaption = "старая фраза"
+    controller._confirmed_caption = "старая фраза"
+    controller._partial_caption = ""
+    controller._partial_end = 9.0
+    controller._caption_revision = 0
+    controller.captionChanged = _Counting()
+    controller.liveStateChanged = _Counting()
+
+    # Громкий звук полминуты без единой распознанной фразы: сказать об этом.
+    Controller._update_live_sound_status(controller)
+    assert controller._live_diagnostic == "live_unrecognized"
+    assert controller.liveStateChanged.count == 1
+    assert controller.captionChanged.count == 0
+
+    # Звук кончился: Diagnostic гаснет, а после паузы экран освобождается.
+    controller._level = 0.0
+    controller._last_signal_at = time.monotonic() - 5
+    Controller._update_live_sound_status(controller)
+    assert controller._live_diagnostic == ""
+    assert controller._confirmed_caption == ""
+    assert controller._partial_caption == ""
+    assert controller._partial_end == 0.0
+    assert controller._caption_revision == 1
+    assert controller.captionChanged.count == 1
 
 
 def test_force_stop_releases_cancelled_jobs_without_waiting_for_timer() -> None:

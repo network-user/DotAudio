@@ -46,7 +46,7 @@ Switch {
         leftPadding: control.indicator.width + control.spacing
         text: control.text
         color: control.enabled ? Theme.text : Theme.muted
-        font.pixelSize: 12
+        font.pixelSize: Theme.fsLabel
         font.family: Theme.fontFamily
         verticalAlignment: Text.AlignVCenter
         wrapMode: Text.Wrap

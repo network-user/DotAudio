@@ -12,6 +12,7 @@ from typing import Any, Callable
 import numpy as np
 
 from dotaudio.engine import Engine, RecognitionConfig
+from dotaudio.engine import stem as _stem
 
 SAMPLE_RATE = 16000
 LIVE_SPEECH_THRESHOLD = 0.0015
@@ -37,6 +38,12 @@ PHRASE_SPLIT_SECONDS = 0.12
 # enough to decode in one window.
 FINAL_MERGE_GAP_SECONDS = 0.5
 FINAL_MERGE_LIMIT_SECONDS = 15.0
+# A phrase shorter than this is not enough for the decoder on its own: measured,
+# a half second scrap of real speech comes back as "Cutie" and is then rejected
+# as a guess.  Such a phrase is recognised together with the end of the phrase
+# before it, and the words that repeat are removed afterwards.
+SHORT_FINAL_SECONDS = 1.2
+PHRASE_CONTEXT_SECONDS = 2.0
 
 DICTATION_PREVIEW_MIN_SECONDS = 0.8
 DICTATION_PREVIEW_INTERVAL_SECONDS = 0.8
@@ -81,6 +88,7 @@ class VoiceActivity:
         samples = np.concatenate((self._pending, np.asarray(audio, dtype=np.float32).reshape(-1)))
         usable = len(samples) - len(samples) % self.FRAME
         self._pending = samples[usable:]
+        heard_speech = self.speaking if not usable else False
         for start in range(0, usable, self.FRAME):
             frame = samples[start : start + self.FRAME].reshape(1, -1)
             batch = np.ascontiguousarray(np.concatenate((self._context, frame), axis=1))
@@ -90,7 +98,11 @@ class VoiceActivity:
             self._context = frame[:, -self.CONTEXT :]
             score = float(np.asarray(output).reshape(-1)[0])
             self.speaking = score >= (self.release if self.speaking else self.threshold)
-        return self.speaking
+            heard_speech = heard_speech or self.speaking
+        # Endpointing consumes a whole capture block. A quiet final frame must
+        # not erase speech heard earlier in that same block. The recurrent
+        # state still follows the last frame for the next call's hysteresis.
+        return heard_speech
 
 
 def open_voice_activity():
@@ -129,6 +141,7 @@ class SpeechBuffer:
         # instead of in the middle of a word.  Without this the caption ends on
         # "без видеокар" and the next one opens with the leftover syllable.
         self.split_limit = int(PHRASE_SPLIT_SECONDS * SAMPLE_RATE)
+        self.context_limit = int(PHRASE_CONTEXT_SECONDS * SAMPLE_RATE)
         self.position = 0
         self.start = 0
         self.frames = []
@@ -137,6 +150,12 @@ class SpeechBuffer:
         self.split = 0
         self.pre = deque()
         self.pre_size = 0
+        # The end of the phrase emitted before the current one, kept so a short
+        # phrase can be recognised with something in front of it.
+        self.lead = np.zeros(0, dtype=np.float32)
+        self.lead_end = 0.0
+        self._context = np.zeros(0, dtype=np.float32)
+        self._context_end = 0.0
 
     def feed(self, audio):
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
@@ -179,9 +198,17 @@ class SpeechBuffer:
     def flush(self):
         if not self.frames:
             return None
-        result = (self.start / SAMPLE_RATE, np.concatenate(self.frames))
+        start, audio = self.start / SAMPLE_RATE, np.concatenate(self.frames)
+        self._remember(start, audio)
         self._reset()
-        return result
+        return (start, audio)
+
+    def _remember(self, start, audio):
+        """Carry the end of an emitted phrase forward as context."""
+
+        self.lead, self.lead_end = self._context, self._context_end
+        self._context = audio[-self.context_limit :].copy()
+        self._context_end = start + len(audio) / SAMPLE_RATE
 
     def flush_at_limit(self):
         """Emit up to the last pause and keep the rest as the next phrase.
@@ -200,6 +227,7 @@ class SpeechBuffer:
         head, tail = audio[:split], audio[split:]
         start = self.start
         quiet = self.quiet
+        self._remember(start / SAMPLE_RATE, head)
         self._reset()
         # The trailing pause belongs to the audio that is kept, so the next
         # phrase is still endpointed by the silence the speaker is making now.
@@ -301,6 +329,8 @@ class LiveSession:
         self._last_preview_text = ""
         self._stable_prefix = ""
         self._last_preview_offset = None
+        self._last_final_text = ""
+        self._slow_reported = False
         self._worker_started = False
         self._done_emitted = False
         self.thread = Thread(target=self._run, name="dotaudio-recognize", daemon=True)
@@ -364,6 +394,7 @@ class LiveSession:
                 self._schedule_preview()
 
     def _enqueue_final(self, chunk):
+        chunk = (*chunk, self._lead_for(chunk))
         # A final result supersedes any preview waiting for the same utterance.
         # A queued final has not produced text yet. In Live retain a result
         # already decoding across this boundary, or slow inference can emit
@@ -413,18 +444,41 @@ class LiveSession:
                 else:
                     chunk = merged
 
+    def _lead_for(self, chunk):
+        """Audio to put in front of a phrase too short to recognise alone.
+
+        Only the end of the phrase immediately before qualifies: context from
+        somewhere else in the recording would put words in the caption that
+        nobody said next to these.
+        """
+
+        offset, audio = chunk
+        if len(audio) >= int(SHORT_FINAL_SECONDS * SAMPLE_RATE):
+            return None
+        lead = self.buffer.lead
+        if lead is None or not len(lead):
+            return None
+        if abs(offset - self.buffer.lead_end) > FINAL_MERGE_GAP_SECONDS:
+            return None
+        return lead
+
     @staticmethod
     def _merge_finals(waiting, arriving):
         """Join two queued phrases, or return None if they must stay apart."""
 
-        start, audio = waiting
-        next_start, next_audio = arriving
+        start, audio, lead = waiting
+        next_start, next_audio, _next_lead = arriving
         gap = next_start - (start + len(audio) / SAMPLE_RATE)
         if not -FINAL_MERGE_GAP_SECONDS <= gap <= FINAL_MERGE_GAP_SECONDS:
             return None
-        if len(audio) + len(next_audio) > int(FINAL_MERGE_LIMIT_SECONDS * SAMPLE_RATE):
+        joined = len(audio) + len(next_audio)
+        if joined > int(FINAL_MERGE_LIMIT_SECONDS * SAMPLE_RATE):
             return None
-        return (start, np.concatenate((audio, next_audio)))
+        if joined >= int(SHORT_FINAL_SECONDS * SAMPLE_RATE):
+            # Long enough to stand on its own now, so it no longer needs the
+            # phrase before it for context.
+            lead = None
+        return (start, np.concatenate((audio, next_audio)), lead)
 
     def _discard_queued_finals(self):
         while True:
@@ -472,15 +526,37 @@ class LiveSession:
         if not self.catch_up:
             return self._preview_interval_samples
         measured = int(self._decode_seconds * LIVE_PREVIEW_DUTY * SAMPLE_RATE)
-        return max(self._preview_interval_samples, measured)
+        # Every final restarts the phrase clock. An unbounded interval can
+        # become longer than a phrase, permanently disabling all previews
+        # after one slow decode. Queued snapshots already coalesce, so cap the
+        # cadence to leave a refresh opportunity inside each full phrase.
+        ceiling = max(self._preview_interval_samples, self.buffer.limit // 2)
+        return min(ceiling, max(self._preview_interval_samples, measured))
 
-    def _note_decode(self, seconds):
-        """Follow the measured decode time, favouring the recent past."""
+    def _note_decode(self, seconds, audio_seconds=0.0, *, preview=True):
+        """Follow the measured decode time, favouring the recent past.
 
-        if self._decode_seconds <= 0.0:
-            self._decode_seconds = seconds
-        else:
-            self._decode_seconds += (seconds - self._decode_seconds) * 0.3
+        A machine that spends longer on a window than the window lasts can
+        never catch up: previews thin out and the phrase arrives late.  That is
+        worth saying once, from the measurement rather than from a guess about
+        the hardware.
+        """
+
+        if preview:
+            # A merged final can contain 15 seconds of sound. Its cost does
+            # not predict the cost of the next short rolling preview.
+            if self._decode_seconds <= 0.0:
+                self._decode_seconds = seconds
+            else:
+                self._decode_seconds += (seconds - self._decode_seconds) * 0.3
+        if (
+            self.catch_up
+            and not self._slow_reported
+            and audio_seconds > 0.0
+            and seconds > audio_seconds
+        ):
+            self._slow_reported = True
+            self.on_status("live_slow")
 
     def _clear_preview(self, *, invalidate=True):
         with self._preview_lock:
@@ -517,8 +593,7 @@ class LiveSession:
         # Finals must make progress even while capture keeps replacing previews.
         # Catch-up already bounds this queue to the newest unstarted phrase.
         try:
-            offset, audio = self.queue.get_nowait()
-            return "final", (offset, audio)
+            return "final", self.queue.get_nowait()
         except Empty:
             pass
         with self._preview_lock:
@@ -594,7 +669,7 @@ class LiveSession:
         result = self.engine.transcribe(
             audio, self.preview_config, self.cancel, collect, self.on_status
         )
-        self._note_decode(monotonic() - started)
+        self._note_decode(monotonic() - started, len(audio) / SAMPLE_RATE)
         if not received and result:
             received.extend(dict(segment) for segment in result)
         if not self._preview_can_emit(generation):
@@ -608,8 +683,10 @@ class LiveSession:
             self._last_preview_offset = offset
         agreed = self._common_word_prefix(self._last_preview_text, text)
         self._last_preview_text = text
-        if agreed.startswith(self._stable_prefix):
-            self._stable_prefix = agreed
+        # Agreement can grow while the decoder preserves the same words. If
+        # it revises them, the old prefix is no longer confirmed: publishing
+        # it beside the new hypothesis would splice two different sentences.
+        self._stable_prefix = agreed
         stable_text = self._stable_prefix
         final_end = offset + len(audio) / SAMPLE_RATE
         try:
@@ -624,28 +701,82 @@ class LiveSession:
             # A closed QML object must not stop recording or finalisation.
             return
 
-    def _transcribe_final(self, offset, audio):
+    def _transcribe_final(self, offset, audio, lead=None):
         self._last_preview_text = ""
         self._stable_prefix = ""
         self._last_preview_offset = None
         emitted = False
+        end = offset + len(audio) / SAMPLE_RATE
 
         def emit(segment):
             nonlocal emitted
-            if not self.cancel.is_set():
+            if not self.cancel.is_set() and str(segment.get("text", "")).strip():
                 emitted = True
+                self._last_final_text = str(segment["text"]).strip()
                 self.on_segment({
                     **segment,
                     "start": segment["start"] + offset,
                     "end": segment["end"] + offset,
-                    "audio_end": offset + len(audio) / SAMPLE_RATE,
+                    "audio_end": end,
                 })
 
         started = monotonic()
-        self.engine.transcribe(audio, self.config, self.cancel, emit, self.on_status)
-        self._note_decode(monotonic() - started)
+        if lead is None:
+            self.engine.transcribe(audio, self.config, self.cancel, emit, self.on_status)
+        else:
+            text = self._drop_lead(self._last_final_text, self._decode(lead, audio))
+            if text is None:
+                # The two decodes disagree about the shared audio, so which
+                # words are new cannot be told.  Ask again about the phrase
+                # alone: that is what would have happened without the context,
+                # and it cannot repeat text the user is already reading.
+                text = self._decode(None, audio)
+            if text:
+                emit({"start": 0.0, "end": len(audio) / SAMPLE_RATE, "text": text})
+        self._note_decode(monotonic() - started, len(audio) / SAMPLE_RATE, preview=False)
         if self.catch_up and not emitted and not self.cancel.is_set():
             self.on_status("live_no_text")
+
+    def _decode(self, lead, audio):
+        window = audio if lead is None else np.concatenate((lead, audio))
+        collected: list[dict[str, Any]] = []
+        result = self.engine.transcribe(
+            window, self.config, self.cancel, collected.append, self.on_status
+        )
+        if not collected and result:
+            collected.extend(dict(segment) for segment in result)
+        return self._text(collected)
+
+    @staticmethod
+    def _drop_lead(previous, text):
+        """Remove from ``text`` the words that already ended ``previous``.
+
+        The window was widened with audio that has been recognised once
+        already, so its words come back a second time.  They are matched on
+        stems, because the same speech decoded inside a longer window comes
+        back in a different form often enough: "чак-чак" against "чак чак".
+
+        The phrase before was cut where the speaker paused, which can fall
+        inside a word: "чак-чак" ended one caption as "ч".  So the last words of
+        ``previous`` are allowed to be missing from the match, and the words
+        they stand for are removed from the result as well.
+
+        Returns None when no repetition is found at all, which means the two
+        decodes did not agree and the caller must decide what to do.
+        """
+
+        words = text.split()
+        if not previous or not words:
+            return text
+        old = [_stem(word) for word in previous.split()]
+        new = [_stem(word) for word in words]
+        for cut in (0, 1, 2):
+            head = old[: len(old) - cut] if cut else old
+            floor = 1 if cut == 0 else 2
+            for size in range(min(len(head), len(new)), floor - 1, -1):
+                if head[-size:] == new[:size]:
+                    return " ".join(words[size + cut :]).strip()
+        return None
 
     def _run(self):
         error = ""

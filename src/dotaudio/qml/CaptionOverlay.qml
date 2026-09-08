@@ -57,9 +57,8 @@ Window {
     }
     readonly property int captionSize: bridge.settings.caption_size === "lg" ? 44
                                      : bridge.settings.caption_size === "sm" ? 24 : 34
-    readonly property int stageHeight: Math.round(captionSize * 1.26 * 2
-                                                  + captionSize * 0.46 * 1.3
-                                                  + captionSize * 0.34)
+    // Место под текст сцена считает сама: формула высоты живёт в одном месте.
+    readonly property int stageHeight: stage.implicitHeight
     readonly property bool highContrast: String(bridge.settings.caption_contrast) === "high"
 
     function placeOnScreen() {
@@ -186,20 +185,21 @@ Window {
         }
 
         CaptionStage {
+            id: stage
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom
             anchors.leftMargin: 22
             anchors.rightMargin: 22
             anchors.bottomMargin: 20
-            height: overlay.stageHeight
+            height: implicitHeight
             previous: overlay.previousText
             confirmed: bridge.confirmedCaption
             pending: bridge.partialCaption
             placeholder: bridge.liveActive ? bridge.liveStatusText : ""
             pixelSize: overlay.captionSize
             maxLines: 2
-            align: Text.AlignHCenter
+            align: Text.AlignLeft
             ink: overlay.highContrast ? "#ffffff" : Theme.text
             mutedInk: overlay.highContrast ? "#d8d8d4" : Theme.muted
         }

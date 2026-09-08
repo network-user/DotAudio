@@ -12,6 +12,9 @@ Python 3.12/3.13, PySide6, faster-whisper; приложение находитс
 Тесты: `.venv\Scripts\python.exe -m pytest -q`.
 Lint: `.venv\Scripts\python.exe -m ruff check src tests`.
 
+Визуальные токены и движение - `src/dotaudio/qml/Theme.js`; в компонентах
+не задавать свои цвета и длительности.
+
 При глобальных изменениях обновляй README через `generate-readme`,
 правила через `sync-project-rules`. Соблюдай ограничения пользователя
 на чтение секретов, удаление файлов и Git-операции из AGENTS.md.

@@ -11,7 +11,7 @@ ComboBox {
     implicitHeight: 34
     hoverEnabled: true
     font.family: Theme.fontFamily
-    font.pixelSize: 12
+    font.pixelSize: Theme.fsLabel
 
     contentItem: Text {
         leftPadding: 13
@@ -63,7 +63,7 @@ ComboBox {
             text: control.textRole ? option.model[control.textRole] : option.model
             color: control.currentIndex === option.index ? Theme.text : Theme.muted
             font.family: Theme.fontFamily
-            font.pixelSize: 12
+            font.pixelSize: Theme.fsLabel
             verticalAlignment: Text.AlignVCenter
             elide: Text.ElideRight
         }

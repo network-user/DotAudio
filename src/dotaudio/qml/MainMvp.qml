@@ -1,3 +1,4 @@
+import QtQml
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -30,8 +31,12 @@ ApplicationWindow {
     }
     width: shellMode === "app" ? 1220 : shellMode === "theater" ? 740 : islandW
     height: shellMode === "app" ? 790 : shellMode === "theater" ? 420 : islandH
-    minimumWidth: shellMode === "app" ? 1000 : 180
-    minimumHeight: shellMode === "app" ? 660 : 40
+    // Минимум один на все оболочки. Прежний минимум полного окна успевал
+    // зажать высоту раньше, чем менялся режим, и остров не сворачивался:
+    // окно оставалось высотой 660. Ручного изменения размера здесь нет,
+    // размер задаёт сама оболочка.
+    minimumWidth: 180
+    minimumHeight: 40
     visible: true
     color: shellMode === "app" ? Theme.bg : "transparent"
     flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
@@ -132,28 +137,41 @@ ApplicationWindow {
         value: Math.round(root.islandTopY)
     }
 
+    // Смена оболочки. Между островом и сценой Live разница в размере
+    // небольшая, поэтому окно морфит. С полным окном морф пришлось бы гнать
+    // на тысячу пикселей: размер меняется сразу, а въезжает содержимое.
+    property real shellFade: 1
+    property real shellRise: 0
+
+    function enterShell(mode, morph) {
+        root.morphGeo = morph
+        root.islandModesOpen = false
+        root.shellMode = mode
+        root.shellFade = 0
+        root.shellRise = mode === "island" ? 6 : 14
+        shellIn.restart()
+        if (!morph)
+            Qt.callLater(function () { root.morphGeo = true })
+    }
+
     function openApp(page) {
         if (page)
             bridge.selectPage(page)
-        root.morphGeo = false
-        root.islandModesOpen = false
         bridge.applyIslandClickThrough(false)
-        root.shellMode = "app"
+        root.enterShell("app", false)
         root.x = Math.max(40, Math.round((Screen.width - root.width) / 2))
         root.y = Math.max(40, Math.round((Screen.height - root.height) / 2))
     }
     function openTheater() {
         bridge.selectPage("live")
-        root.islandModesOpen = false
-        root.morphGeo = true
         bridge.applyIslandClickThrough(false)
-        root.shellMode = "theater"
+        root.enterShell("theater", true)
     }
     function collapse() {
-        root.morphGeo = true
-        root.islandModesOpen = false
         root.logsOpen = false
-        root.shellMode = "island"
+        // Из полного окна остров не сжимается кадр за кадром: анкер острова
+        // всё равно переставляет окно, и морф читался бы как рывок.
+        root.enterShell("island", root.shellMode !== "app")
         bridge.applyIslandClickThrough(Boolean(bridge.settings.island_click_through))
     }
 
@@ -200,6 +218,26 @@ ApplicationWindow {
         onTriggered: root.quietHeld = true
     }
 
+    ParallelAnimation {
+        id: shellIn
+        NumberAnimation {
+            target: root
+            property: "shellFade"
+            to: 1
+            duration: Theme.baseMs
+            easing.type: Easing.Bezier
+            easing.bezierCurve: Theme.easeOut
+        }
+        NumberAnimation {
+            target: root
+            property: "shellRise"
+            to: 0
+            duration: Theme.slowMs
+            easing.type: Easing.Bezier
+            easing.bezierCurve: Theme.easeOut
+        }
+    }
+
     SequentialAnimation {
         id: pageSwap
         ParallelAnimation {
@@ -232,6 +270,37 @@ ApplicationWindow {
         }
     }
 
+    // Страницы переключаются с клавиатуры: Ctrl+1…6 по порядку разделов,
+    // Ctrl+Tab по кругу. Это работает, пока окно приложения в фокусе, и не
+    // мешает глобальным горячим клавишам системы.
+    // Instantiator, а не Repeater: Repeater создаёт только Item, и сочетания
+    // в нём просто не появлялись.
+    Instantiator {
+        model: root.pageKeys
+        delegate: Shortcut {
+            required property string modelData
+            required property int index
+            sequence: "Ctrl+" + (index + 1)
+            enabled: root.shellMode === "app"
+            onActivated: bridge.selectPage(modelData)
+        }
+    }
+
+    Shortcut {
+        sequences: ["Ctrl+Tab", "Ctrl+PgDown"]
+        enabled: root.shellMode === "app"
+        onActivated: bridge.selectPage(root.pageKeys[(root.targetPageIndex + 1) % root.pageKeys.length])
+    }
+
+    Shortcut {
+        sequences: ["Ctrl+Shift+Tab", "Ctrl+PgUp"]
+        enabled: root.shellMode === "app"
+        onActivated: {
+            var count = root.pageKeys.length
+            bridge.selectPage(root.pageKeys[(root.targetPageIndex + count - 1) % count])
+        }
+    }
+
     Shortcut {
         sequence: "Escape"
         onActivated: {
@@ -249,6 +318,8 @@ ApplicationWindow {
     MiniIsland {
         visible: root.shellMode === "island"
         anchors.fill: parent
+        opacity: root.shellFade
+        transform: Translate { y: root.shellRise }
         phase: root.islandPhase
         radius: root.islandR
         clickThrough: Boolean(bridge.settings.island_click_through) && root.shellMode === "island"
@@ -271,6 +342,8 @@ ApplicationWindow {
     LiveTheater {
         visible: root.shellMode === "theater"
         anchors.fill: parent
+        opacity: root.shellFade
+        transform: Translate { y: root.shellRise }
         embedded: false
         onRequestIsland: root.collapse()
         onRequestApp: root.openApp("live")
@@ -279,8 +352,10 @@ ApplicationWindow {
     Rectangle {
         visible: root.shellMode === "app"
         anchors.fill: parent
+        opacity: root.shellFade
+        transform: Translate { y: root.shellRise }
         color: Theme.bg
-        radius: 12
+        radius: Theme.radiusSm
         border.width: 1
         border.color: Theme.border
         clip: true
@@ -318,14 +393,14 @@ ApplicationWindow {
                                 anchors.centerIn: parent
                                 text: ".а"
                                 color: Theme.bg
-                                font.pixelSize: 13
+                                font.pixelSize: Theme.fsBody
                                 font.weight: Font.Bold
                             }
                         }
                         ColumnLayout {
                             spacing: 0
-                            Label { text: ".аудио"; color: Theme.text; font.pixelSize: 18; font.weight: Font.DemiBold }
-                            Label { text: "локальная речь"; color: Theme.muted; font.pixelSize: 10 }
+                            Label { text: ".аудио"; color: Theme.text; font.pixelSize: Theme.fsSection; font.weight: Font.DemiBold }
+                            Label { text: "локальная речь"; color: Theme.muted; font.pixelSize: Theme.fsMicro }
                         }
                     }
                     // Навигация. Выделение - один переезжающий блок, а не
@@ -337,6 +412,13 @@ ApplicationWindow {
                         readonly property int current: Math.max(0, root.pageKeys.indexOf(bridge.page))
                         Layout.fillWidth: true
                         Layout.preferredHeight: 6 * rowH + 5 * rowGap
+
+                        function step(delta) {
+                            var next = navBox.current + delta
+                            if (next < 0 || next >= root.pageKeys.length)
+                                return
+                            bridge.selectPage(root.pageKeys[next])
+                        }
 
                         Rectangle {
                             width: navBox.width
@@ -376,6 +458,12 @@ ApplicationWindow {
                                     height: navBox.rowH
                                     hoverEnabled: true
                                     onClicked: bridge.selectPage(nav.modelData.key)
+                                    Accessible.role: Accessible.PageTab
+                                    Accessible.name: nav.modelData.title + ", " + nav.modelData.detail
+                                    // Стрелки ходят по разделам, когда фокус
+                                    // уже в навигации; Tab уводит на страницу.
+                                    Keys.onUpPressed: navBox.step(-1)
+                                    Keys.onDownPressed: navBox.step(1)
                                     contentItem: RowLayout {
                                         anchors.fill: parent
                                         anchors.leftMargin: 12
@@ -408,7 +496,9 @@ ApplicationWindow {
                                     }
                                     background: Rectangle {
                                         radius: Theme.radiusMd
-                                        color: !nav.selected && nav.hovered ? "#0bffffff" : "transparent"
+                                        color: !nav.selected && nav.hovered ? Theme.hairline : "transparent"
+                                        border.width: nav.activeFocus ? 1 : 0
+                                        border.color: Theme.borderHi
                                         Behavior on color { ColorAnimation { duration: Theme.fastMs } }
                                     }
                                 }
@@ -416,14 +506,15 @@ ApplicationWindow {
                         }
                     }
                     Item { Layout.fillHeight: true }
-                    Label { text: ".ядро"; color: Theme.muted; font.pixelSize: 10; opacity: 0.55 }
+                    Label { text: ".ядро"; color: Theme.muted; font.pixelSize: Theme.fsMicro; opacity: 0.55 }
                     Text {
                         Layout.fillWidth: true
-                        text: bridge.hotkeysAvailable
-                              ? bridge.settings.dictate_hotkey + " диктовка\n" + bridge.settings.island_hotkey + " остров\n" + bridge.settings.paste_last_hotkey + " вставить"
-                              : "Горячие клавиши недоступны"
+                        text: (bridge.hotkeysAvailable
+                               ? bridge.settings.dictate_hotkey + " диктовка\n" + bridge.settings.island_hotkey + " остров\n" + bridge.settings.paste_last_hotkey + " вставить"
+                               : "Горячие клавиши недоступны")
+                              + "\nCtrl+1…6 разделы\nEsc в остров"
                         color: Theme.muted
-                        font.pixelSize: 10
+                        font.pixelSize: Theme.fsMicro
                         wrapMode: Text.Wrap
                     }
                 }
@@ -432,10 +523,10 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 Layout.margins: 24
-                spacing: 16
+                spacing: Theme.gapLg
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: 12
+                    spacing: Theme.gapMd
                     ColumnLayout {
                         spacing: 2
                         opacity: root.pageFade
@@ -450,10 +541,10 @@ ApplicationWindow {
                                 settings: "Настройки"
                             })[bridge.page]
                             color: Theme.text
-                            font.pixelSize: 26
+                            font.pixelSize: Theme.fsHead
                             font.weight: Font.DemiBold
                         }
-                        Label { text: bridge.status; color: Theme.muted; font.pixelSize: 12 }
+                        Label { text: bridge.status; color: Theme.muted; font.pixelSize: Theme.fsLabel }
                     }
                     Item { Layout.fillWidth: true }
                     Label {
@@ -461,7 +552,7 @@ ApplicationWindow {
                         text: bridge.elapsed
                         color: Theme.muted
                         font.family: Theme.monoFamily
-                        font.pixelSize: 12
+                        font.pixelSize: Theme.fsLabel
                     }
                     IconButton { iconName: "logs"; onClicked: root.logsOpen = !root.logsOpen; ToolTip.visible: hovered; ToolTip.text: "Журнал" }
                     PillButton { text: "Скрыть"; onClicked: root.hide(); ToolTip.visible: hovered; ToolTip.text: "Вернуть: Ctrl+Alt+O" }
@@ -490,14 +581,14 @@ ApplicationWindow {
                         anchors.fill: parent
                         anchors.leftMargin: 14
                         anchors.rightMargin: 8
-                        spacing: 8
+                        spacing: Theme.gapSm
                         Icon { name: "warning"; width: 16; height: 16 }
                         Text {
                             id: noticeText
                             Layout.fillWidth: true
                             text: bridge.notice
                             color: Theme.text
-                            font.pixelSize: 12
+                            font.pixelSize: Theme.fsLabel
                             wrapMode: Text.Wrap
                         }
                         IconButton { iconName: "close"; onClicked: bridge.clearNotice() }
@@ -530,7 +621,7 @@ ApplicationWindow {
                                 ColumnLayout {
                                     anchors.fill: parent
                                     anchors.margins: 24
-                                    spacing: 8
+                                    spacing: Theme.gapSm
                                     RowLayout {
                                         Layout.fillWidth: true
                                         spacing: 9
@@ -563,7 +654,7 @@ ApplicationWindow {
                                             anchors.left: parent.left
                                             anchors.right: parent.right
                                             anchors.verticalCenter: parent.verticalCenter
-                                            spacing: 8
+                                            spacing: Theme.gapSm
                                             visible: opacity > 0.01
                                             opacity: bridge.caption.length ? 0 : 1
                                             Behavior on opacity { NumberAnimation { duration: Theme.contentMs } }
@@ -571,7 +662,7 @@ ApplicationWindow {
                                                 Layout.fillWidth: true
                                                 text: bridge.recording ? "Говорите естественно" : "Скажите мысль, текст попадёт в буфер"
                                                 color: Theme.text
-                                                font.pixelSize: 24
+                                                font.pixelSize: Theme.fsHero
                                                 font.weight: Font.DemiBold
                                                 wrapMode: Text.Wrap
                                             }
@@ -590,7 +681,7 @@ ApplicationWindow {
                                             anchors.right: parent.right
                                             anchors.verticalCenter: parent.verticalCenter
                                             confirmed: bridge.caption
-                                            pixelSize: 24
+                                            pixelSize: Theme.fsHero
                                             maxLines: 3
                                             align: Text.AlignLeft
                                             opacity: bridge.caption.length ? 1 : 0
@@ -613,7 +704,7 @@ ApplicationWindow {
                     Item {
                         RowLayout {
                             anchors.fill: parent
-                            spacing: 16
+                            spacing: Theme.gapLg
                             ColumnLayout {
                                 // Доля ширины задаётся растяжением, а не через
                                 // parent.width: прежняя привязка зацикливалась и
@@ -621,7 +712,7 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 Layout.horizontalStretchFactor: 53
                                 Layout.fillHeight: true
-                                spacing: 12
+                                spacing: Theme.gapMd
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
@@ -632,15 +723,15 @@ ApplicationWindow {
                                     clip: true
                                     VideoOutput { id: mediaVideo; anchors.fill: parent; anchors.margins: 10; visible: mediaPlayer.hasVideo; fillMode: VideoOutput.PreserveAspectFit }
                                     Image { anchors.fill: parent; anchors.margins: 10; visible: !mediaPlayer.hasVideo && bridge.coverUrl.length > 0; source: bridge.coverUrl; fillMode: Image.PreserveAspectCrop }
-                                    KaraokePreview { visible: bridge.mediaUrl.length > 0; anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 18; height: 126; player: mediaPlayer; segments: bridge.segments }
+                                    KaraokePreview { visible: bridge.mediaUrl.length > 0; anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: Theme.padCard; height: 126; player: mediaPlayer; segments: bridge.segments }
                                     ColumnLayout {
                                         anchors.centerIn: parent
                                         width: Math.min(parent.width - 64, 330)
                                         visible: !bridge.mediaUrl
                                         spacing: 10
                                         Icon { Layout.alignment: Qt.AlignHCenter; name: "media"; width: 28; height: 28 }
-                                        Label { Layout.fillWidth: true; text: "Аудио в караоке"; horizontalAlignment: Text.AlignHCenter; color: Theme.text; font.pixelSize: 21; font.weight: Font.DemiBold }
-                                        Text { Layout.fillWidth: true; text: "Откройте аудио или видео, получите текст по словам и доведите таймкоды."; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap; color: Theme.muted; font.pixelSize: 13 }
+                                        Label { Layout.fillWidth: true; text: "Аудио в караоке"; horizontalAlignment: Text.AlignHCenter; color: Theme.text; font.pixelSize: Theme.fsLead; font.weight: Font.DemiBold }
+                                        Text { Layout.fillWidth: true; text: "Откройте аудио или видео, получите текст по словам и доведите таймкоды."; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap; color: Theme.muted; font.pixelSize: Theme.fsBody }
                                         PillButton { Layout.alignment: Qt.AlignHCenter; text: "Выбрать медиа"; primary: true; onClicked: bridge.importFile() }
                                     }
                                 }
@@ -697,7 +788,7 @@ ApplicationWindow {
                                     RowLayout {
                                         anchors.fill: parent
                                         anchors.margins: 16
-                                        spacing: 12
+                                        spacing: Theme.gapMd
                                         Icon { name: "models"; width: 20; height: 20 }
                                         ColumnLayout {
                                             Layout.fillWidth: true
@@ -734,7 +825,7 @@ ApplicationWindow {
                             }
                             Rectangle {
                                 Layout.fillWidth: true
-                                implicitHeight: rulesBox.implicitHeight + 36
+                                implicitHeight: rulesBox.implicitHeight + 2 * Theme.padCard
                                 radius: Theme.radiusLg
                                 color: Theme.surface
                                 border.width: 1
@@ -742,22 +833,42 @@ ApplicationWindow {
                                 ColumnLayout {
                                     id: rulesBox
                                     anchors.fill: parent
-                                    anchors.margins: 18
-                                    spacing: 8
+                                    anchors.margins: Theme.padCard
+                                    spacing: Theme.gapSm
                                     Label { text: "Словарь и snippets"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
                                     Text { Layout.fillWidth: true; text: "Термины помогают Whisper, а замены применяются только к финальному тексту диктовки. Всё остаётся на этом устройстве."; color: Theme.muted; font.pixelSize: Theme.fsSmall; wrapMode: Text.Wrap }
                                     RowLayout {
+                                        id: termRow
                                         Layout.fillWidth: true
-                                        TextField { id: termInput; Layout.fillWidth: true; placeholderText: "Термин"; color: Theme.text; placeholderTextColor: Theme.muted; background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
-                                        TextField { id: mistakeInput; Layout.preferredWidth: 180; placeholderText: "Вариант ошибки"; color: Theme.text; placeholderTextColor: Theme.muted; background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
-                                        PillButton { text: "+"; onClicked: { bridge.addDictionaryEntry(termInput.text, mistakeInput.text); termInput.clear(); mistakeInput.clear() } }
+                                        // Enter в любом поле добавляет запись: до этого
+                                        // словарь пополнялся только мышью.
+                                        function addTerm() {
+                                            if (!termInput.text.length)
+                                                return
+                                            bridge.addDictionaryEntry(termInput.text, mistakeInput.text)
+                                            termInput.clear()
+                                            mistakeInput.clear()
+                                            termInput.forceActiveFocus()
+                                        }
+                                        TextField { id: termInput; Layout.fillWidth: true; placeholderText: "Термин"; color: Theme.text; placeholderTextColor: Theme.muted; onAccepted: termRow.addTerm(); background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
+                                        TextField { id: mistakeInput; Layout.preferredWidth: 180; placeholderText: "Вариант ошибки"; color: Theme.text; placeholderTextColor: Theme.muted; onAccepted: termRow.addTerm(); background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
+                                        PillButton { text: "+"; onClicked: termRow.addTerm(); ToolTip.visible: hovered; ToolTip.text: "Добавить термин" }
                                     }
                                     ListView { Layout.fillWidth: true; Layout.preferredHeight: Math.min(70, contentHeight); model: bridge.dictionary; clip: true; delegate: RowLayout { required property var modelData; required property int index; width: ListView.view.width; Text { Layout.fillWidth: true; text: modelData.term + (modelData.misheard ? " ← " + modelData.misheard : ""); color: Theme.muted; elide: Text.ElideRight; font.pixelSize: Theme.fsSmall } PillButton { text: "×"; onClicked: bridge.removeDictionaryEntry(index) } } }
                                     RowLayout {
+                                        id: snippetRow
                                         Layout.fillWidth: true
-                                        TextField { id: snippetInput; Layout.preferredWidth: 180; placeholderText: "Фраза"; color: Theme.text; placeholderTextColor: Theme.muted; background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
-                                        TextField { id: expansionInput; Layout.fillWidth: true; placeholderText: "Вставляемый текст"; color: Theme.text; placeholderTextColor: Theme.muted; background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
-                                        PillButton { text: "+"; onClicked: { bridge.addSnippet(snippetInput.text, expansionInput.text); snippetInput.clear(); expansionInput.clear() } }
+                                        function addSnippet() {
+                                            if (!snippetInput.text.length)
+                                                return
+                                            bridge.addSnippet(snippetInput.text, expansionInput.text)
+                                            snippetInput.clear()
+                                            expansionInput.clear()
+                                            snippetInput.forceActiveFocus()
+                                        }
+                                        TextField { id: snippetInput; Layout.preferredWidth: 180; placeholderText: "Фраза"; color: Theme.text; placeholderTextColor: Theme.muted; onAccepted: snippetRow.addSnippet(); background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
+                                        TextField { id: expansionInput; Layout.fillWidth: true; placeholderText: "Вставляемый текст"; color: Theme.text; placeholderTextColor: Theme.muted; onAccepted: snippetRow.addSnippet(); background: Rectangle { radius: Theme.radiusSm; color: Theme.fill } }
+                                        PillButton { text: "+"; onClicked: snippetRow.addSnippet(); ToolTip.visible: hovered; ToolTip.text: "Добавить замену" }
                                     }
                                 }
                             }
@@ -767,7 +878,7 @@ ApplicationWindow {
                     Item {
                         ColumnLayout {
                             anchors.fill: parent
-                            spacing: 12
+                            spacing: Theme.gapMd
                             TextField {
                                 Layout.fillWidth: true
                                 placeholderText: "Поиск по названию или тексту"
@@ -796,7 +907,7 @@ ApplicationWindow {
                                 ListView {
                                     anchors.fill: parent
                                     model: bridge.history
-                                    spacing: 8
+                                    spacing: Theme.gapSm
                                     clip: true
                                     add: Transition {
                                         NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.baseMs }
@@ -848,10 +959,10 @@ ApplicationWindow {
                             ColumnLayout {
                                 id: settingsColumn
                                 width: parent.width
-                                spacing: 12
+                                spacing: Theme.gapMd
                                 Rectangle {
                                     Layout.fillWidth: true
-                                    implicitHeight: languageBox.implicitHeight + 36
+                                    implicitHeight: languageBox.implicitHeight + 2 * Theme.padCard
                                     radius: Theme.radiusLg
                                     color: Theme.surface
                                     border.width: 1
@@ -859,12 +970,12 @@ ApplicationWindow {
                                     ColumnLayout {
                                         id: languageBox
                                         anchors.fill: parent
-                                        anchors.margins: 18
-                                        spacing: 8
+                                        anchors.margins: Theme.padCard
+                                        spacing: Theme.gapSm
                                         Label { text: "Язык и вывод"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            Text { Layout.fillWidth: true; text: "Распознавание ориентировано на русский язык."; color: Theme.muted; font.pixelSize: 12; wrapMode: Text.Wrap }
+                                            Text { Layout.fillWidth: true; text: "Распознавание ориентировано на русский язык."; color: Theme.muted; font.pixelSize: Theme.fsLabel; wrapMode: Text.Wrap }
                                             PillButton { text: "Русский"; primary: bridge.settings.language === "ru" && bridge.settings.task === "transcribe"; onClicked: { bridge.setSetting("language", "ru"); bridge.setSetting("task", "transcribe") } }
                                             PillButton { text: "English subtitles"; primary: bridge.settings.task === "translate"; onClicked: bridge.setSetting("task", "translate") }
                                         }
@@ -872,7 +983,7 @@ ApplicationWindow {
                                 }
                                 Rectangle {
                                     Layout.fillWidth: true
-                                    implicitHeight: deviceBox.implicitHeight + 36
+                                    implicitHeight: deviceBox.implicitHeight + 2 * Theme.padCard
                                     radius: Theme.radiusLg
                                     color: Theme.surface
                                     border.width: 1
@@ -880,13 +991,13 @@ ApplicationWindow {
                                     ColumnLayout {
                                         id: deviceBox
                                         anchors.fill: parent
-                                        anchors.margins: 18
+                                        anchors.margins: Theme.padCard
                                         spacing: 10
                                         Label { text: "Источник Live и устройства"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
-                                        Text { Layout.fillWidth: true; text: "Диктовка всегда с микрофона. Live: микрофон, звук компьютера или Авто - оба сразу. На острове источник переключается кнопкой."; color: Theme.muted; font.pixelSize: 11; wrapMode: Text.Wrap }
+                                        Text { Layout.fillWidth: true; text: "Диктовка всегда с микрофона. Live: микрофон, звук компьютера или Авто - оба сразу. На острове источник переключается кнопкой."; color: Theme.muted; font.pixelSize: Theme.fsSmall; wrapMode: Text.Wrap }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            Label { text: "Источник Live"; color: Theme.muted; font.pixelSize: 12; Layout.fillWidth: true }
+                                            Label { text: "Источник Live"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.fillWidth: true }
                                             PillButton { text: "Микрофон"; primary: String(bridge.settings.live_source) === "microphone"; onClicked: bridge.setSetting("live_source", "microphone") }
                                             PillButton { text: "Звук системы"; primary: String(bridge.settings.live_source) === "system"; onClicked: bridge.setSetting("live_source", "system") }
                                             PillButton { text: "Авто"; primary: String(bridge.settings.live_source) === "mixed"; onClicked: bridge.setSetting("live_source", "mixed"); ToolTip.visible: hovered; ToolTip.text: "Микрофон и звук компьютера одновременно" }
@@ -979,12 +1090,12 @@ ApplicationWindow {
                                                 Behavior on width { NumberAnimation { duration: 110; easing.type: Easing.OutQuad } }
                                             }
                                         }
-                                        Label { text: bridge.deviceTest.message || "Проверка не сохраняет запись."; color: Theme.muted; font.pixelSize: 11 }
+                                        Label { text: bridge.deviceTest.message || "Проверка не сохраняет запись."; color: Theme.muted; font.pixelSize: Theme.fsSmall }
                                     }
                                 }
                                 Rectangle {
                                     Layout.fillWidth: true
-                                    implicitHeight: islandBox.implicitHeight + 36
+                                    implicitHeight: islandBox.implicitHeight + 2 * Theme.padCard
                                     radius: Theme.radiusLg
                                     color: Theme.surface
                                     border.width: 1
@@ -992,12 +1103,12 @@ ApplicationWindow {
                                     ColumnLayout {
                                         id: islandBox
                                         anchors.fill: parent
-                                        anchors.margins: 18
-                                        spacing: 8
+                                        anchors.margins: Theme.padCard
+                                        spacing: Theme.gapSm
                                         Label { text: "Остров"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            Label { text: "Диктовка"; color: Theme.muted; font.pixelSize: 12; Layout.preferredWidth: 90 }
+                                            Label { text: "Диктовка"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.preferredWidth: 90 }
                                             Repeater {
                                                 model: ["Ctrl+Alt+Space", "Ctrl+Shift+Space", "Ctrl+Win+Space"]
                                                 PillButton {
@@ -1010,7 +1121,7 @@ ApplicationWindow {
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            Label { text: "Остров"; color: Theme.muted; font.pixelSize: 12; Layout.preferredWidth: 90 }
+                                            Label { text: "Остров"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.preferredWidth: 90 }
                                             Repeater {
                                                 model: ["Ctrl+Alt+O", "Ctrl+Shift+O", "Ctrl+Win+O"]
                                                 PillButton {
@@ -1029,13 +1140,13 @@ ApplicationWindow {
                                         Label {
                                             text: "По умолчанию повтор " + bridge.settings.dictate_hotkey + " начинает и останавливает запись. Вставка последнего текста: " + bridge.settings.paste_last_hotkey + "."
                                             color: Theme.muted
-                                            font.pixelSize: 11
+                                            font.pixelSize: Theme.fsSmall
                                             wrapMode: Text.Wrap
                                             Layout.fillWidth: true
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            Label { text: "Непрозрачность"; color: Theme.muted; font.pixelSize: 12; Layout.preferredWidth: 118 }
+                                            Label { text: "Непрозрачность"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.preferredWidth: 118 }
                                             Slider {
                                                 id: opacitySlider
                                                 Layout.fillWidth: true
@@ -1087,7 +1198,7 @@ ApplicationWindow {
                                             visible: Boolean(bridge.settings.island_click_through)
                                             text: "Клики проходят сквозь остров. Запись: Ctrl+Alt+Space"
                                             color: Theme.muted
-                                            font.pixelSize: 11
+                                            font.pixelSize: Theme.fsSmall
                                             wrapMode: Text.Wrap
                                             Layout.fillWidth: true
                                         }
@@ -1095,7 +1206,7 @@ ApplicationWindow {
                                 }
                                 Rectangle {
                                     Layout.fillWidth: true
-                                    implicitHeight: overlayBox.implicitHeight + 36
+                                    implicitHeight: overlayBox.implicitHeight + 2 * Theme.padCard
                                     radius: Theme.radiusLg
                                     color: Theme.surface
                                     border.width: 1
@@ -1103,10 +1214,10 @@ ApplicationWindow {
                                     ColumnLayout {
                                         id: overlayBox
                                         anchors.fill: parent
-                                        anchors.margins: 18
-                                        spacing: 8
+                                        anchors.margins: Theme.padCard
+                                        spacing: Theme.gapSm
                                         Label { text: "Субтитры на экране"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
-                                        Text { Layout.fillWidth: true; text: "Отдельное окно для зала: крупный текст, без кнопок, клики проходят сквозь."; color: Theme.muted; font.pixelSize: 12; wrapMode: Text.Wrap }
+                                        Text { Layout.fillWidth: true; text: "Отдельное окно для зала: крупный текст, без кнопок, клики проходят сквозь."; color: Theme.muted; font.pixelSize: Theme.fsLabel; wrapMode: Text.Wrap }
                                         RowLayout {
                                             Layout.fillWidth: true
                                             ToggleSwitch { text: "Показать на экране"; checked: Boolean(bridge.settings.caption_overlay); onToggled: bridge.setSetting("caption_overlay", checked) }
@@ -1138,7 +1249,7 @@ ApplicationWindow {
                                                   ? "Субтитры не перехватывают мышь. Снимите закрепление, чтобы перетащить окно зала."
                                                   : "Перетащите окно субтитров. Положение сохранится как плавающее."
                                             color: Theme.muted
-                                            font.pixelSize: 11
+                                            font.pixelSize: Theme.fsSmall
                                             wrapMode: Text.Wrap
                                             Layout.fillWidth: true
                                         }
@@ -1162,7 +1273,7 @@ ApplicationWindow {
                     Item {
                         ColumnLayout {
                             anchors.fill: parent
-                            spacing: 12
+                            spacing: Theme.gapMd
                             Rectangle {
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 228
@@ -1172,10 +1283,10 @@ ApplicationWindow {
                                 border.color: Theme.border
                                 ColumnLayout {
                                     anchors.fill: parent
-                                    anchors.margins: 18
+                                    anchors.margins: Theme.padCard
                                     spacing: 9
                                     Label { text: "Прямые источники"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
-                                    Text { Layout.fillWidth: true; text: "Одна HTTP(S) аудио- или HLS-ссылка на строку. Формат: Название | URL. Максимум четыре источника."; color: Theme.muted; wrapMode: Text.Wrap; font.pixelSize: 12 }
+                                    Text { Layout.fillWidth: true; text: "Одна HTTP(S) аудио- или HLS-ссылка на строку. Формат: Название | URL. Максимум четыре источника."; color: Theme.muted; wrapMode: Text.Wrap; font.pixelSize: Theme.fsLabel }
                                     TextArea { id: monitorChannels; Layout.fillWidth: true; Layout.fillHeight: true; text: bridge.settings.channels; placeholderText: "Радио | https://example.org/live.m3u8"; color: Theme.text; placeholderTextColor: Theme.muted; onActiveFocusChanged: if (!activeFocus) bridge.setSetting("channels", text); background: Rectangle { radius: 12; color: Theme.fill; border.width: 1; border.color: Theme.border } }
                                 }
                             }
@@ -1188,7 +1299,7 @@ ApplicationWindow {
                                 border.color: Theme.border
                                 RowLayout {
                                     anchors.fill: parent
-                                    anchors.margins: 18
+                                    anchors.margins: Theme.padCard
                                     TextField { Layout.fillWidth: true; text: bridge.settings.keywords; placeholderText: "Ключевые слова и фразы через запятую"; color: Theme.text; placeholderTextColor: Theme.muted; onEditingFinished: bridge.setSetting("keywords", text); background: Rectangle { radius: 12; color: Theme.fill; border.width: 1; border.color: Theme.border } }
                                     PillButton { text: bridge.recording ? "Стоп" : "Начать"; primary: true; onClicked: bridge.toggleRecording() }
                                 }
@@ -1198,7 +1309,7 @@ ApplicationWindow {
                                 Layout.fillHeight: true
                                 model: bridge.hits
                                 clip: true
-                                spacing: 8
+                                spacing: Theme.gapSm
                                 delegate: Rectangle {
                                     required property var modelData
                                     width: ListView.view.width
@@ -1207,7 +1318,7 @@ ApplicationWindow {
                                     color: Theme.surface
                                     border.width: 1
                                     border.color: Theme.border
-                                    Text { id: hitText; anchors.fill: parent; anchors.margins: 11; text: modelData.source + " · " + modelData.matches + "\n" + modelData.text; color: Theme.text; wrapMode: Text.Wrap; font.pixelSize: 12 }
+                                    Text { id: hitText; anchors.fill: parent; anchors.margins: 11; text: modelData.source + " · " + modelData.matches + "\n" + modelData.text; color: Theme.text; wrapMode: Text.Wrap; font.pixelSize: Theme.fsLabel }
                                 }
                             }
                         }
@@ -1228,19 +1339,19 @@ ApplicationWindow {
             ColumnLayout {
                 anchors.fill: parent
                 anchors.margins: 16
-                spacing: 12
+                spacing: Theme.gapMd
                 RowLayout {
                     Layout.fillWidth: true
-                    Label { text: "Журнал работы"; color: Theme.text; font.pixelSize: 18; font.weight: Font.DemiBold }
+                    Label { text: "Журнал работы"; color: Theme.text; font.pixelSize: Theme.fsSection; font.weight: Font.DemiBold }
                     Item { Layout.fillWidth: true }
                     IconButton { iconName: "close"; onClicked: root.logsOpen = false }
                 }
-                Label { text: "События приложения и распознавания"; color: Theme.muted; font.pixelSize: 11 }
+                Label { text: "События приложения и распознавания"; color: Theme.muted; font.pixelSize: Theme.fsSmall }
                 ListView {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     model: bridge.logs
-                    spacing: 8
+                    spacing: Theme.gapSm
                     clip: true
                     delegate: Rectangle {
                         required property var modelData
@@ -1254,7 +1365,7 @@ ApplicationWindow {
                             anchors.margins: 10
                             text: modelData.time + "  " + modelData.message
                             color: Theme.text
-                            font.pixelSize: 11
+                            font.pixelSize: Theme.fsSmall
                             wrapMode: Text.Wrap
                         }
                     }

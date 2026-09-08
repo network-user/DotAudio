@@ -12,6 +12,10 @@ Button {
     implicitWidth: 28
     implicitHeight: 28
     hoverEnabled: true
+    // У кнопки нет подписи, поэтому имя для доступности берётся из
+    // подсказки: иначе экранный диктор читает пустую кнопку.
+    Accessible.role: Accessible.Button
+    Accessible.name: control.ToolTip.text.length ? control.ToolTip.text : control.iconName
     scale: control.down ? 0.92 : control.hovered && control.enabled ? 1.06 : 1
     opacity: control.enabled ? 1 : 0.45
 

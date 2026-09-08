@@ -244,7 +244,7 @@ Rectangle {
                     Layout.fillHeight: true
                     confirmed: root.capConfirmed
                     pending: root.capPending
-                    pixelSize: 15
+                    pixelSize: Theme.fsCompact
                     maxLines: 2
                     align: Text.AlignLeft
                 }
@@ -285,7 +285,7 @@ Rectangle {
                 Layout.fillWidth: true
                 text: bridge.notice
                 color: Theme.text
-                font.pixelSize: 12
+                font.pixelSize: Theme.fsLabel
                 font.family: Theme.fontFamily
                 wrapMode: Text.Wrap
                 maximumLineCount: 2

@@ -5,6 +5,7 @@ from threading import Event
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from dotaudio.engine import RecognitionConfig
 from dotaudio.pipeline import (
@@ -350,6 +351,19 @@ def test_catch_up_joins_waiting_phrases_instead_of_dropping_one() -> None:
     assert finals[-1]["text"] == "сейчас"
 
 
+def test_speech_buffer_carries_the_end_of_a_phrase_forward() -> None:
+    buffer = SpeechBuffer(max_seconds=5, silence_seconds=0.2, threshold=0.1)
+    buffer.feed(np.full(SAMPLE_RATE // 2, 0.5, dtype=np.float32))
+    assert buffer.feed(np.zeros(SAMPLE_RATE // 5, dtype=np.float32)) is not None
+    assert not len(buffer.lead)
+
+    buffer.feed(np.full(SAMPLE_RATE // 2, 0.5, dtype=np.float32))
+    assert buffer.feed(np.zeros(SAMPLE_RATE // 5, dtype=np.float32)) is not None
+    # The second phrase is handed the first one, ending where it began.
+    assert len(buffer.lead) == SAMPLE_RATE // 2 + SAMPLE_RATE // 5
+    assert buffer.lead_end == pytest.approx(0.7)
+
+
 def test_catch_up_drops_audio_only_when_the_join_grows_past_one_window() -> None:
     engine = _SlowEngine()
     completed = Event()
@@ -384,7 +398,7 @@ def test_catch_up_keeps_a_phrase_that_stop_finds_still_waiting() -> None:
     session.feed(_speech(0.2))
     session.feed(_silence())
     assert engine.started.wait(2)
-    session.feed(_speech(0.3))
+    session.feed(_speech(1.0))
     session.feed(_silence())
     # Stop asks to keep what was said. The phrase queued behind the slow decode
     # is part of that, so it is recognised and not thrown away with the tail.
@@ -392,13 +406,77 @@ def test_catch_up_keeps_a_phrase_that_stop_finds_still_waiting() -> None:
     engine.release.set()
     assert completed.wait(2)
     assert len(engine.lengths) == 2
-    assert engine.lengths[1] == int(SAMPLE_RATE * 0.8)
+    assert engine.lengths[1] == int(SAMPLE_RATE * 1.5)
     assert len(finals) == 2
 
 
+class _ScriptedEngine:
+    """Answer each call with the next line, and say when a call is over.
+
+    The short-phrase path only exists when the phrase before it has already
+    been recognised, so the test has to wait for that instead of racing it.
+    """
+
+    def __init__(self, *lines: str) -> None:
+        self.lines = list(lines)
+        self.lengths: list[int] = []
+        self.answered = Event()
+
+    def transcribe(self, audio, _config, _cancel, on_segment, _on_status):
+        self.lengths.append(len(audio))
+        words = self.lines[min(len(self.lengths), len(self.lines)) - 1]
+        on_segment({"start": 0.0, "end": len(audio) / SAMPLE_RATE, "text": words})
+        self.answered.set()
+        return []
+
+
+def test_a_phrase_too_short_to_recognise_is_given_the_one_before_it() -> None:
+    engine = _ScriptedEngine("первая фраза", "первая фраза и хвост")
+    completed = Event()
+    finals: list[dict] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), finals.append, lambda _status: None,
+        lambda _error, _cancelled: completed.set(), catch_up=True,
+    )
+    session.start(_Capture())
+    session.feed(_speech(2.0))
+    session.feed(_silence())
+    assert engine.answered.wait(2)
+    session.feed(_speech(0.2))
+    session.stop()
+    assert completed.wait(2)
+    # The half-second phrase was recognised together with the end of the one
+    # before it, and the words that came back twice were removed.
+    assert engine.lengths[1] > int(SAMPLE_RATE * 0.7)
+    assert [final["text"] for final in finals] == ["первая фраза", "и хвост"]
+    assert finals[1]["start"] == pytest.approx(2.5, abs=0.1)
+
+
+def test_a_short_phrase_is_asked_about_alone_when_the_decodes_disagree() -> None:
+    engine = _ScriptedEngine("первая фраза", "совсем другое", "хвост")
+    completed = Event()
+    finals: list[dict] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), finals.append, lambda _status: None,
+        lambda _error, _cancelled: completed.set(), catch_up=True,
+    )
+    session.start(_Capture())
+    session.feed(_speech(2.0))
+    session.feed(_silence())
+    assert engine.answered.wait(2)
+    session.feed(_speech(0.2))
+    session.stop()
+    assert completed.wait(2)
+    # Nothing in the wider decode repeated the previous phrase, so the caption
+    # is what the phrase alone says rather than a guess at what is new in it.
+    assert len(engine.lengths) == 3
+    assert engine.lengths[2] == int(SAMPLE_RATE * 0.2)
+    assert [final["text"] for final in finals] == ["первая фраза", "хвост"]
+
+
 def test_finals_from_different_utterances_are_not_joined() -> None:
-    early = (0.0, np.zeros(SAMPLE_RATE, dtype=np.float32))
-    much_later = (30.0, np.zeros(SAMPLE_RATE, dtype=np.float32))
+    early = (0.0, np.zeros(SAMPLE_RATE, dtype=np.float32), None)
+    much_later = (30.0, np.zeros(SAMPLE_RATE, dtype=np.float32), None)
     assert LiveSession._merge_finals(early, much_later) is None
 
 
@@ -469,6 +547,40 @@ def test_dictation_keeps_its_own_preview_cadence() -> None:
     assert session._preview_interval() == int(0.8 * SAMPLE_RATE)
 
 
+def test_slow_final_does_not_suppress_the_next_short_preview() -> None:
+    session = LiveSession(
+        _Engine(), RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: None, lambda _partial: None, catch_up=True,
+    )
+    session._note_decode(0.2)
+    session._note_decode(12.0, 15.0, preview=False)
+    session.feed(_speech(1.3))
+
+    task = session._next_task()
+    assert task is not None and task[0] == "preview"
+
+
+def test_previews_resume_in_each_phrase_after_a_very_slow_decode() -> None:
+    session = LiveSession(
+        _Engine(), RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: None, lambda _partial: None, catch_up=True,
+    )
+    session._note_decode(10.0)
+    previews_per_phrase = []
+    previews = 0
+    for _ in range(int(LIVE_PHRASE_SECONDS * 10) * 4):
+        session.feed(_speech(0.1))
+        task = session._next_task()
+        if task is not None and task[0] == "preview":
+            previews += 1
+        elif task is not None and task[0] == "final":
+            previews_per_phrase.append(previews)
+            previews = 0
+
+    assert len(previews_per_phrase) == 4
+    assert all(count >= 1 for count in previews_per_phrase)
+
+
 def test_preview_keeps_an_agreed_prefix_across_hypotheses() -> None:
     class Engine:
         def __init__(self) -> None:
@@ -527,6 +639,21 @@ def test_preview_skips_a_snapshot_replaced_before_inference() -> None:
     session._transcribe_preview(0.0, _speech(), 0.0, 1)
 
     assert engine.calls == 0
+
+
+def test_preview_releases_a_confirmed_prefix_when_the_decoder_revises_it() -> None:
+    engine = _ScriptedEngine("раз два три", "раз два четыре", "три четыре", "три четыре пять")
+    partials: list[dict] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), lambda _segment: None, lambda _status: None,
+        lambda _error, _cancelled: None, partials.append, catch_up=True,
+    )
+    session._preview_generation = 1
+    for _ in range(4):
+        session._transcribe_preview(0.0, _speech(), 0.0, 1)
+
+    assert [part["stable_text"] for part in partials] == ["", "раз два", "", "три четыре"]
+    assert all(part["text"].startswith(part["stable_text"]) for part in partials)
 
 
 def test_inflight_preview_emits_when_a_newer_snapshot_arrives() -> None:
@@ -651,6 +778,16 @@ def test_voice_activity_keeps_its_answer_for_a_partial_frame() -> None:
     assert detector(np.zeros(VoiceActivity.FRAME, dtype=np.float32)) is True
     assert detector(np.zeros(10, dtype=np.float32)) is True
     assert len(session.batches) == 1
+
+
+def test_voice_activity_keeps_speech_before_a_quiet_end_of_block() -> None:
+    detector = VoiceActivity(_FakeVadSession([0.9, 0.2, 0.1, 0.4]))
+    frame = np.zeros(VoiceActivity.FRAME, dtype=np.float32)
+
+    assert detector(np.tile(frame, 3)) is True
+    # The block carried speech, but the last frame released hysteresis. A
+    # sub-trigger score in the next block must not extend the utterance.
+    assert detector(frame) is False
 
 
 def test_speech_buffer_follows_the_detector_and_not_loudness() -> None:

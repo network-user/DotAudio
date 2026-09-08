@@ -43,8 +43,11 @@ src/dotaudio/
   app.py, controller.py, desktop.py  Qt и Windows
   qml/MainMvp.qml, MiniIsland.qml, LiveTheater.qml, CaptionOverlay.qml
                                       оболочка, остров, Live-сцена, субтитры зала
-  qml/Theme.js, Icon.qml, Waveform.qml, CaptionText.qml, TranscriptEditor.qml, KaraokePreview.qml
-                                      токены, глифы, waveform, редактор и karaoke
+ qml/Theme.js, Icon.qml, Waveform.qml, CaptionText.qml, CaptionStage.qml
+ токены и движение, глифы, waveform, живая строка и сцена фразы
+ qml/PillButton.qml, IconButton.qml, ToggleSwitch.qml, Dropdown.qml, StatusDot.qml
+ общие элементы управления вместо системных
+ qml/TranscriptEditor.qml, KaraokePreview.qml редактор и karaoke
   capture.py, pipeline.py           захват и live-очередь
   engine.py                        локальный/удалённый ASR
   storage.py, transcripts.py        история и текстовый экспорт
@@ -71,6 +74,11 @@ docs/
 - Принудительная остановка на острове должна снимать busy, если native decode
   не вернул управление.
 - Не отправлять Enter после автовставки. Проверять целевое окно.
+- Цвета, кегли, скругления, длительности и кривые брать из `qml/Theme.js`,
+ а не задавать в компонентах. Системные `Switch`, `ComboBox` и подобные
+ использовать только через обёртки проекта.
+- В живом субтитре не пересобирать фразу целиком: совпадающий префикс
+ сохраняется, анимируются только новые слова и их позиции.
 - Не подменять фактические уровни аудио и результаты демонстрационными.
 - Поддержку устройства/ОС и скорость заявлять после реальной проверки.
 - Конфигурация серверного режима не означает готовность public API.

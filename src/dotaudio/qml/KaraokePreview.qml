@@ -1,7 +1,10 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "Theme.js" as Theme
 
+// Караоке-просмотр. Текущее слово выделяется кеглем, начертанием и яркостью
+// сразу: на светлом кадре видео одной яркости не хватает.
 Rectangle {
     id: root
     property var player: null
@@ -9,9 +12,9 @@ Rectangle {
     property real playbackSeconds: player ? player.position / 1000 : 0
     property var activeCue: cueAt(playbackSeconds)
 
-    radius: 20
-    color: "#e814161a"
-    border.color: "#22ffffff"
+    radius: Theme.radiusLg
+    color: Theme.islandFill
+    border.color: Theme.border
     border.width: 1
 
     function cueAt(position) {
@@ -25,20 +28,21 @@ Rectangle {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 16
-        spacing: 8
+        anchors.margins: Theme.gapLg
+        spacing: Theme.gapSm
 
         Label {
             text: root.activeCue && root.activeCue.words ? "KARAOKE · ПО СЛОВАМ" : "KARAOKE · ФРАЗА"
-            color: "#a6a7ab"
-            font.pixelSize: 9
-            font.bold: true
+            color: Theme.muted
+            font.family: Theme.fontFamily
+            font.pixelSize: Theme.fsMicro
+            font.weight: Font.DemiBold
             font.letterSpacing: 1.1
         }
 
         Flow {
             Layout.fillWidth: true
-            spacing: 8
+            spacing: Theme.gapSm
             Repeater {
                 model: root.activeCue && root.activeCue.words ? root.activeCue.words : []
                 delegate: Text {
@@ -46,13 +50,22 @@ Rectangle {
                     property bool active: root.playbackSeconds >= Number(modelData.start)
                                           && root.playbackSeconds < Number(modelData.end)
                     text: modelData.text
-                    color: active ? "#f3f3f1" : root.playbackSeconds >= Number(modelData.end) ? "#d1d1d6" : "#a6a7ab"
-                    font.pixelSize: active ? 24 : 19
+                    color: active ? Theme.text
+                         : root.playbackSeconds >= Number(modelData.end) ? Theme.muted
+                         : Theme.faint
+                    font.family: Theme.fontFamily
+                    font.pixelSize: active ? Theme.fsHero : Theme.fsLead
                     font.weight: active ? Font.DemiBold : Font.Normal
                     scale: active ? 1.04 : 1
-                    Behavior on color { ColorAnimation { duration: 120 } }
-                    Behavior on font.pixelSize { NumberAnimation { duration: 120 } }
-                    Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+                    Behavior on color { ColorAnimation { duration: Theme.instantMs } }
+                    Behavior on font.pixelSize { NumberAnimation { duration: Theme.instantMs } }
+                    Behavior on scale {
+                        NumberAnimation {
+                            duration: Theme.fastMs
+                            easing.type: Easing.Bezier
+                            easing.bezierCurve: Theme.easeSpring
+                        }
+                    }
                 }
             }
         }
@@ -61,8 +74,9 @@ Rectangle {
             visible: !root.activeCue || !root.activeCue.words
             Layout.fillWidth: true
             text: root.activeCue ? root.activeCue.text : "После распознавания здесь будет караоке-текст."
-            color: "#f1f5f7"
-            font.pixelSize: 21
+            color: Theme.text
+            font.family: Theme.fontFamily
+            font.pixelSize: Theme.fsLead
             font.weight: Font.DemiBold
             wrapMode: Text.Wrap
         }

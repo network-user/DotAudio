@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import wave
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -33,8 +34,11 @@ StatusCallback = Callable[[str], None]
 # phonetic guesses instead of words.
 LIVE_TAIL_SECONDS = 2.0
 # A live window is short.  Anything past this token budget is a decoder loop,
-# not speech, and it would block the next caption.
-LIVE_TOKENS_PER_SECOND = 12
+# not speech, and it would block the next caption.  The rate is not the rate of
+# speech: measured, a Russian sentence is about 9 tokens per second of audio,
+# but the sequence the decoder walks to produce it is longer, and at 12 the last
+# words of a seven second phrase were cut off mid-sentence.
+LIVE_TOKENS_PER_SECOND = 24
 LIVE_MAX_TOKENS = 200
 LIVE_HINT_CHARS = 150
 # Mean token log probability below which the window is not reported as speech.
@@ -44,6 +48,35 @@ LIVE_HINT_CHARS = 150
 # -0.18 and -0.72, while the words the decoder invents over music and over the
 # tail of a phrase score -1.07 and lower.
 LIVE_MIN_LOGPROB = -1.0
+# Language detection for the "auto" setting: only on a phrase this long, and
+# only trusted above this probability.
+LIVE_DETECT_MIN_SECONDS = 1.5
+LIVE_LANGUAGE_CONFIDENCE = 0.7
+
+
+# Live windows are short, and splitting one across every core costs more in
+# synchronisation than it saves in arithmetic.  Measured on a 16-thread CPU with
+# the small model on a 7.2 s phrase: 1012 ms on two threads, 958 ms on four and
+# 1063 ms on sixteen.  Four is also what leaves the rest of the machine usable
+# while the user is in a call.
+LIVE_MAX_CPU_THREADS = 4
+
+
+def live_cpu_threads() -> int:
+    """Threads for local inference, bounded by what actually helps."""
+
+    return max(1, min(LIVE_MAX_CPU_THREADS, os.cpu_count() or 1))
+
+
+def stem(word: str) -> str:
+    """Drop punctuation, case and a Russian ending for comparison only.
+
+    Two decodes of the same speech disagree about endings often enough that
+    comparing whole words misses the repetition they are checked for.
+    """
+
+    clean = word.strip(".,!?…:;-«»\"'()").casefold()
+    return clean[: max(3, len(clean) - 2)]
 
 
 @dataclass(slots=True, frozen=True)
@@ -66,6 +99,11 @@ class RecognitionConfig:
     # Live finals keep greedy decode and skip a second VAD pass: SpeechBuffer
     # already endpointed the phrase.  Dictation and media keep the profile.
     live_stream: bool = False
+    # "speech" keeps the confidence gate: sound that the decoder does not
+    # believe in (music, noise) is reported as nothing.  "everything" shows
+    # whatever the decoder heard, which is the explicit "caption the song"
+    # mode; it never applies to dictation or media.
+    live_sensitivity: str = "speech"
     # Domain terms are supplied by the user-facing dictionary.  They remain a
     # hint to the recognizer, never a replacement for the spoken audio.
     initial_prompt: str = ""
@@ -181,6 +219,8 @@ class Engine:
             raise ValueError("task must be 'transcribe' or 'translate'")
         if config.profile not in {"fast", "balanced", "quality"}:
             raise ValueError("profile must be 'fast', 'balanced', or 'quality'")
+        if config.live_sensitivity not in {"speech", "everything"}:
+            raise ValueError("live_sensitivity must be 'speech' or 'everything'")
         if not config.model.strip():
             raise ValueError("model must not be empty")
 
@@ -370,7 +410,7 @@ class Engine:
             storage = ctranslate2.StorageView.from_array(
                 np.ascontiguousarray(features[np.newaxis, ...].astype(np.float32))
             )
-            tokenizer = self._live_tokenizer(model, config, device, storage)
+            tokenizer = self._live_tokenizer(model, config, device, storage, seconds)
             # The user dictionary is a hint, not a rewrite.  It is bounded hard:
             # every hint token is decoder context paid on each live window.
             terms = " ".join(str(config.initial_prompt).split())[:LIVE_HINT_CHARS]
@@ -412,10 +452,16 @@ class Engine:
         # window contains voice is decided before it reaches the decoder.
         tokens = [token for token in result.sequences_ids[0] if token < tokenizer.eot]
         text = self._drop_restart(tokenizer.decode(tokens).strip())
-        if text and not self._confident(result):
+        if (
+            text
+            and config.live_sensitivity == "speech"
+            and not self._confident(result)
+        ):
             # Music and the tail of a cut phrase still produce words: "75",
             # "Велосипед", "Cutie".  They are reported as nothing rather than as
-            # a caption, and the caller says so through live_no_text.
+            # a caption, and the caller says so through live_no_text.  The
+            # explicit "everything" sensitivity turns the gate off: the user
+            # asked to see whatever the decoder hears, including songs.
             self._status(on_status, "completed")
             return []
         if not text:
@@ -467,23 +513,23 @@ class Engine:
                 return " ".join(words[:index]).strip()
         return text
 
-    @staticmethod
-    def _stem(word: str) -> str:
-        """Drop punctuation, case and a Russian ending for comparison only."""
-
-        clean = word.strip(".,!?…:;-«»\"'()").casefold()
-        return clean[: max(3, len(clean) - 2)]
+    _stem = staticmethod(stem)
 
     def _live_tokenizer(
-        self, model: Any, config: RecognitionConfig, device: str, storage: Any
+        self,
+        model: Any,
+        config: RecognitionConfig,
+        device: str,
+        storage: Any,
+        seconds: float,
     ) -> Any:
-        """Return a cached tokenizer, resolving ``auto`` once per model."""
+        """Return a cached tokenizer for the language of this window."""
 
         from faster_whisper.tokenizer import Tokenizer
 
         language = config.language.strip().lower()
         if language == "auto":
-            language = self._detect_live_language(model, config, device, storage)
+            language = self._detect_live_language(model, config, device, storage, seconds)
         key = (config.model, device, config.task, language)
         with self._model_lock:
             cached = self._tokenizers.get(key)
@@ -500,26 +546,38 @@ class Engine:
         return tokenizer
 
     def _detect_live_language(
-        self, model: Any, config: RecognitionConfig, device: str, storage: Any
+        self,
+        model: Any,
+        config: RecognitionConfig,
+        device: str,
+        storage: Any,
+        seconds: float,
     ) -> str:
-        """Detect the language once and keep it for the rest of the session.
+        """Follow the language from phrase to phrase, not once per session.
 
-        Live windows are short and noisy.  Re-detecting per window makes the
-        caption switch languages mid-phrase; the user can still pin a language
-        in settings.
+        Detection is not free: measured on this CPU it takes 488 ms on a 6.7 s
+        window, about as long as decoding it.  So it is paid once per phrase and
+        never on a preview, which keeps the caption on screen as quick as before
+        and lets the speaker change language between sentences.
+
+        A short or quiet window makes the detector guess.  Two seconds of
+        digital silence came back as English at 0.28, so a result that unsure
+        does not replace the language of speech that was actually recognised.
         """
 
         key = (config.model, device)
         with self._model_lock:
             known = self._detected_languages.get(key)
-        if known:
+        if known and (config.live_preview or seconds < LIVE_DETECT_MIN_SECONDS):
             return known
         with self._inference_lock:
-            detected = model.model.detect_language(storage)[0][0][0]
-        language = str(detected).strip("<|>")
+            token, probability = model.model.detect_language(storage)[0][0]
+        detected = str(token).strip("<|>")
+        if float(probability) < LIVE_LANGUAGE_CONFIDENCE:
+            return known or detected
         with self._model_lock:
-            self._detected_languages[key] = language
-        return language
+            self._detected_languages[key] = detected
+        return detected
 
     @staticmethod
     def _initial_prompt(language: str | None, user_terms: str) -> str | None:
@@ -615,7 +673,10 @@ class Engine:
 
             compute_type = "float16" if device == "cuda" else "int8"
             loaded = WhisperModel(
-                model_name, device=device, compute_type=compute_type
+                model_name,
+                device=device,
+                compute_type=compute_type,
+                cpu_threads=live_cpu_threads(),
             )
             self._models.clear()
             self._tokenizers.clear()

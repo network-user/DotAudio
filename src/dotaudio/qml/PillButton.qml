@@ -31,7 +31,7 @@ Button {
     contentItem: Text {
         text: control.text
         color: control.primary ? Theme.bg : Theme.text
-        font.pixelSize: control.compact ? Theme.fsSmall : 12
+                font.pixelSize: control.compact ? Theme.fsSmall : Theme.fsLabel
         font.weight: Font.DemiBold
         font.family: Theme.fontFamily
         horizontalAlignment: Text.AlignHCenter

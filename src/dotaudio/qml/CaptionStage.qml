@@ -1,10 +1,8 @@
 import QtQuick
 import "Theme.js" as Theme
 
-// Сцена живой речи: одна крупная фраза в фокусе, предыдущая уходит вверх
-// уменьшаясь, как будто её повысили в историю. Одна и та же сцена
-// используется в Live-окне и в субтитрах зала, поэтому движение текста
-// везде одинаковое.
+// Сцена живой речи: фиксированное место для текущей и предыдущей фразы.
+// Общая для Live-окна и субтитров зала.
 Item {
     id: stage
 
@@ -15,113 +13,50 @@ Item {
 
     property int pixelSize: Theme.fsStage
     property int maxLines: 2
-    property int align: Text.AlignHCenter
+    property int align: Text.AlignLeft
     property color ink: Theme.text
     property color mutedInk: Theme.muted
     property bool showPrevious: true
     property bool animateWords: true
 
     readonly property bool hasCaption: String(confirmed).length + String(pending).length > 0
-    readonly property int previousSize: Math.max(13, Math.round(pixelSize * 0.46))
+    readonly property int previousSize: Math.max(Theme.fsBody, Math.round(pixelSize * 0.46))
 
-    onPreviousChanged: stage.pushPrevious()
-    Component.onCompleted: stage.pushPrevious()
+    // Естественная высота сцены: строки фразы плюс блок предыдущей строки.
+    // По ней окно зала и Live-сцена отводят место заранее, поэтому текст не
+    // перемещается, когда фраза становится длиннее.
+    readonly property int lineStep: Math.round(pixelSize * Theme.captionLineFactor)
+    readonly property int previousBlock: showPrevious
+        ? Math.round(previousSize * 1.3) + Math.round(pixelSize * 0.34)
+        : 0
+    implicitHeight: lineStep * Math.max(1, maxLines) + previousBlock
 
-    function pushPrevious() {
-        var value = String(stage.previous || "")
-        if (history.count && history.get(history.count - 1).body === value)
-            return
-        // Уходящая строка остаётся в модели, пока доигрывает исчезновение;
-        // глубже двух строк история сцене не нужна.
-        while (history.count >= 2)
-            history.remove(0)
-        history.append({ "body": value })
-    }
-
-    ListModel { id: history }
-
-    // Предыдущая фраза. Новая строка приезжает снизу и уменьшается со
-    // сценического размера, прежняя уходит выше и растворяется.
-    Item {
+    Text {
         id: promoted
-        visible: stage.showPrevious
+        objectName: "previousCaption"
+        visible: stage.showPrevious && stage.previous.length > 0
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: live.top
         anchors.bottomMargin: Math.round(stage.pixelSize * 0.34)
         height: Math.round(stage.previousSize * 1.3)
-
-        Repeater {
-            model: history
-
-            delegate: Text {
-                id: line
-                required property string body
-                required property int index
-                readonly property bool active: line.index === history.count - 1
-                property real entry: Math.round(stage.pixelSize * 0.6)
-                property real bloom: 1.3
-
-                width: promoted.width
-                text: line.body
-                color: stage.mutedInk
-                font.family: Theme.fontFamily
-                font.pixelSize: stage.previousSize
-                horizontalAlignment: stage.align
-                elide: Text.ElideRight
-                maximumLineCount: 1
-                wrapMode: Text.NoWrap
-                opacity: line.active && line.body.length ? Theme.historyAlpha : 0
-                y: line.active ? 0 : -Math.round(stage.previousSize * 0.9)
-                scale: bloom
-                transformOrigin: stage.align === Text.AlignHCenter ? Item.Center : Item.Left
-                transform: Translate { y: line.entry }
-
-                Behavior on y {
-                    NumberAnimation {
-                        duration: Theme.promoteMs
-                        easing.type: Easing.Bezier
-                        easing.bezierCurve: Theme.easeOut
-                    }
-                }
-                Behavior on opacity {
-                    NumberAnimation {
-                        duration: Theme.promoteMs
-                        easing.type: Easing.Bezier
-                        easing.bezierCurve: Theme.easeOut
-                    }
-                }
-
-                Component.onCompleted: promote.start()
-
-                ParallelAnimation {
-                    id: promote
-                    NumberAnimation {
-                        target: line
-                        property: "entry"
-                        to: 0
-                        duration: Theme.promoteMs
-                        easing.type: Easing.Bezier
-                        easing.bezierCurve: Theme.easeOut
-                    }
-                    NumberAnimation {
-                        target: line
-                        property: "bloom"
-                        to: 1
-                        duration: Theme.promoteMs
-                        easing.type: Easing.Bezier
-                        easing.bezierCurve: Theme.easeOut
-                    }
-                }
-            }
-        }
+        text: stage.previous
+        color: stage.mutedInk
+        font.family: Theme.fontFamily
+        font.pixelSize: stage.previousSize
+        horizontalAlignment: stage.align
+        elide: Text.ElideRight
+        maximumLineCount: 1
+        wrapMode: Text.NoWrap
+        opacity: Theme.historyAlpha
     }
 
     CaptionText {
         id: live
+        objectName: "liveCaption"
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
+        y: stage.previousBlock + Math.round((stage.height - stage.previousBlock - height) / 2)
         confirmed: stage.confirmed
         pending: stage.pending
         pixelSize: stage.pixelSize
@@ -144,13 +79,13 @@ Item {
     Text {
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
+        y: live.y + Math.round((live.height - height) / 2)
         visible: opacity > 0.01
         opacity: stage.hasCaption || !String(stage.placeholder).length ? 0 : 1
         text: stage.placeholder
         color: stage.mutedInk
         font.family: Theme.fontFamily
-        font.pixelSize: Math.max(14, Math.round(stage.pixelSize * 0.52))
+        font.pixelSize: Math.max(Theme.fsBody, Math.round(stage.pixelSize * 0.52))
         horizontalAlignment: stage.align
         wrapMode: Text.Wrap
         maximumLineCount: 2

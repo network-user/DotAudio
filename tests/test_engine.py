@@ -26,7 +26,8 @@ def test_local_engine_caches_model_and_normalises_segments(monkeypatch) -> None:
             assert kwargs["word_timestamps"] is False
             return iter([_Segment(0, 0.5, " first "), _Segment(0.5, 1, "")]), object()
 
-    def model(name: str, *, device: str, compute_type: str):
+    def model(name: str, *, device: str, compute_type: str, cpu_threads: int):
+        assert 1 <= cpu_threads <= 4
         created.append((name, device, compute_type))
         return FakeModel()
 
@@ -111,7 +112,8 @@ def test_auto_device_retries_cuda_runtime_error_on_cpu(monkeypatch) -> None:
         def transcribe(self, _source, **_kwargs):
             return iter([_Segment(0, 1, "ready")]), object()
 
-    def model(_name: str, *, device: str, compute_type: str):
+    def model(_name: str, *, device: str, compute_type: str, cpu_threads: int):
+        assert 1 <= cpu_threads <= 4
         attempts.append((device, compute_type))
         if device == "cuda":
             raise RuntimeError("could not load cublas64_12.dll")
@@ -136,7 +138,8 @@ def test_auto_device_reuses_cpu_after_cuda_runtime_failure(monkeypatch) -> None:
                 raise RuntimeError("cublas runtime failure")
             return iter([_Segment(0, 1, "ready")]), object()
 
-    def model(_name: str, *, device: str, compute_type: str):
+    def model(_name: str, *, device: str, compute_type: str, cpu_threads: int):
+        assert 1 <= cpu_threads <= 4
         del compute_type
         created.append(device)
         return FakeModel(device)
@@ -227,6 +230,13 @@ class _Decoder:
         self.features = None
         self.kwargs: dict = {}
         self.score = score
+        self.languages: list[tuple[str, float]] = [("<|ru|>", 0.99)]
+        self.detections = 0
+
+    def detect_language(self, _features):
+        self.detections += 1
+        index = min(self.detections, len(self.languages)) - 1
+        return [[self.languages[index]]]
 
     def generate(self, features, prompts, **kwargs):
         del prompts
@@ -258,9 +268,10 @@ class _Tokenizer:
     eot = 50257
     sot_sequence = (50258, 50259, 50360)
     no_timestamps = 50364
+    languages: list[str] = []
 
-    def __init__(self, *_args, **_kwargs) -> None:
-        pass
+    def __init__(self, *_args, language="ru", **_kwargs) -> None:
+        _Tokenizer.languages.append(language)
 
     def decode(self, tokens):
         assert tokens == [10, 11]
@@ -305,8 +316,46 @@ def test_live_window_bounds_the_token_budget_and_the_dictionary_hint(monkeypatch
 
     # A one second window cannot legitimately produce hundreds of tokens; the
     # cap is what stops a looping decoder from blocking the next caption.
-    assert model.model.kwargs["max_length"] == 4 + 20
+    assert model.model.kwargs["max_length"] == 4 + 32
     assert len(model.hotwords) <= 150
+
+
+def test_live_language_follows_the_phrases_but_not_the_previews(monkeypatch) -> None:
+    model = _LiveModel()
+    model.model.languages = [("<|ru|>", 0.99), ("<|en|>", 0.98)]
+    _install_live_stack(monkeypatch, model)
+    _Tokenizer.languages = []
+    engine = Engine()
+    phrase = RecognitionConfig(device="cpu", language="auto", live_stream=True)
+    preview = RecognitionConfig(device="cpu", language="auto", live_preview=True)
+    speech = np.zeros(2 * 16000, dtype=np.float32)
+
+    engine.transcribe(speech, phrase)
+    engine.transcribe(speech, preview)
+    engine.transcribe(speech, phrase)
+
+    # Detection costs about as much as the decode, so a preview never pays for
+    # it, and the speaker can still change language between phrases.
+    assert model.model.detections == 2
+    assert _Tokenizer.languages == ["ru", "en"]
+
+
+def test_live_language_is_not_changed_by_an_unsure_detection(monkeypatch) -> None:
+    model = _LiveModel()
+    model.model.languages = [("<|ru|>", 0.99), ("<|cy|>", 0.28)]
+    _install_live_stack(monkeypatch, model)
+    _Tokenizer.languages = []
+    engine = Engine()
+    config = RecognitionConfig(device="cpu", language="auto", live_stream=True)
+    speech = np.zeros(2 * 16000, dtype=np.float32)
+
+    engine.transcribe(speech, config)
+    engine.transcribe(speech, config)
+
+    # Measured, two seconds of digital silence come back as English at 0.28.
+    # A guess like that must not rewrite the caption in another language.
+    assert model.model.detections == 2
+    assert _Tokenizer.languages == ["ru"]
 
 
 def test_live_window_reports_nothing_when_the_decoder_is_guessing(monkeypatch) -> None:
@@ -324,6 +373,20 @@ def test_live_window_reports_nothing_when_the_decoder_is_guessing(monkeypatch) -
 
     assert result == []
     assert segments == []
+
+
+def test_everything_sensitivity_shows_what_the_decoder_heard(monkeypatch) -> None:
+    # The explicit "caption everything, songs included" mode turns the same
+    # gate off: the user asked to see the guess, not to hide the sound.
+    model = _LiveModel(score=-1.5)
+    _install_live_stack(monkeypatch, model)
+    config = RecognitionConfig(
+        device="cpu", live_stream=True, live_sensitivity="everything"
+    )
+
+    result = Engine().transcribe(np.zeros(16000, dtype=np.float32), config)
+
+    assert result[0]["text"] == "живой текст"
 
 
 def test_live_window_keeps_text_when_the_build_returns_no_score(monkeypatch) -> None:

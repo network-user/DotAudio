@@ -9,10 +9,12 @@ Rectangle {
     id: root
 
     property bool embedded: false
-    property bool showTape: embedded
+    // Лента появляется, как только есть завершённая фраза: пустое место под
+    // сценой раньше просто копилось, а контекст разговора терялся.
+    property bool showTape: bridge.segments.length > 0
 
     color: Theme.surface
-    radius: embedded ? Theme.radiusXl : 28
+    radius: Theme.radiusXl
     border.width: 1
     border.color: Theme.border
     clip: true
@@ -29,6 +31,9 @@ Rectangle {
             return String(items[items.length - 2].text)
         return ""
     }
+    // Лента не съедает сцену: в отдельном окне ей треть, в окне приложения
+    // половина - там высоты хватает, и разговор виден глубже.
+    readonly property int tapeBudget: Math.round(root.height * (embedded ? 0.5 : 0.32))
     readonly property bool overlayOn: Boolean(bridge.settings.caption_overlay)
     readonly property string stageHint: bridge.liveActive
         ? bridge.liveStatusText
@@ -36,15 +41,15 @@ Rectangle {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 18
-        spacing: 14
+        anchors.margins: Theme.padCard
+        spacing: Theme.gapMd
 
         // Полоса состояния. Одна строка вместо прежних двух: заголовок и
         // индикатор больше не повторяют друг друга.
         RowLayout {
             Layout.fillWidth: true
             Layout.preferredHeight: 28
-            spacing: 9
+            spacing: Theme.gapSm
 
             StatusDot { active: bridge.recording }
 
@@ -76,6 +81,15 @@ Rectangle {
                 onClicked: bridge.cycleLiveSource()
                 ToolTip.visible: hovered
                 ToolTip.text: "Микрофон, звук компьютера или оба сразу"
+            }
+
+            PillButton {
+                compact: true
+                text: bridge.liveSensitivityLabel
+                enabled: !bridge.recording && !bridge.busy
+                onClicked: bridge.toggleLiveSensitivity()
+                ToolTip.visible: hovered
+                ToolTip.text: "«Речь» показывает только речь, «Всё» - любой звук, включая песни"
             }
 
             IconButton {
@@ -111,26 +125,19 @@ Rectangle {
             }
         }
 
-        CaptionStage {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            previous: root.previousText
-            confirmed: bridge.confirmedCaption
-            pending: bridge.partialCaption
-            placeholder: root.stageHint
-            pixelSize: root.embedded ? 30 : 34
-            maxLines: 3
-            align: Text.AlignHCenter
-        }
+        // Пустое место собирается над лентой, поэтому текст всегда прижат к
+        // сцене, а не плавает в середине окна.
+        Item { Layout.fillWidth: true; Layout.fillHeight: true }
 
-        // Лента последних завершённых фраз. Новая строка приезжает снизу,
-        // остальные съезжают: видно, что текст накапливается.
+        // Лента завершённых фраз стоит над текущей: разговор читается сверху
+        // вниз, и движение совпадает с промоушеном строки внутри сцены.
         ListView {
             id: tape
             visible: root.showTape
             property bool followsLive: true
             Layout.fillWidth: true
-            Layout.preferredHeight: root.showTape ? 84 : 0
+            Layout.preferredHeight: root.showTape ? Math.min(contentHeight, root.tapeBudget) : 0
+            Layout.maximumHeight: root.tapeBudget
             clip: true
             spacing: 2
             model: bridge.segments
@@ -149,8 +156,9 @@ Rectangle {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     text: parent.modelData.text
-                    color: parent.index === tape.count - 1 ? Theme.text : Theme.muted
-                    font.pixelSize: parent.index === tape.count - 1 ? 13 : 12
+                    // Лента тише текущей фразы: главная строка на сцене одна.
+                    color: parent.index === tape.count - 1 ? Theme.muted : Theme.faint
+                    font.pixelSize: parent.index === tape.count - 1 ? Theme.fsBody : Theme.fsLabel
                     font.family: Theme.fontFamily
                     horizontalAlignment: Text.AlignHCenter
                     elide: Text.ElideRight
@@ -197,11 +205,37 @@ Rectangle {
             }
         }
 
+        // Сцена занимает ровно столько, сколько нужно строкам фразы. Пока
+        // лента показывает предыдущие фразы, сцена не дублирует их сама.
+        // Выравнивание влево: центр заставлял бы всю строку ехать на каждом
+        // обновлении черновика, и читать было бы нечего.
+        CaptionStage {
+            Layout.fillWidth: true
+            Layout.preferredHeight: implicitHeight
+            previous: root.previousText
+            showPrevious: !root.showTape
+            confirmed: bridge.confirmedCaption
+            pending: bridge.partialCaption
+            placeholder: root.stageHint
+            pixelSize: root.embedded ? Theme.fsStageSm : Theme.fsStage
+            maxLines: 3
+            align: Text.AlignLeft
+        }
+
+        // Пока фраз нет, сцена стоит по центру: пустой экран не должен
+        // выглядеть прижатым к кнопкам. Как только появляется лента, нижняя
+        // распорка исчезает и текст держится у сцены.
+        Item {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            visible: !root.showTape
+        }
+
         // Управление. Уровень стоит прямо над кнопкой: видно, слышит ли
         // приложение источник, до того как нажали «Слушать».
         ColumnLayout {
             Layout.fillWidth: true
-            spacing: 10
+            spacing: Theme.gapSm
 
             Waveform {
                 Layout.alignment: Qt.AlignHCenter
@@ -212,7 +246,7 @@ Rectangle {
 
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 8
+                spacing: Theme.gapSm
 
                 Item { Layout.fillWidth: true }
 

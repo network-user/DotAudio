@@ -11,7 +11,8 @@ from dotaudio.engine import Engine, RecognitionConfig
 def test_prepare_uses_local_model_cache_and_reports_ready(monkeypatch) -> None:
     loaded: list[tuple[str, str, str]] = []
 
-    def model(name, *, device, compute_type):
+    def model(name, *, device, compute_type, cpu_threads):
+        assert 1 <= cpu_threads <= 4
         loaded.append((name, device, compute_type))
         return object()
 
@@ -64,7 +65,8 @@ def test_prepare_live_falls_back_to_cpu_when_cuda_warmup_fails(monkeypatch) -> N
                 raise RuntimeError("cublas runtime failure")
             return iter(()), object()
 
-    def model(_name, *, device, compute_type):
+    def model(_name, *, device, compute_type, cpu_threads):
+        assert 1 <= cpu_threads <= 4
         del compute_type
         created.append(device)
         return FakeModel(device)
