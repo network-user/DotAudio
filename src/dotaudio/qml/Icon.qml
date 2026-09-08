@@ -70,6 +70,16 @@ Item {
                 line(ctx, 5, 12, 10, 7)
                 line(ctx, 10, 7, 15, 12)
                 break
+            case "maximize":
+                rounded(ctx, 5.5, 5.5, 9, 9, 1.6)
+                ctx.stroke()
+                break
+            case "restore":
+                rounded(ctx, 4.2, 7.2, 8.6, 8.6, 1.4)
+                ctx.stroke()
+                rounded(ctx, 7.2, 4.2, 8.6, 8.6, 1.4)
+                ctx.stroke()
+                break
             case "copy":
                 rounded(ctx, 6.5, 6.5, 8.5, 10, 1.6)
                 ctx.stroke()

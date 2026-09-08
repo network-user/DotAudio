@@ -47,6 +47,11 @@ ApplicationWindow {
     }
     width: shellMode === "app" ? 1220 : shellMode === "theater" ? 740 : islandW
     height: shellMode === "app" ? 790 : shellMode === "theater" ? 420 : islandH
+    // Поверх всех окон живут только остров и сцена Live: они должны быть
+    // видны во время другой работы. Полное окно - обычное окно, его может
+    // перекрыть любое другое, включая браузер с черновиком статьи.
+    property bool stayOnTop: true
+    flags: Qt.FramelessWindowHint | (stayOnTop ? Qt.WindowStaysOnTopHint : 0)
     // Минимум один на все оболочки. Прежний минимум полного окна успевал
     // зажать высоту раньше, чем менялся режим, и остров не сворачивался:
     // окно оставалось высотой 660. Ручного изменения размера здесь нет,
@@ -55,7 +60,6 @@ ApplicationWindow {
     minimumHeight: 40
     visible: true
     color: shellMode === "app" ? Theme.bg : "transparent"
-    flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
     opacity: shellMode === "island" ? Math.max(0.9, Number(bridge.settings.island_opacity)) : 1
     font.family: Theme.fontFamily
     font.hintingPreference: Font.PreferDefaultHinting
@@ -162,7 +166,18 @@ ApplicationWindow {
     function enterShell(mode, morph) {
         root.morphGeo = morph
         root.islandModesOpen = false
+        // Смена флага «поверх всех» требует пересоздания нативного окна
+        // на Windows: короткое скрытие и показ. В этот момент окно
+        // прозрачное, поэтому переключение не вспыхивает.
+        var wantTop = mode !== "app"
+        var needFlags = root.stayOnTop !== wantTop
+        var wasVisible = root.visible
+        if (needFlags && wasVisible)
+            root.hide()
+        root.stayOnTop = wantTop
         root.shellMode = mode
+        if (needFlags && wasVisible)
+            root.show()
         root.shellFade = 0
         root.shellRise = mode === "island" ? 6 : 14
         shellIn.restart()
@@ -185,6 +200,10 @@ ApplicationWindow {
     }
     function collapse() {
         root.logsOpen = false
+        // Развёрнутое окно должно вернуть обычный размер до морфа в остров,
+        // иначе остров растянется на весь экран.
+        if (root.visibility === Window.Maximized)
+            root.showNormal()
         // Из полного окна остров не сжимается кадр за кадром: анкер острова
         // всё равно переставляет окно, и морф читался бы как рывок.
         root.enterShell("island", root.shellMode !== "app")
@@ -594,6 +613,12 @@ ApplicationWindow {
                         font.pixelSize: Theme.fsLabel
                     }
                     IconButton { iconName: "logs"; onClicked: root.logsOpen = !root.logsOpen; ToolTip.visible: hovered; ToolTip.text: "Журнал" }
+                    IconButton {
+                        iconName: root.visibility === Window.Maximized ? "restore" : "maximize"
+                        onClicked: root.visibility === Window.Maximized ? root.showNormal() : root.showMaximized()
+                        ToolTip.visible: hovered
+                        ToolTip.text: root.visibility === Window.Maximized ? "Вернуть обычный размер" : "Развернуть на весь экран"
+                    }
                     PillButton { text: "Скрыть"; onClicked: root.hide(); ToolTip.visible: hovered; ToolTip.text: "Вернуть: Ctrl+Alt+O" }
                     IconButton { iconName: "close"; onClicked: Qt.quit(); ToolTip.visible: hovered; ToolTip.text: "Закрыть программу" }
                     IconButton { iconName: "collapse"; onClicked: root.collapse(); ToolTip.visible: hovered; ToolTip.text: "Свернуть в остров" }
@@ -872,6 +897,11 @@ ApplicationWindow {
                                     readonly property bool selected: bridge.settings.model === modelData
                                     readonly property bool preparing: bridge.modelPreparing && bridge.modelState.model === modelData
                                     readonly property bool cached: Boolean(disk.ready)
+                                    // Снимок загрузки относится к этой карточке, пока
+                                    // идёт скачивание файлов модели.
+                                    readonly property var dl: bridge.modelDownload
+                                    readonly property bool downloading: preparing
+                                        && dl.model === modelData && dl.phase === "download"
                                     Layout.fillWidth: true
                                     implicitHeight: cardBody.implicitHeight + 2 * 16
                                     radius: Theme.radiusLg
@@ -979,40 +1009,67 @@ ApplicationWindow {
                                             }
                                         }
 
-                                        // Прогресс подготовки. Реального процента скачивания
-                                        // движок не отдаёт, поэтому полоса неопределённая:
-                                        // она честно говорит «работаем», а не притворяется
-                                        // замером.
-                                        Item {
+                                        // Прогресс подготовки. Во время скачивания
+                                        // проценты, объём и скорость берутся из факта
+                                        // полученных байтов; после - модель грузится в
+                                        // память без процента, там честный свип.
+                                        ColumnLayout {
                                             visible: modelCard.preparing
                                             Layout.fillWidth: true
-                                            Layout.preferredHeight: 4
-                                            clip: true
-                                            Rectangle {
-                                                anchors.fill: parent
-                                                radius: 2
-                                                color: Theme.hairline
-                                            }
-                                            Rectangle {
-                                                id: sweep
-                                                width: parent.width * 0.3
-                                                height: parent.height
-                                                radius: 2
-                                                color: Theme.text
-                                                SequentialAnimation on x {
-                                                    loops: Animation.Infinite
-                                                    running: modelCard.preparing
-                                                    NumberAnimation { from: -sweep.width; to: modelCard.width; duration: 1100; easing.type: Easing.InOutQuad }
+                                            spacing: 5
+
+                                            Item {
+                                                Layout.fillWidth: true
+                                                Layout.preferredHeight: 4
+                                                clip: true
+                                                Rectangle {
+                                                    anchors.fill: parent
+                                                    radius: 2
+                                                    color: Theme.hairline
+                                                }
+                                                Rectangle {
+                                                    visible: modelCard.downloading
+                                                    width: parent.width * Math.min(1, (modelCard.dl.percent || 0) / 100)
+                                                    height: parent.height
+                                                    radius: 2
+                                                    color: Theme.text
+                                                    Behavior on width {
+                                                        NumberAnimation {
+                                                            duration: Theme.fastMs
+                                                            easing.type: Easing.OutQuad
+                                                        }
+                                                    }
+                                                }
+                                                Rectangle {
+                                                    id: sweep
+                                                    visible: !modelCard.downloading
+                                                    width: parent.width * 0.3
+                                                    height: parent.height
+                                                    radius: 2
+                                                    color: Theme.text
+                                                    SequentialAnimation on x {
+                                                        loops: Animation.Infinite
+                                                        running: modelCard.preparing && !modelCard.downloading
+                                                        NumberAnimation { from: -sweep.width; to: modelCard.width; duration: 1100; easing.type: Easing.InOutQuad }
+                                                    }
                                                 }
                                             }
+
                                             Label {
-                                                anchors.top: parent.bottom
-                                                anchors.topMargin: 6
-                                                anchors.left: parent.left
-                                                visible: modelCard.preparing && bridge.modelState.message.length > 0
+                                                visible: modelCard.downloading
+                                                text: Math.round(modelCard.dl.percent || 0) + "%"
+                                                      + " · " + Math.round(modelCard.dl.received_mb || 0)
+                                                      + " из " + Math.round(modelCard.dl.total_mb || 0) + " МБ"
+                                                      + " · " + (modelCard.dl.speed_mb_s || 0) + " МБ/с"
+                                                color: Theme.muted
+                                                font.pixelSize: Theme.fsSmall
+                                                font.family: Theme.monoFamily
+                                            }
+                                            Label {
+                                                visible: !modelCard.downloading && bridge.modelState.message.length > 0
                                                 text: bridge.modelState.message
                                                 color: Theme.muted
-                                                font.pixelSize: Theme.fsMicro
+                                                font.pixelSize: Theme.fsSmall
                                             }
                                         }
 

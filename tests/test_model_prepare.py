@@ -90,3 +90,43 @@ def test_prepare_live_falls_back_to_cpu_when_cuda_warmup_fails(monkeypatch) -> N
         "gpu_unavailable_falling_back_cpu",
         "model_ready",
     ]
+
+
+def test_download_tracker_reports_real_bytes_and_speed(monkeypatch) -> None:
+    from dotaudio.engine import DownloadTracker
+
+    ticks = iter([0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0])
+    monkeypatch.setattr("dotaudio.engine.time.monotonic", lambda: next(ticks, 2.0))
+    tracker = DownloadTracker(lambda _info: None, interval=0.0)
+    mb = 1048576
+
+    tracker.register(10 * mb, 0)
+    tracker.add(2 * mb)
+    mid = tracker._snapshot()
+    assert mid["phase"] == "download"
+    assert mid["percent"] == 20.0
+    assert mid["received_mb"] == 2.0
+    assert mid["total_mb"] == 10.0
+
+    # Закрытый бар добирает остаток: файл мог уже лежать в кеше.
+    tracker.finish(10 * mb, 2 * mb)
+    done = tracker._snapshot()
+    assert done["percent"] == 100.0
+    # Скорость по скользящему окну: 10 МБ за 2 с между первым и последним
+    # сэмплом фальшивых часов.
+    assert done["speed_mb_s"] == 5.0
+
+
+def test_prepare_reports_download_progress_without_network(monkeypatch) -> None:
+    # Модель уже в кеше: движок не должен трогать сеть и что-то отчитывать.
+    events: list[str] = []
+    progress: list[dict] = []
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=lambda *_a, **_k: object()))
+    monkeypatch.setattr(
+        Engine, "disk_status", staticmethod(lambda _name: {"ready": True, "bytes": 10, "message": "", "path": "", "model": _name})
+    )
+    device = Engine().prepare(
+        RecognitionConfig(model="tiny", device="cpu"), events.append, progress.append
+    )
+    assert device == "cpu"
+    assert progress == []

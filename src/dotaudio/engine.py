@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import time
 import wave
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -24,6 +25,7 @@ import numpy as np
 Segment = dict[str, Any]
 SegmentCallback = Callable[[Segment], None]
 StatusCallback = Callable[[str], None]
+ProgressCallback = Callable[[dict], None]
 
 # Whisper pads every input to 30 seconds, so a 2 s live window costs as much as
 # a full chunk.  CTranslate2 accepts a shorter mel spectrogram, which is what
@@ -52,6 +54,111 @@ LIVE_MIN_LOGPROB = -1.0
 # only trusted above this probability.
 LIVE_DETECT_MIN_SECONDS = 1.5
 LIVE_LANGUAGE_CONFIDENCE = 0.7
+
+# Файлы модели, нужные faster-whisper: тот же набор, что качает его
+# download_model. Прогресс считается по фактическим байтам этих файлов.
+MODEL_FILE_PATTERNS = (
+    "config.json",
+    "model.bin",
+    "preprocessor_config.json",
+    "tokenizer.json",
+    "vocabulary.*",
+)
+
+# Алиас имени профиля к ключу реестра репозиториев faster-whisper.
+REPO_ALIASES = {"turbo": "large-v3-turbo"}
+
+
+class DownloadTracker:
+    """Складывает отдельные файловые бары tqdm в один честный прогресс.
+
+    huggingface_hub качает модели по файлам, каждый со своим баром.
+    Трекер суммирует байты всех баров, считает скорость по скользящему
+    окну и отдаёт снимок не чаще interval секунд, чтобы не заваливать
+    интерфейс обновлениями.
+    """
+
+    def __init__(self, emit: ProgressCallback, interval: float = 0.3, silent: bool = False) -> None:
+        self._emit = emit
+        self._interval = interval
+        self._silent = silent
+        self._lock = Lock()
+        self._total = 0
+        self._received = 0
+        self._samples: deque[tuple[float, int]] = deque()
+        self._last_emit = 0.0
+
+    def _snapshot(self) -> dict:
+        now = time.monotonic()
+        self._samples.append((now, self._received))
+        while self._samples and now - self._samples[0][0] > 2.5:
+            self._samples.popleft()
+        speed = 0.0
+        if len(self._samples) >= 2:
+            span = now - self._samples[0][0]
+            if span > 0:
+                speed = (self._received - self._samples[0][1]) / span
+        percent = 100.0 * self._received / self._total if self._total else 0.0
+        return {
+            "phase": "download",
+            "percent": round(min(100.0, percent), 1),
+            "received_mb": round(self._received / 1048576, 1),
+            "total_mb": round(self._total / 1048576, 1),
+            "speed_mb_s": round(speed / 1048576, 1),
+        }
+
+    def _push(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_emit < self._interval:
+            return
+        self._last_emit = now
+        try:
+            self._emit(self._snapshot())
+        except Exception:
+            # Прогресс не важнее скачивания: сбой канала его не роняет.
+            return
+
+    def register(self, total: int | None, initial: int) -> None:
+        with self._lock:
+            self._total += max(0, int(total or 0))
+            self._received += max(0, int(initial or 0))
+        self._push()
+
+    def add(self, delta: int) -> None:
+        with self._lock:
+            self._received += max(0, int(delta))
+        self._push()
+
+    def finish(self, total: int | None, position: int) -> None:
+        # Закрытый бар добирает остаток: файл мог уже лежать в кеше.
+        with self._lock:
+            if total:
+                self._received += max(0, int(total) - int(position))
+        self._push(force=True)
+
+
+def progress_tqdm_class(tracker: DownloadTracker) -> type:
+    """Класс tqdm, который отчитывается в трекер вместо консоли."""
+
+    from tqdm import tqdm
+
+    class TrackedTqdm(tqdm):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs.setdefault("disable", tracker._silent)
+            super().__init__(*args, **kwargs)
+            tracker.register(self.total, self.n)
+
+        def update(self, n: int | None = 1) -> bool | None:
+            before = self.n
+            out = super().update(n)
+            tracker.add(self.n - before)
+            return out
+
+        def close(self) -> None:
+            tracker.finish(self.total, self.n)
+            super().close()
+
+    return TrackedTqdm
 
 
 # Live windows are short, and splitting one across every core costs more in
@@ -176,12 +283,13 @@ class Engine:
         self,
         config: RecognitionConfig,
         on_status: StatusCallback | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> str:
         """Download and initialise a local model before the user starts recording.
 
         ``WhisperModel`` uses the Hugging Face cache, so preparation survives an
-        application restart.  A precise download percentage is intentionally
-        not fabricated: the dependency can reuse files already in its cache.
+        application restart.  Download progress reports actual bytes delivered
+        by huggingface_hub, so the percentage is measured, not fabricated.
         """
 
         self._validate_config(config)
@@ -189,6 +297,7 @@ class Engine:
             self._status(on_status, "remote_model_managed_by_server")
             return "remote"
         self._status(on_status, "loading_model")
+        self._ensure_model_files(config.model, on_progress)
         model, device = self._model_for(config.model, config.device)
         if config.live_stream:
             warm_error = self._warm_live_decoder(model, config)
@@ -659,6 +768,55 @@ class Engine:
         except Exception as exc:
             return exc
         return None
+
+    @staticmethod
+    def _emit_progress(callback: ProgressCallback | None, info: dict) -> None:
+        if callback is None:
+            return
+        try:
+            callback(info)
+        except Exception:
+            return
+
+    def _ensure_model_files(self, model_name: str, on_progress: ProgressCallback | None) -> None:
+        """Pre-fetch model files so the UI sees real byte progress.
+
+        Runs only when the cache looks incomplete; an already downloaded
+        model stays fully offline.  Files land in the same Hugging Face
+        cache, so ``WhisperModel`` later finds everything without a second
+        network pass.
+        """
+
+        if Engine.disk_status(model_name)["ready"]:
+            return
+        repo = None
+        try:
+            from faster_whisper.utils import _MODELS
+
+            repo = _MODELS.get(model_name) or _MODELS.get(REPO_ALIASES.get(model_name, ""))
+        except Exception:
+            repo = None
+        if not repo:
+            # Custom local paths and unknown names keep the built-in path.
+            return
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError:
+            return
+        tracker = DownloadTracker(
+            lambda info: Engine._emit_progress(on_progress, info),
+            silent=on_progress is None,
+        )
+        try:
+            snapshot_download(
+                repo_id=repo,
+                allow_patterns=list(MODEL_FILE_PATTERNS),
+                tqdm_class=progress_tqdm_class(tracker),
+            )
+        except Exception:
+            # Сетевые ошибки оставляем WhisperModel: он повторит загрузку и
+            # поднимет свою понятную ошибку вместо нашей обёртки.
+            return
 
     def _get_or_load_model(self, model_name: str, device: str) -> Any:
         key = (model_name, device)

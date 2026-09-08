@@ -239,6 +239,7 @@ class Controller(QObject):
     devicesArrived = Signal(object)
     logArrived = Signal(str, str)
     modelProgressArrived = Signal(str, str)
+    modelDownloadProgress = Signal(str, "QVariantMap")
     modelFinished = Signal(str, str, str)
     outputsArrived = Signal(object)
     loopbacksArrived = Signal(object)
@@ -297,6 +298,7 @@ class Controller(QObject):
             "message": "Модель ещё не подготовлена",
         }
         self._model_preparing = False
+        self._model_download = {}
         self._outputs: list[dict[str, str | int]] = []
         self._loopbacks: list[dict[str, str]] = []
         self._device_test = {"phase": "idle", "message": "", "level": 0.0}
@@ -328,6 +330,7 @@ class Controller(QObject):
         self.devicesArrived.connect(self._set_devices)
         self.logArrived.connect(self._on_log)
         self.modelProgressArrived.connect(self._on_model_progress)
+        self.modelDownloadProgress.connect(self._on_model_download_progress)
         self.modelFinished.connect(self._on_model_finished)
         self.outputsArrived.connect(self._set_outputs)
         self.loopbacksArrived.connect(self._set_loopbacks)
@@ -424,6 +427,9 @@ class Controller(QObject):
 
     @Property(bool, notify=changed)
     def modelPreparing(self): return self._model_preparing
+
+    @Property("QVariantMap", notify=changed)
+    def modelDownload(self): return self._model_download
 
     @Property("QVariantMap", notify=changed)
     def hardware(self): return self._hardware
@@ -781,8 +787,16 @@ class Controller(QObject):
         self._record_log("info", message)
         self.changed.emit()
 
+    def _on_model_download_progress(self, model, info):
+        # Проценты и скорость считает трекер загрузки в движке по факту
+        # полученных байтов; сюда прилетает уже готовый снимок ~3 раза в
+        # секунду. Состояние гонки не боится: снимок словарь.
+        self._model_download = {"model": str(model), **dict(info or {})}
+        self.changed.emit()
+
     def _on_model_finished(self, model, device, error):
         self._model_preparing = False
+        self._model_download = {}
         self._prepared_model = "" if error else model
         self._model_prepare_error = str(error or "")
         self._model_prepare_done.set()
@@ -1173,7 +1187,15 @@ class Controller(QObject):
                 if self._prepare_cancel.is_set():
                     self.modelFinished.emit(model, "", "Подготовка отменена")
                     return
-                device = self.engine.prepare(config, lambda status: self.statusArrived.emit(status))
+
+                def progress(info):
+                    self.modelDownloadProgress.emit(model, info)
+
+                device = self.engine.prepare(
+                    config,
+                    lambda status: self.statusArrived.emit(status),
+                    progress,
+                )
                 if self._prepare_cancel.is_set():
                     self.modelFinished.emit(model, "", "Подготовка отменена")
                     return
@@ -1189,6 +1211,7 @@ class Controller(QObject):
         if not self._model_preparing:
             return
         self._prepare_cancel.set()
+        self._model_download = {}
         self._model_state = {
             "phase": "idle",
             "model": self._settings["model"],
