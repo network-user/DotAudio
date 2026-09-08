@@ -22,6 +22,20 @@ Rectangle {
     signal requestIsland()
     signal requestApp()
 
+    // Раскрытая история фраз поверх сцены. Открывается кликом по самому
+    // тексту или кнопкой-журналом рядом со статусом; повторный клик, Esc и
+    // клик по фону закрывают. Прокрутка - мышью (колёсико/полоса) и жестами:
+    // история живёт над лентой и не спорит с ней за чтение.
+    property bool historyOpen: false
+
+    // Esc сначала закрывает открытую историю, и только затем оболочка
+    // сворачивается в остров: не теряем раскрытый список случайным Esc.
+    Shortcut {
+        sequence: "Escape"
+        enabled: root.historyOpen
+        onActivated: root.historyOpen = false
+    }
+
     readonly property var segments: bridge.segments
     readonly property string previousText: {
         var items = bridge.segments
@@ -142,6 +156,17 @@ Rectangle {
             }
 
             IconButton {
+                iconName: "history"
+                ink: root.historyOpen ? Theme.text : Theme.muted
+                enabled: bridge.segments.length > 0
+                onClicked: root.historyOpen = !root.historyOpen
+                ToolTip.visible: hovered
+                ToolTip.text: bridge.segments.length > 0
+                    ? "История сказанных фраз (" + bridge.segments.length + ")"
+                    : "Пока нет завершённых фраз"
+            }
+
+            IconButton {
                 visible: !root.embedded
                 iconName: "expand"
                 onClicked: root.requestApp()
@@ -179,10 +204,11 @@ Rectangle {
         // вниз, и движение совпадает с промоушеном строки внутри сцены.
         ListView {
             id: tape
-            visible: root.showTape
+            visible: root.showTape && !root.historyOpen
             property bool followsLive: true
             Layout.fillWidth: true
-            Layout.preferredHeight: root.showTape ? Math.min(contentHeight, root.tapeBudget) : 0
+            Layout.preferredHeight: (root.showTape && !root.historyOpen)
+                ? Math.min(contentHeight, root.tapeBudget) : 0
             Layout.maximumHeight: root.tapeBudget
             clip: true
             spacing: 2
@@ -271,6 +297,144 @@ Rectangle {
             maxLines: 3
             align: Text.AlignLeft
             animateWords: !Boolean(bridge.settings.reduce_motion)
+
+            // Клик по самому тексту или прокрутка над раскрывают историю
+            // сказанных фраз (пока пользователь её не открыл вручную - кнопкой).
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    if (bridge.segments.length > 0 && !root.historyOpen)
+                        root.historyOpen = true
+                    else if (root.historyOpen)
+                        root.historyOpen = false
+                }
+                onWheel: {
+                    if (bridge.segments.length > 0 && !root.historyOpen)
+                        root.historyOpen = true
+                    wheel.accepted = true
+                }
+            }
+        }
+
+        // Панель истории: раскрывается кликом по тексту или кнопкой-журналом
+        // сверху. Показывает все завершённые фразы этой сессии, прокрутку
+        // мышью и стрелками. Открытая панель съедает большую часть окна и
+        // заменяет собой ленту, чтобы не показывать один текст дважды.
+        Rectangle {
+            id: historyPanel
+            visible: root.historyOpen
+            Layout.fillWidth: true
+            Layout.preferredHeight: historyOpen ? Math.round(root.height * 0.55) : 0
+            radius: Theme.radiusLg
+            color: Theme.surface
+            border.width: 1
+            border.color: Theme.border
+            clip: true
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 14
+                spacing: 6
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Icon { name: "history"; ink: Theme.text; width: 15; height: 15 }
+                    Label {
+                        Layout.fillWidth: true
+                        text: "История сказанных фраз · " + bridge.segments.length
+                        color: Theme.text
+                        font.pixelSize: Theme.fsLabel
+                        font.weight: Font.DemiBold
+                        font.family: Theme.fontFamily
+                    }
+                    Text {
+                        text: "Колёсико или стрелки листают"
+                        color: Theme.faint
+                        font.pixelSize: Theme.fsMicro
+                        font.family: Theme.fontFamily
+                    }
+                    IconButton { iconName: "close"; onClicked: root.historyOpen = false }
+                }
+
+                ListView {
+                    id: historyList
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 4
+                    interactive: true
+                    clip: true
+                    model: bridge.segments
+                    keyNavigationEnabled: true
+                    flickableDirection: Flickable.VerticalFlick
+                    boundsBehavior: Flickable.StopAtBounds
+                    delegate: Rectangle {
+                        id: histRow
+                        required property var modelData
+                        required property int index
+                        width: historyList.width
+                        height: Math.min(54, 34 + modelData.text.length / 60)
+                        radius: Theme.radiusSm
+                        color: histRow.latest ? Theme.fill : "transparent"
+                        property bool latest: index === bridge.segments.length - 1
+                        Behavior on opacity { NumberAnimation { duration: Theme.fastMs } }
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: Theme.radiusSm
+                            color: "transparent"
+                            border.width: histRow.latest ? 1 : 0
+                            border.color: histRow.latest ? Theme.borderHi : "transparent"
+                        }
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 10
+                            spacing: 10
+                            Text {
+                                Layout.alignment: Qt.AlignVCenter
+                                text: histRow.latest ? "↳" : String(index + 1)
+                                color: histRow.latest ? Theme.text : Theme.faint
+                                font.pixelSize: Theme.fsMicro
+                                font.family: Theme.monoFamily
+                                width: 24
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignVCenter
+                                text: histRow.modelData.text
+                                color: histRow.latest ? Theme.text : Theme.muted
+                                font.pixelSize: histRow.latest ? Theme.fsBody : Theme.fsSmall
+                                font.family: Theme.fontFamily
+                                font.weight: histRow.latest ? Font.DemiBold : Font.Normal
+                                wrapMode: Text.Wrap
+                                maximumLineCount: 2
+                                elide: Text.ElideRight
+                            }
+                        }
+                    }
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Item { Layout.fillWidth: true }
+                    PillButton {
+                        compact: true
+                        text: "К последней"
+                        enabled: bridge.segments.length > 0
+                        onClicked: historyList.positionViewAtEnd()
+                    }
+                    Label {
+                        visible: bridge.segments.length === 0
+                        text: "Пока нет завершённых фраз"
+                        color: Theme.faint
+                        font.pixelSize: Theme.fsSmall
+                        font.family: Theme.fontFamily
+                    }
+                }
+            }
         }
 
         // Пока фраз нет, сцена стоит по центру: пустой экран не должен

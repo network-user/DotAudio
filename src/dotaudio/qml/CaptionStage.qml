@@ -20,14 +20,18 @@ Item {
     property bool animateWords: true
 
     readonly property bool hasCaption: String(confirmed).length + String(pending).length > 0
-    readonly property int previousSize: Math.max(Theme.fsBody, Math.round(pixelSize * 0.46))
+    readonly property int lineStep: Math.round(pixelSize * Theme.captionLineFactor)
+    readonly property int previousSize: Math.max(Theme.fsBody, Math.round(pixelSize * Theme.previousLineFactor))
+    readonly property int previousWeight: Theme.previousWeight
 
     // Естественная высота сцены: строки фразы плюс блок предыдущей строки.
     // По ней окно зала и Live-сцена отводят место заранее, поэтому текст не
-    // перемещается, когда фраза становится длиннее.
-    readonly property int lineStep: Math.round(pixelSize * Theme.captionLineFactor)
+    // перемещается, когда фраза становится длиннее. Блок предыдущей строки
+    // держит контекст разговора видимым и заметнее глухой подписи.
+    readonly property int previousPad: Math.round(pixelSize * 0.20)
+    readonly property int previousHeight: Math.round(previousSize * 1.35)
     readonly property int previousBlock: showPrevious
-        ? Math.round(previousSize * 1.3) + Math.round(pixelSize * 0.34)
+        ? previousHeight + previousPad
         : 0
     implicitHeight: lineStep * Math.max(1, maxLines) + previousBlock
 
@@ -38,12 +42,14 @@ Item {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: live.top
-        anchors.bottomMargin: Math.round(stage.pixelSize * 0.34)
-        height: Math.round(stage.previousSize * 1.3)
+        height: stage.showPrevious ? stage.previousBlock : 0
+        verticalAlignment: Text.AlignBottom
+        anchors.bottomMargin: 0
         text: stage.previous
         color: stage.mutedInk
         font.family: Theme.fontFamily
         font.pixelSize: stage.previousSize
+        font.weight: stage.previousWeight
         horizontalAlignment: stage.align
         elide: Text.ElideRight
         maximumLineCount: 1
