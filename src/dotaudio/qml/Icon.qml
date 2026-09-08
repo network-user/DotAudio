@@ -176,6 +176,26 @@ Item {
                 line(ctx, 5, 10, 15, 10)
                 line(ctx, 5, 14, 12, 14)
                 break
+            case "move":
+                // Четырёхнаправленный курсор перемещения.
+                line(ctx, 10, 3, 10, 17); line(ctx, 10, 3, 8.2, 5)
+                line(ctx, 10, 3, 11.8, 5); line(ctx, 10, 17, 8.2, 15)
+                line(ctx, 10, 17, 11.8, 15)
+                line(ctx, 3, 10, 17, 10); line(ctx, 3, 10, 5, 8.2)
+                line(ctx, 3, 10, 5, 11.8); line(ctx, 17, 10, 15, 8.2)
+                line(ctx, 17, 10, 15, 11.8)
+                break
+            case "lock":
+                ctx.beginPath(); ctx.arc(10, 11, 3.4, 0, Math.PI * 2); ctx.stroke()
+                line(ctx, 10, 8, 10, 6.5)
+                ctx.beginPath(); ctx.arc(10, 6.4, 3.2, Math.PI, Math.PI * 2); ctx.stroke()
+                break
+            case "sizer":
+                ctx.strokeStyle = root.ink; ctx.fillStyle = root.ink
+                line(ctx, 16, 12, 16, 16); line(ctx, 16, 16, 12, 16)
+                line(ctx, 14, 9, 14, 14); line(ctx, 14, 14, 9, 14)
+                line(ctx, 12, 6, 12, 12); line(ctx, 12, 12, 6, 12)
+                break
             default:
                 ctx.beginPath()
                 ctx.arc(10, 10, 5.5, 0, Math.PI * 2)

@@ -32,6 +32,16 @@ ApplicationWindow {
     property bool quietHeld: false
     property real islandCenterX: -1
     property real islandTopY: 32
+    // Геометрия окна Live по выбранному пресету; пока окно не зафиксировано
+    // замком, можно пододвинуть и расширить. Пресеты меняются в Настройках.
+    readonly property var theaterSizes: {
+        var s = String(bridge.settings.live_size || "standard")
+        return { "small": [560, 300], "standard": [760, 440], "wide": [960, 360], "tall": [640, 560] }[s]
+            || [760, 440]
+    }
+    readonly property int liveLocked: Boolean(bridge.settings.live_locked)
+    property real dragGrabDx: 0
+    property real dragGrabDy: 0
     property var pageKeys: ["live", "dictation", "media", "models", "history", "settings"]
     // Страница не переключается в тот же кадр: содержимое сначала гаснет,
     // затем новое приезжает снизу. Индекс меняет сам переход.
@@ -45,8 +55,12 @@ ApplicationWindow {
         else
             root.pageIndex = root.targetPageIndex
     }
-    width: shellMode === "app" ? 1220 : shellMode === "theater" ? 740 : islandW
-    height: shellMode === "app" ? 790 : shellMode === "theater" ? 420 : islandH
+    width: shellMode === "app" ? 1220 : shellMode === "theater"
+              ? root.theaterSizes[0]
+              : islandW
+    height: shellMode === "app" ? 790 : shellMode === "theater"
+              ? root.theaterSizes[1]
+              : islandH
     // Поверх всех окон живут только остров и сцена Live: они должны быть
     // видны во время другой работы. Полное окно - обычное окно, его может
     // перекрыть любое другое, включая браузер с черновиком статьи.
@@ -196,6 +210,8 @@ ApplicationWindow {
     function openTheater() {
         bridge.selectPage("live")
         bridge.applyIslandClickThrough(false)
+        // Единое Live-окно: отдельное окно зала не дублирует текст поверх.
+        bridge.setSetting("caption_overlay", false)
         root.enterShell("theater", true)
     }
     function collapse() {
@@ -235,6 +251,14 @@ ApplicationWindow {
             root.show()
             root.raise()
             root.requestActivate()
+        }
+        function onCaptureStarted(_sid, _when) {
+            // Старт Live на «динамическом острове» по умолчанию разворачивает
+            // единое Live-окно (авто), если пользователь не выключил это.
+            if (Boolean(bridge.settings.live_auto_window)
+                    && root.shellMode === "island" && bridge.page === "live") {
+                root.openTheater()
+            }
         }
         function onChanged() {
             if (bridge.recording && bridge.inputState === "Нет входного сигнала") {
@@ -382,6 +406,14 @@ ApplicationWindow {
         embedded: false
         onRequestIsland: root.collapse()
         onRequestApp: root.openApp("live")
+        onRequestWindowMove: {
+            if (!root.liveLocked)
+                root.startSystemMove()
+        }
+        onRequestWindowEdgeResize: {
+            if (!root.liveLocked)
+                root.startSystemResize(Qt.RightEdge | Qt.BottomEdge)
+        }
     }
 
     Rectangle {
@@ -810,7 +842,7 @@ ApplicationWindow {
                                     PillButton { text: bridge.rendering ? "Рендер…" : "MP4"; primary: true; enabled: bridge.segments.length > 0 && !bridge.rendering; onClicked: bridge.exportKaraokeVideo() }
                                 }
                             }
-                            TranscriptEditor { Layout.fillWidth: true; Layout.horizontalStretchFactor: 47; Layout.fillHeight: true; player: mediaPlayer; editable: true }
+                            KaraokeEditor { Layout.fillWidth: true; Layout.horizontalStretchFactor: 47; Layout.fillHeight: true; player: mediaPlayer; segments: bridge.segments; editable: true }
                         }
                         MediaPlayer { id: mediaPlayer; source: bridge.mediaUrl; videoOutput: mediaVideo; audioOutput: AudioOutput {} }
                     }
@@ -1576,6 +1608,63 @@ ApplicationWindow {
                                                     text: index === 0 ? "Экран 1" : "Экран " + (index + 1)
                                                     primary: Number(bridge.settings.caption_screen) === index || (Number(bridge.settings.caption_screen) < 0 && index === 0)
                                                     onClicked: bridge.setSetting("caption_screen", index)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    implicitHeight: liveBox.implicitHeight + 2 * Theme.padCard
+                                    radius: Theme.radiusLg
+                                    color: Theme.surface
+                                    border.width: 1
+                                    border.color: Theme.border
+                                    ColumnLayout {
+                                        id: liveBox
+                                        anchors.fill: parent
+                                        anchors.margins: Theme.padCard
+                                        spacing: Theme.gapSm
+                                        Label { text: "Live-окно и текст"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
+                                        Text { Layout.fillWidth: true; text: "При Live остров превращается в одно окно. Размер - пресетами или руками за угол, замок фиксирует положение и размер."; color: Theme.muted; wrapMode: Text.Wrap; font.pixelSize: Theme.fsSmall }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            ToggleSwitch { text: "Авто-окно при старте Live"; checked: Boolean(bridge.settings.live_auto_window); onToggled: bridge.setSetting("live_auto_window", checked) }
+                                            Item { Layout.fillWidth: true }
+                                            ToggleSwitch { text: "Замок"; checked: Boolean(bridge.settings.live_locked); onToggled: bridge.setSetting("live_locked", checked) }
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Label { text: "Размер пресет"; color: Theme.muted; font.pixelSize: Theme.fsLabel }
+                                            PillButton { text: "Малый"; primary: String(bridge.settings.live_size) === "small"; onClicked: bridge.setSetting("live_size", "small") }
+                                            PillButton { text: "Средний"; primary: String(bridge.settings.live_size) === "standard"; onClicked: bridge.setSetting("live_size", "standard") }
+                                            PillButton { text: "Широкий"; primary: String(bridge.settings.live_size) === "wide"; onClicked: bridge.setSetting("live_size", "wide") }
+                                            PillButton { text: "Высокий"; primary: String(bridge.settings.live_size) === "tall"; onClicked: bridge.setSetting("live_size", "tall") }
+                                            Item { Layout.fillWidth: true }
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            ToggleSwitch { text: "Клик по тексту - история"; checked: Boolean(bridge.settings.live_click_history); onToggled: bridge.setSetting("live_click_history", checked) }
+                                            Item { Layout.fillWidth: true }
+                                            ToggleSwitch { text: "Показывать «старую» фразу"; checked: Boolean(bridge.settings.live_show_previous); onToggled: bridge.setSetting("live_show_previous", checked) }
+                                        }
+                                        Label {
+                                            text: "Комбинация выхода: закрывает программу целиком из консоли и по горячей клавише."
+                                            color: Theme.faint
+                                            font.pixelSize: Theme.fsMicro
+                                            wrapMode: Text.Wrap
+                                            Layout.fillWidth: true
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Label { text: "Выход"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.preferredWidth: 70 }
+                                            Repeater {
+                                                model: ["Ctrl+Alt+X", "Ctrl+Alt+C", "Ctrl+Shift+X", "Ctrl+Win+X", "Ctrl+Alt+Q"]
+                                                PillButton {
+                                                    required property string modelData
+                                                    text: modelData
+                                                    primary: String(bridge.settings.quit_hotkey) === modelData
+                                                    onClicked: bridge.setSetting("quit_hotkey", modelData)
                                                 }
                                             }
                                         }

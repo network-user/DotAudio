@@ -21,6 +21,11 @@ Rectangle {
 
     signal requestIsland()
     signal requestApp()
+    // Пользователь тянет окно / растягивает за угол (нативные окно-действия).
+    signal requestWindowMove()
+    signal requestWindowEdgeResize()
+    // Замок фиксирует положение и размер окна Live и делает клики сквозными.
+    readonly property bool locked: Boolean(bridge.settings.live_locked)
 
     // Раскрытая история фраз поверх сцены. Открывается кликом по самому
     // тексту или кнопкой-журналом рядом со статусом; повторный клик, Esc и
@@ -153,6 +158,43 @@ Rectangle {
                 onClicked: bridge.copyText()
                 ToolTip.visible: hovered
                 ToolTip.text: "Скопировать расшифровку"
+            }
+
+            IconButton {
+                iconName: "lock"
+                ink: root.locked ? Theme.text : Theme.muted
+                onClicked: bridge.setSetting("live_locked", !root.locked)
+                ToolTip.visible: hovered
+                ToolTip.text: root.locked
+                    ? "Положение и размер зафиксированы"
+                    : "Зафиксировать положение и размер Live-окна"
+            }
+
+            // Ребро-захват: тянуть приложенное маленькое поле - перемещать окно.
+            Item {
+                id: moveGrip
+                Layout.preferredWidth: 16
+                Layout.preferredHeight: 22
+                visible: !root.locked
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.SizeAllCursor
+                    onPressed: root.requestWindowMove()
+                }
+                Icon { name: "move"; ink: Theme.muted; width: 15; height: 15; anchors.centerIn: parent }
+            }
+
+            // Ребро-захват: растянуть окно за угол (native resize).
+            Item {
+                Layout.preferredWidth: 12
+                Layout.preferredHeight: 22
+                visible: !root.locked
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.SizeFDiagCursor
+                    onPressed: root.requestWindowEdgeResize()
+                }
+                Icon { name: "sizer"; ink: Theme.muted; width: 12; height: 22; anchors.centerIn: parent }
             }
 
             IconButton {
@@ -304,13 +346,16 @@ Rectangle {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
+                    if (!Boolean(bridge.settings.live_click_history))
+                        return
                     if (bridge.segments.length > 0 && !root.historyOpen)
                         root.historyOpen = true
                     else if (root.historyOpen)
                         root.historyOpen = false
                 }
                 onWheel: {
-                    if (bridge.segments.length > 0 && !root.historyOpen)
+                    if (Boolean(bridge.settings.live_click_history)
+                            && bridge.segments.length > 0 && !root.historyOpen)
                         root.historyOpen = true
                     wheel.accepted = true
                 }
