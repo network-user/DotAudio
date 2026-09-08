@@ -167,7 +167,9 @@ Rectangle {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.margins: 12
-        anchors.bottom: panel.y
+        // Привязка к краю панели, а не к её координате: anchors ждёт линию
+        // привязки, и число здесь ломало высоту списка.
+        anchors.bottom: panel.top
         spacing: 6
         clip: true
         model: root.segments
@@ -218,10 +220,14 @@ Rectangle {
 
     Label {
         anchors.centerIn: list
+        // Ширина обязательна: без неё подсказка не переносилась и уезжала
+        // за правый край панели.
+        width: Math.max(120, list.width - 40)
         visible: root.segments.length === 0
-        text: "Распознайте аудио/видео — появятся фразы и слова, которые здесь правят."
+        text: "Распознайте аудио или видео — здесь появятся фразы и слова, которые можно править."
         color: Theme.muted
         font.pixelSize: Theme.fsBody
+        wrapMode: Text.Wrap
         horizontalAlignment: Text.AlignHCenter
     }
 
@@ -231,21 +237,36 @@ Rectangle {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        height: 150
+        // Высота по содержимому: кнопки и поля переносятся на узкой панели, и
+        // фиксированные 150 пикселей обрезали последнюю строку.
+        height: panelBody.implicitHeight + 20
         color: Theme.surface2
         border.color: Theme.border
         border.width: 1
 
         Column {
-            anchors.fill: parent
+            id: panelBody
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
             anchors.margins: 10
             spacing: 8
 
-            Text { id: capLabel; width: parent.width; color: Theme.text; elide: Text.ElideRight; font.pixelSize: Theme.fsSmall }
-
-            RowLayout {
+            Text {
+                id: capLabel
                 width: parent.width
-                spacing: 8
+                color: Theme.text
+                wrapMode: Text.Wrap
+                maximumLineCount: 2
+                elide: Text.ElideRight
+                font.pixelSize: Theme.fsSmall
+            }
+
+            // Кнопки переносятся на вторую строку, а не уезжают за край:
+            // панель бывает узкой, когда редактор занимает половину окна.
+            Flow {
+                width: parent.width
+                spacing: 6
                 PillButton { text: "◂"
                     enabled: count() > 0
                     onClicked: root.walk(-1) }
@@ -267,23 +288,50 @@ Rectangle {
                     onClicked: root.setEdgePlayhead(false) }
             }
 
-            RowLayout {
+            // Тоже переносом: три поля с подписью не помещаются в узкую
+            // панель, и правое поле уезжало за край.
+            Flow {
                 width: parent.width
                 spacing: 6
-                Text { text: "слово"; color: Theme.muted; font.pixelSize: Theme.fsSmall }
-                TextField { id: wordBox; Layout.preferredWidth: 150
+                Text {
+                    text: "слово"
+                    color: Theme.muted
+                    font.pixelSize: Theme.fsSmall
+                    anchors.verticalCenter: undefined
+                }
+                // Поля ввода красятся темой: системный фон приносил на тёмную
+                // панель белые прямоугольники.
+                TextField { id: wordBox; implicitWidth: Math.min(150, parent.width)
                     color: Theme.text; font.pixelSize: Theme.fsSmall
+                    placeholderTextColor: Theme.faint
+                    background: Rectangle {
+                        radius: Theme.radiusSm
+                        color: Theme.fill
+                        border.width: wordBox.activeFocus ? 1 : 0
+                        border.color: Theme.borderHi
+                    }
                     onAccepted: root.commitWordText()
                 }
-                TextField { id: startField; Layout.preferredWidth: 84
+                TextField { id: startField; implicitWidth: 84
                     font.family: Theme.monoFamily; color: Theme.text; font.pixelSize: Theme.fsSmall
+                    background: Rectangle {
+                        radius: Theme.radiusSm
+                        color: Theme.fill
+                        border.width: startField.activeFocus ? 1 : 0
+                        border.color: Theme.borderHi
+                    }
                     onEditingFinished: root.commitEdge(true)
                 }
-                TextField { id: endField; Layout.preferredWidth: 84
+                TextField { id: endField; implicitWidth: 84
                     font.family: Theme.monoFamily; color: Theme.text; font.pixelSize: Theme.fsSmall
+                    background: Rectangle {
+                        radius: Theme.radiusSm
+                        color: Theme.fill
+                        border.width: endField.activeFocus ? 1 : 0
+                        border.color: Theme.borderHi
+                    }
                     onEditingFinished: root.commitEdge(false)
                 }
-                Item { Layout.fillWidth: true }
                 Text { text: root.player ? "курсор " + root.fmt(root.player.position/1000) : ""
                     color: Theme.muted; font.family: Theme.monoFamily; font.pixelSize: Theme.fsSmall }
             }
