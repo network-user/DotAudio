@@ -62,6 +62,9 @@ FINAL_MERGE_LIMIT_SECONDS = 15.0
 # before it, and the words that repeat are removed afterwards.
 SHORT_FINAL_SECONDS = 1.2
 PHRASE_CONTEXT_SECONDS = 2.0
+# Сколько последних финальных фраз декодер видит как предыдущий текст.
+# Движок дополнительно ограничивает контекст по символам.
+LIVE_CONTEXT_PHRASES = 3
 
 _PREVIEW_PUNCTUATION = str.maketrans("", "", ".,!?;:…«»\"“”()[]{}")
 
@@ -137,20 +140,48 @@ class VoiceActivity:
         return heard_speech
 
 
+# ONNX-сессия Silero общая: загрузка стоит сотни миллисекунд и раньше
+# попадала в критический путь кнопки Live. Состояние рекуррентной сети
+# у каждого VoiceActivity своё, сессию можно делить.
+_vad_session = None
+_vad_lock = Lock()
+
+
+def preload_voice_activity() -> bool:
+    """Загрузить Silero заранее, до нажатия Live. Без сети."""
+
+    global _vad_session
+    with _vad_lock:
+        if _vad_session is not None:
+            return True
+        try:
+            from faster_whisper.vad import get_vad_model
+
+            _vad_session = get_vad_model().session
+            return True
+        except Exception:
+            return False
+
+
 def open_voice_activity():
     """Build the streaming detector, or ``None`` when the model is unavailable.
 
     The ONNX model ships with faster-whisper, so this never reaches the network.
+    Prefer ``preload_voice_activity`` at app start so Live does not pay load cost.
     """
 
-    try:
-        from faster_whisper.vad import get_vad_model
+    global _vad_session
+    with _vad_lock:
+        if _vad_session is None:
+            try:
+                from faster_whisper.vad import get_vad_model
 
-        return VoiceActivity(get_vad_model().session)
-    except Exception:
-        # Live must still start with energy endpointing on a machine where
-        # onnxruntime cannot load.
-        return None
+                _vad_session = get_vad_model().session
+            except Exception:
+                # Live must still start with energy endpointing on a machine where
+                # onnxruntime cannot load.
+                return None
+        return VoiceActivity(_vad_session)
 
 
 class SpeechBuffer:
@@ -188,6 +219,10 @@ class SpeechBuffer:
         self.lead_end = 0.0
         self._context = np.zeros(0, dtype=np.float32)
         self._context_end = 0.0
+        # Whether the phrase just emitted ended because it hit the length
+        # limit rather than because the speaker paused.  Such a phrase is
+        # the middle of a sentence, whatever punctuation the decoder puts on it.
+        self.cut_at_limit = False
 
     def feed(self, audio):
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
@@ -233,6 +268,7 @@ class SpeechBuffer:
         start, audio = self.start / SAMPLE_RATE, np.concatenate(self.frames)
         self._remember(start, audio)
         self._reset()
+        self.cut_at_limit = False
         return (start, audio)
 
     def _remember(self, start, audio):
@@ -255,7 +291,9 @@ class SpeechBuffer:
         audio = np.concatenate(self.frames)
         split = self.split
         if not 0 < split < len(audio):
-            return self.flush()
+            flushed = self.flush()
+            self.cut_at_limit = True
+            return flushed
         head, tail = audio[:split], audio[split:]
         start = self.start
         quiet = self.quiet
@@ -267,6 +305,7 @@ class SpeechBuffer:
         self.frames = [tail]
         self.size = len(tail)
         self.quiet = min(quiet, len(tail))
+        self.cut_at_limit = True
         return (start / SAMPLE_RATE, head)
 
     def _reset(self):
@@ -367,6 +406,9 @@ class LiveSession:
         self._last_preview_offset = None
         self._last_preview_end = None
         self._last_final_text = ""
+        # Последние распознанные фразы: декодер читает их как предыдущий
+        # сегмент. Только Live: диктовка и медиа идут штатным путём Whisper.
+        self._context: deque[str] = deque(maxlen=LIVE_CONTEXT_PHRASES)
         # A final has priority over a queued preview, but an uninterrupted
         # stream can produce another final while that one is decoding.  Always
         # taking finals in that case freezes the visible caption even though a
@@ -440,12 +482,12 @@ class LiveSession:
             chunk = self.buffer.feed(audio)
             if chunk:
                 self._last_preview_position = self.buffer.position
-                self._enqueue_final(chunk)
+                self._enqueue_final(chunk, cut=self.buffer.cut_at_limit)
             else:
                 self._schedule_preview()
 
-    def _enqueue_final(self, chunk):
-        chunk = (*chunk, self._lead_for(chunk))
+    def _enqueue_final(self, chunk, *, cut=False):
+        chunk = (*chunk, self._lead_for(chunk), cut)
         # A final result supersedes any preview waiting for the same utterance.
         # A queued final has not produced text yet. In Live retain a result
         # already decoding across this boundary, or slow inference can emit
@@ -517,8 +559,8 @@ class LiveSession:
     def _merge_finals(waiting, arriving):
         """Join two queued phrases, or return None if they must stay apart."""
 
-        start, audio, lead = waiting
-        next_start, next_audio, _next_lead = arriving
+        start, audio, lead, *_rest = waiting
+        next_start, next_audio, _next_lead, *next_rest = arriving
         gap = next_start - (start + len(audio) / SAMPLE_RATE)
         if not -FINAL_MERGE_GAP_SECONDS <= gap <= FINAL_MERGE_GAP_SECONDS:
             return None
@@ -529,7 +571,10 @@ class LiveSession:
             # Long enough to stand on its own now, so it no longer needs the
             # phrase before it for context.
             lead = None
-        return (start, np.concatenate((audio, next_audio)), lead)
+        # The join ends where the arriving phrase ended, so it is cut by the
+        # limit exactly when that phrase was.
+        cut = bool(next_rest[0]) if next_rest else False
+        return (start, np.concatenate((audio, next_audio)), lead, cut)
 
     def _discard_queued_finals(self):
         while True:
@@ -820,7 +865,7 @@ class LiveSession:
 
         started = monotonic()
         result = self.engine.transcribe(
-            audio, self.preview_config, self.cancel, collect, self.on_status
+            audio, self._with_context(self.preview_config), self.cancel, collect, self.on_status
         )
         self._note_decode(monotonic() - started, len(audio) / SAMPLE_RATE)
         if not received and result:
@@ -868,7 +913,7 @@ class LiveSession:
             # A closed QML object must not stop recording or finalisation.
             return
 
-    def _transcribe_final(self, offset, audio, lead=None):
+    def _transcribe_final(self, offset, audio, lead=None, cut=False):
         self._last_preview_text = ""
         self._stable_prefix = ""
         self._phrase_head = ""
@@ -882,16 +927,23 @@ class LiveSession:
             if not self.cancel.is_set() and str(segment.get("text", "")).strip():
                 emitted = True
                 self._last_final_text = str(segment["text"]).strip()
+                if self.catch_up:
+                    self._context.append(self._last_final_text)
                 self.on_segment({
                     **segment,
                     "start": segment["start"] + offset,
                     "end": segment["end"] + offset,
                     "audio_end": end,
+                    # The phrase limit, not the speaker, ended this one: the
+                    # sentence goes on in the next final.
+                    "cut": bool(cut),
                 })
 
         started = monotonic()
         if lead is None:
-            self.engine.transcribe(audio, self.config, self.cancel, emit, self.on_status)
+            self.engine.transcribe(
+                audio, self._with_context(self.config), self.cancel, emit, self.on_status
+            )
         else:
             text = self._drop_lead(self._last_final_text, self._decode(lead, audio))
             if text is None:
@@ -906,11 +958,33 @@ class LiveSession:
         if self.catch_up and not emitted and not self.cancel.is_set():
             self.on_status("live_no_text")
 
+    def _with_context(self, config, *, skip_last=False):
+        """Config for one live decode with the recent finals as previous text.
+
+        ``skip_last`` leaves out the newest phrase: it is used when that
+        phrase's audio is itself prepended to the window, so the decoder must
+        not read the same speech twice, once as text and once as sound.
+        """
+
+        if not self.catch_up or not self._context:
+            return config
+        phrases = list(self._context)
+        if skip_last:
+            phrases = phrases[:-1]
+        text = " ".join(phrases).strip()
+        if not text:
+            return config
+        return replace(config, live_context=text)
+
     def _decode(self, lead, audio):
         window = audio if lead is None else np.concatenate((lead, audio))
         collected: list[dict[str, Any]] = []
         result = self.engine.transcribe(
-            window, self.config, self.cancel, collected.append, self.on_status
+            window,
+            self._with_context(self.config, skip_last=lead is not None),
+            self.cancel,
+            collected.append,
+            self.on_status,
         )
         if not collected and result:
             collected.extend(dict(segment) for segment in result)

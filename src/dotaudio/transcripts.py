@@ -11,6 +11,86 @@ from typing import Any
 
 _SENTENCE_END = re.compile(r"[.!?…](?:[\"'»)]*)$")
 
+# Live cuts speech into phrases of a few seconds so that a caption can be
+# decoded quickly; a sentence usually spans several of them.  The pieces are
+# joined back for reading by these rules.  A pause longer than this between two
+# finals means the speaker finished the thought, whatever the punctuation.
+LIVE_SENTENCE_GAP_SECONDS = 2.0
+# A sentence longer than this is closed so the live row stays readable.
+LIVE_SENTENCE_MAX_CHARS = 320
+
+
+def sentence_open(text: str, cut: bool = False) -> bool:
+    """Whether a recognised phrase is still waiting for the rest of its sentence.
+
+    The decoder ends nearly every live window with a full stop, so its
+    punctuation only counts when the phrase ended because the speaker paused.
+    A phrase that ended because it hit the length limit (``cut``) is the middle
+    of a sentence by construction.
+    """
+
+    clean = str(text).strip()
+    if not clean:
+        return False
+    if cut:
+        return True
+    return _SENTENCE_END.search(clean) is None
+
+
+def continues_sentence(
+    previous_text: str,
+    previous_cut: bool,
+    next_text: str,
+    gap_seconds: float,
+) -> bool:
+    """Whether ``next_text`` is the continuation of the open ``previous_text``."""
+
+    previous, following = str(previous_text).strip(), str(next_text).strip()
+    if not previous or not following:
+        return False
+    if gap_seconds > LIVE_SENTENCE_GAP_SECONDS:
+        return False
+    if len(previous) + len(following) + 1 > LIVE_SENTENCE_MAX_CHARS:
+        return False
+    if sentence_open(previous, previous_cut):
+        return True
+    # A phrase that opens in lower case continues the previous one even when
+    # the decoder closed that one with a full stop.
+    first = following[0]
+    return first.isalpha() and first.islower()
+
+
+def blend_fragments(previous_text: str, previous_cut: bool, next_text: str) -> tuple[str, str]:
+    """Adjust the seam between two fragments of one sentence.
+
+    A window cut mid-sentence comes back as "…почти мгновенно." and the next
+    one as "Даже на слабом…": the decoder saw each on its own.  Once they are
+    known to be one sentence the stop becomes a comma and the capital is
+    lowered, so the reader sees "…почти мгновенно, даже на слабом…".  Nothing
+    else is rewritten; a question or exclamation mark is left as the decoder
+    put it, and a word with more than its first letter in capitals is treated
+    as a name or an abbreviation.
+    """
+
+    previous, following = str(previous_text).strip(), str(next_text).strip()
+    if not previous or not following:
+        return previous, following
+    if not previous_cut:
+        return previous, following
+    if previous.endswith(".") and not previous.endswith(".."):
+        previous = previous[:-1].rstrip() + ","
+        first, rest = following[0], following[1:]
+        if first.isupper() and (not rest[:1].isalpha() or rest[:1].islower()):
+            following = first.lower() + rest
+    return previous, following
+
+
+def join_fragments(previous_text: str, previous_cut: bool, next_text: str) -> str:
+    """The two fragments as one sentence for the transcript."""
+
+    previous, following = blend_fragments(previous_text, previous_cut, next_text)
+    return " ".join(part for part in (previous, following) if part)
+
 
 def _normalise(value: str) -> str:
     return unicodedata.normalize("NFC", value).casefold().replace("ё", "е")

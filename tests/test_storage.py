@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dotaudio.storage import Store
+from dotaudio.storage import GENERAL_CHAT_ID, SCHEMA_VERSION, Store
 
 
 def test_store_persists_sessions_segments_and_settings(tmp_path: Path) -> None:
@@ -136,11 +136,16 @@ def test_versionless_database_is_migrated_without_losing_data(tmp_path: Path) ->
 
     assert migrated.get_session("legacy")["segments"][0]["text"] == "old text"
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         columns = {row[1] for row in connection.execute("PRAGMA table_info(segments)")}
         indexes = {row[1] for row in connection.execute("PRAGMA index_list(sessions)")}
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
     assert "words_json" in columns
     assert {"ix_sessions_history_order", "ix_sessions_status"} <= indexes
+    assert {"chat_messages", "transcript_digests"} <= tables
 
 
 def test_list_sessions_supports_stable_pagination(tmp_path: Path) -> None:
@@ -168,3 +173,61 @@ def test_list_sessions_rejects_invalid_pagination(
 
     with pytest.raises(ValueError):
         store.list_sessions(limit=limit, offset=offset)
+
+
+def test_chat_history_belongs_to_a_record_and_to_the_free_chat(tmp_path: Path) -> None:
+    store = Store(tmp_path / "dotaudio.sqlite3")
+    session_id = store.create_session("Совещание", "live", "system", "small")
+
+    store.append_chat_message(session_id, "user", "О чём запись?")
+    store.append_chat_message(session_id, "assistant", "О смете", "qwen3-4b", {"action": "summary"})
+    store.append_chat_message(GENERAL_CHAT_ID, "user", "Просто вопрос")
+
+    talk = store.list_chat_messages(session_id)
+    general = store.list_chat_messages(GENERAL_CHAT_ID)
+
+    assert [item["role"] for item in talk] == ["user", "assistant"]
+    assert talk[1]["meta"] == {"action": "summary"}
+    assert talk[1]["model"] == "qwen3-4b"
+    # Общий чат не смешивается с перепиской по записи.
+    assert [item["content"] for item in general] == ["Просто вопрос"]
+
+    store.clear_chat_messages(session_id)
+    assert store.list_chat_messages(session_id) == []
+    assert len(store.list_chat_messages(GENERAL_CHAT_ID)) == 1
+
+
+def test_chat_history_limit_returns_the_latest_in_order(tmp_path: Path) -> None:
+    store = Store(tmp_path / "dotaudio.sqlite3")
+    for number in range(5):
+        store.append_chat_message("rec", "user", f"вопрос {number}")
+
+    latest = store.list_chat_messages("rec", limit=2)
+
+    assert [item["content"] for item in latest] == ["вопрос 3", "вопрос 4"]
+
+
+def test_chat_rejects_an_unknown_role(tmp_path: Path) -> None:
+    store = Store(tmp_path / "dotaudio.sqlite3")
+
+    with pytest.raises(ValueError):
+        store.append_chat_message("rec", "robot", "текст")
+
+
+def test_digests_are_replaced_per_part_and_keep_the_text_hash(tmp_path: Path) -> None:
+    store = Store(tmp_path / "dotaudio.sqlite3")
+
+    store.save_digest("rec", 0, "hash-a", 0.0, 60.0, "О смете", ["смета"], "qwen3-4b")
+    store.save_digest("rec", 1, "hash-b", 60.0, 120.0, "О сроках", ["сроки"], "qwen3-4b")
+    # Правка расшифровки меняет хеш части: описание обновляется, а не дублируется.
+    store.save_digest("rec", 0, "hash-c", 0.0, 60.0, "О смете и людях", ["люди"], "qwen3-4b")
+
+    digests = store.list_digests("rec")
+
+    assert [item["chunk_index"] for item in digests] == [0, 1]
+    assert digests[0]["content_hash"] == "hash-c"
+    assert digests[0]["summary"] == "О смете и людях"
+    assert digests[0]["keywords"] == ["люди"]
+
+    store.clear_digests("rec")
+    assert store.list_digests("rec") == []

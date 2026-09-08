@@ -2,9 +2,10 @@
 
 Офлайн Kaldi-модели vosk дают потоковый partial-текст и работают на слабом
 CPU без GPU (RTF ~0.14 на записи в замерах docs/STT_METHODS.md). В DotAudio
-vosk - это альтернативный "live_engine" для живых субтитров (по умолчанию для
-нового профиля), при этом взаимодействие остаётся прежним: ``LiveSession``
-зовёт движок через ``transcribe(array, ...)``, UI не знает, какой движок был.
+vosk - это альтернативный "live_engine" для живых субтитров (по умолчанию
+Whisper; vosk - явный выбор для слабого CPU), при этом взаимодействие
+остаётся прежним: ``LiveSession`` зовёт движок через ``transcribe(array, ...)``,
+UI не знает, какой движок был.
 
 Модуль Qt-free и импортирует vosk лениво: нативный пакет нужен только когда
 включён живой путь vosk. Интерфейс повторяет минимальную часть ``Engine``,
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable
 
 import numpy as np
@@ -102,6 +104,7 @@ class VoskEngine:
         self._vosk = None
         self._target = vosk_model_name(model_size)
         self._model_name = ""
+        self._lock = Lock()
 
     # --- интерфейс, общей с Engine, для pipeline ---
 
@@ -122,23 +125,24 @@ class VoskEngine:
         повторный вызов не трогает сеть, а сразу шлёт ``model_ready``.
         """
         name = self._target or vosk_model_name("small")
-        if self._model is not None and self._model_name == name:
+        with self._lock:
+            if self._model is not None and self._model_name == name:
+                self._signal(on_status, "model_ready")
+                return "vosk"
+            self._signal(on_status, "loading_model")
+            vosk = _import_vosk()
+            if on_progress is not None:
+                try:
+                    on_progress({"phase": "download", "model": name, "percent": 0.0, "message": "Готовим vosk-модель…"})
+                except Exception:
+                    pass
+            # Model(model_name=...) сам найдёт/скачает и распакует нужную модель.
+            model = vosk.Model(model_name=name)
+            self._model = model
+            self._vosk = vosk
+            self._model_name = name
             self._signal(on_status, "model_ready")
             return "vosk"
-        self._signal(on_status, "loading_model")
-        vosk = _import_vosk()
-        if on_progress is not None:
-            try:
-                on_progress({"phase": "download", "model": name, "percent": 0.0, "message": "Готовим vosk-модель…"})
-            except Exception:
-                pass
-        # Model(model_name=...) сам найдёт/скачает и распакует нужную модель.
-        model = vosk.Model(model_name=name)
-        self._model = model
-        self._vosk = vosk
-        self._model_name = name
-        self._signal(on_status, "model_ready")
-        return "vosk"
 
     def release_cached_model(self) -> bool:
         if self._model is None:
@@ -176,6 +180,9 @@ class VoskEngine:
         if cancel is not None and getattr(cancel, "is_set", lambda: False)():
             self._signal(on_status, "cancelled")
             return []
+        if self._model is None or self._vosk is None:
+            # Live может открыть захват раньше конца фонового prepare.
+            self.prepare(config, on_status)
         model, vosk = self._require()
         audio = np.ascontiguousarray(np.asarray(source, dtype=np.float32).reshape(-1))
         if len(audio) / RATE < MIN_WINDOW_SECONDS:

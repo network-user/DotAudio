@@ -47,12 +47,20 @@ Window {
         && bridge.livePhase !== "decoding"
         && bridge.livePhase !== "stopping"
 
+    // Незаконченное предложение уже стоит в живой строке, в «предыдущих» оно
+    // не считается. Пока речь идёт, предыдущая строка - последнее законченное
+    // предложение; когда живая строка пуста, его показывает сама строка, а
+    // предыдущей становится то, что было перед ним.
+    readonly property bool liveEmpty: bridge.displayCaption.length === 0
+    readonly property int closedCount: bridge.liveOpenPhrase
+        ? Math.max(0, bridge.segments.length - 1) : bridge.segments.length
     readonly property string previousText: {
         var items = bridge.segments
-        if (bridge.partialCaption.length > 0 && items.length)
-            return String(items[items.length - 1].text)
-        if (items.length >= 2)
-            return String(items[items.length - 2].text)
+        var count = overlay.closedCount
+        if (!overlay.liveEmpty)
+            return count > 0 ? String(items[count - 1].text) : ""
+        if (bridge.settledCaption.length > 0 && count >= 2)
+            return String(items[count - 2].text)
         return ""
     }
     readonly property int captionSize: bridge.settings.caption_size === "lg" ? 44
@@ -217,7 +225,7 @@ Window {
             anchors.bottomMargin: 20
             height: implicitHeight
             previous: overlay.previousText
-            confirmed: bridge.confirmedCaption
+            confirmed: overlay.liveEmpty ? bridge.settledCaption : bridge.confirmedCaption
             pending: bridge.partialCaption
             placeholder: bridge.liveActive ? bridge.liveStatusText : ""
             pixelSize: overlay.captionSize

@@ -36,7 +36,12 @@ Rectangle {
 
     readonly property bool livePage: bridge.page === "live"
     readonly property bool liveMode: Boolean(bridge.liveActive)
-    readonly property string capConfirmed: liveMode ? bridge.confirmedCaption : bridge.caption
+    // Пока новая речь не началась, остров держит последнее законченное
+    // предложение: истории на нём нет, а пустая строка сразу после фразы
+    // читалась бы как потеря текста.
+    readonly property string capConfirmed: liveMode
+        ? (bridge.displayCaption.length ? bridge.confirmedCaption : bridge.settledCaption)
+        : bridge.caption
     readonly property string capPending: liveMode ? bridge.partialCaption : ""
     readonly property int recSize: phase === "ready" ? 28 : 32
     readonly property string phaseLabel: {

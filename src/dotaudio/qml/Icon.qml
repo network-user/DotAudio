@@ -140,6 +140,19 @@ Item {
                 line(ctx, 9, 8.2, 7.2, 11.6)
                 line(ctx, 11, 8.2, 12.8, 11.6)
                 break
+            case "assistant":
+                // Реплика с искрой: чат, который отвечает сам, а не просто
+                // показывает текст, как значок "live".
+                rounded(ctx, 2.8, 3.8, 14.4, 10.4, 3)
+                ctx.stroke()
+                ctx.beginPath()
+                ctx.moveTo(6.8, 14.2)
+                ctx.lineTo(5.9, 17.4)
+                ctx.lineTo(9.8, 14.2)
+                ctx.stroke()
+                line(ctx, 10, 6.4, 10, 11.6)
+                line(ctx, 7.4, 9, 12.6, 9)
+                break
             case "history":
                 ctx.beginPath()
                 ctx.arc(10, 10.5, 6.2, 0, Math.PI * 2)

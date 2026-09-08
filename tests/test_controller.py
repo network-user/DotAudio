@@ -126,48 +126,167 @@ def test_model_fit_compares_memory_with_the_real_machine() -> None:
     assert recommended_model(known) == "small"
     assert recommended_model({"threads": 2, "ram_gb": 8.0, "cuda_devices": 0}) == "base"
     assert recommended_model({"threads": 0, "ram_gb": None, "cuda_devices": 0}) == "tiny"
+    assert recommended_model({"threads": 8, "ram_gb": 32.0, "cuda_devices": 1, "gpuVramGb": 8}) == "medium"
 
 
-def test_late_live_final_does_not_replace_a_newer_preview() -> None:
-    class Store:
-        @staticmethod
-        def append_segments(_sid, _segments):
-            return [1]
-
+def test_show_gpu_hint_for_nvidia_until_dismissed() -> None:
     controller = type("ControllerState", (), {})()
+    controller._settings = {"gpu_hint_dismissed": False}
+    controller._gpu_setup = {"busy": False}
+    controller._hardware = {"computeAdvice": "needs_runtime"}
+    assert Controller.showGpuHint.fget(controller) is True
+    controller._settings["gpu_hint_dismissed"] = True
+    assert Controller.showGpuHint.fget(controller) is False
+
+
+class _LiveStore:
+    """Хранилище без SQLite: помнит, что добавили и что расширили."""
+
+    def __init__(self) -> None:
+        self.appended: list[dict] = []
+        self.extended: list[tuple[int, float, str]] = []
+
+    def append_segments(self, _sid, segments):
+        self.appended.extend(segments)
+        return [len(self.appended)]
+
+    def extend_segment(self, _sid, segment_id, end, text):
+        self.extended.append((segment_id, end, text))
+
+
+def _live_controller() -> Controller:
+    controller = Controller.__new__(Controller)
     controller._jobs = {"live": {"mode": "live"}}
-    controller.store = Store()
+    controller.store = _LiveStore()
     controller._session_id = "live"
     controller._segments = []
-    controller.segmentsChanged = _Signal()
+    controller._open_phrase = False
+    controller._settled_caption = ""
+    controller.segmentsChanged = _Counting()
     controller._final_end = 0.0
-    controller._partial_end = 5.0
-    controller._confirmed_caption = "новая фраза"
-    controller._partial_caption = "продолжается"
-    controller._caption_revision = 3
+    controller._partial_end = 0.0
+    controller._confirmed_caption = ""
+    controller._partial_caption = ""
+    controller._caption_revision = 0
     controller._started = 0.0
     controller._live_latency_ms = 0.0
     controller._live_phase = "speech"
-    controller.captionChanged = _Signal()
+    controller._live_diagnostic = ""
+    controller._last_caption_at = 0.0
+    controller.captionChanged = _Counting()
     controller.liveStateChanged = _Signal()
-    controller.recording = True
+    controller._state = "recording"
     controller._record_log = lambda *_args: None
     controller._status = ""
     controller.changed = _Counting()
     controller.statusChanged = _Signal()
     controller.logsChanged = _Signal()
+    return controller
+
+
+def test_late_live_final_does_not_replace_a_newer_preview() -> None:
+    controller = _live_controller()
+    controller._partial_end = 5.0
+    controller._partial_caption = "новая фраза продолжается"
+    controller._caption_revision = 3
 
     Controller._on_segment(
         controller, "live", {"start": 2.0, "end": 4.0, "text": "старая фраза"}
     )
 
     assert controller._segments[-1]["text"] == "старая фраза"
-    assert controller._confirmed_caption == "новая фраза"
-    assert controller._partial_caption == "продолжается"
-    assert controller._caption_revision == 3
+    # Черновик более новой речи остаётся на экране после фразы, которую он
+    # продолжает; законченного предложения здесь ещё нет.
+    assert controller._confirmed_caption == "старая фраза"
+    assert controller._partial_caption == "новая фраза продолжается"
+    assert controller._partial_end == 5.0
     # Готовая фраза не перетряхивает весь интерфейс: настройки, устройства и
     # карточки моделей не перечитываются на каждой реплике говорящего.
     assert controller.changed.count == 0
+
+
+def test_live_finals_of_one_sentence_are_joined_into_one_row() -> None:
+    controller = _live_controller()
+
+    Controller._on_segment(controller, "live", {
+        "start": 0.0, "end": 4.0, "audio_end": 4.0, "cut": True,
+        "text": "Сегодня мы говорим о распознавании речи в реальном",
+    })
+    # Пока предложение не закончено, оно живёт в живой строке, а не в списке.
+    assert controller._open_phrase is True
+    assert Controller.liveOpenPhrase.fget(controller) is True
+    assert controller._confirmed_caption == "Сегодня мы говорим о распознавании речи в реальном"
+    assert controller._settled_caption == ""
+
+    Controller._on_partial(controller, "live", {"start": 4.0, "end": 4.9, "text": "времени,"})
+    assert Controller.displayCaption.fget(controller) == (
+        "Сегодня мы говорим о распознавании речи в реальном времени,"
+    )
+
+    Controller._on_segment(controller, "live", {
+        "start": 4.0, "end": 5.2, "audio_end": 5.2, "cut": False, "text": "времени.",
+    })
+
+    assert len(controller._segments) == 1
+    assert controller._segments[0]["text"] == "Сегодня мы говорим о распознавании речи в реальном времени."
+    assert controller.store.extended == [(1, 5.2, "Сегодня мы говорим о распознавании речи в реальном времени.")]
+    # Предложение закончено: строка ушла в историю, живая строка свободна,
+    # а остров и зал держат его как последнее сказанное.
+    assert controller._open_phrase is False
+    assert Controller.liveOpenPhrase.fget(controller) is False
+    assert controller._confirmed_caption == ""
+    assert controller._partial_caption == ""
+    assert controller._settled_caption == "Сегодня мы говорим о распознавании речи в реальном времени."
+
+
+def test_live_cut_seam_reads_as_one_sentence() -> None:
+    controller = _live_controller()
+
+    Controller._on_segment(controller, "live", {
+        "start": 0.0, "end": 4.0, "audio_end": 4.0, "cut": True,
+        "text": "Живые субтитры должны появляться почти мгновенно.",
+    })
+    Controller._on_partial(controller, "live", {"start": 4.0, "end": 5.0, "text": "Даже на слабом"})
+    # Точка от обрезанного окна не заканчивает предложение: на экране запятая
+    # и строчная буква, как в одной фразе.
+    assert Controller.displayCaption.fget(controller) == (
+        "Живые субтитры должны появляться почти мгновенно, даже на слабом"
+    )
+
+    Controller._on_segment(controller, "live", {
+        "start": 4.0, "end": 6.5, "audio_end": 6.5, "cut": False,
+        "text": "Даже на слабом процессоре без видеокарты.",
+    })
+    assert controller._segments[0]["text"] == (
+        "Живые субтитры должны появляться почти мгновенно, даже на слабом процессоре без видеокарты."
+    )
+
+    # Следующая фраза с заглавной буквы после законченного предложения - новая строка.
+    Controller._on_segment(controller, "live", {
+        "start": 6.8, "end": 8.0, "audio_end": 8.0, "cut": False, "text": "Это главная задача.",
+    })
+    assert [segment["text"] for segment in controller._segments][-1] == "Это главная задача."
+    assert len(controller._segments) == 2
+
+
+def test_live_pause_closes_an_open_sentence() -> None:
+    controller = _live_controller()
+    controller._capture_started_at = time.monotonic() - 30
+    controller._level = 0.0
+    controller._last_signal_at = time.monotonic() - 5
+
+    Controller._on_segment(controller, "live", {
+        "start": 0.0, "end": 3.0, "audio_end": 3.0, "cut": False, "text": "и тогда мы",
+    })
+    assert controller._open_phrase is True
+
+    Controller._update_live_sound_status(controller)
+
+    # Говорящий замолчал: незаконченная фраза уходит в историю как есть.
+    assert controller._open_phrase is False
+    assert controller._confirmed_caption == ""
+    assert controller._settled_caption == ""
+    assert controller._segments[-1]["text"] == "и тогда мы"
 
 
 def test_live_decode_statuses_do_not_touch_interface_bindings() -> None:
@@ -275,18 +394,20 @@ def test_changing_live_source_clears_a_stale_source_check() -> None:
 
 
 def test_unrecognized_sound_is_named_and_silence_clears_captions() -> None:
-    controller = type("ControllerState", (), {})()
+    controller = Controller.__new__(Controller)
     controller._jobs = {"live": {"mode": "live"}}
-    controller.liveActive = True
-    controller.recording = True
+    controller._state = "recording"
+    controller._segments = []
+    controller.segmentsChanged = _Signal()
     controller._capture_started_at = time.monotonic() - 30
     controller._level = 0.5
     controller._last_signal_at = time.monotonic() - 1
     controller._last_caption_at = time.monotonic() - 30
     controller._live_diagnostic = ""
-    controller.displayCaption = "старая фраза"
     controller._confirmed_caption = "старая фраза"
     controller._partial_caption = ""
+    controller._settled_caption = ""
+    controller._open_phrase = False
     controller._partial_end = 9.0
     controller._caption_revision = 0
     controller.captionChanged = _Counting()

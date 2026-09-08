@@ -12,7 +12,9 @@ from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPalett
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
+from dotaudio.assistant_controller import AssistantController
 from dotaudio.controller import Controller
+from dotaudio.cuda_runtime import register_cuda_dll_directories
 from dotaudio.desktop import Desktop
 
 
@@ -39,6 +41,8 @@ def _register_ui_fonts():
 
 
 def main():
+    # До импорта/опроса CTranslate2: иначе pip-пакеты nvidia-* не видны.
+    register_cuda_dll_directories()
     parser = argparse.ArgumentParser(description="DotAudio · Whisper workspace")
     parser.add_argument("--data-dir", type=Path, default=None)
     parser.add_argument("--smoke-test", action="store_true", help="Load QML, then exit without capturing audio")
@@ -58,7 +62,11 @@ def main():
         palette.setColor(role, QColor(color))
     app.setPalette(palette)
     desktop = Desktop(app)
-    controller = Controller(args.data_dir or user_data_path("DotAudio", "DotCore"), desktop)
+    data_dir = args.data_dir or user_data_path("DotAudio", "DotCore")
+    controller = Controller(data_dir, desktop)
+    # Ассистент - отдельный объект с собственным состоянием: поток токенов не
+    # должен заставлять интерфейс записи пересчитывать свои привязки.
+    assistant = AssistantController(data_dir, controller.store, controller)
 
     # Экстренный выход. Ctrl+C / Ctrl+Break в консоли запуска (python -m
     # dotaudio, dotaudio.exe) и глобальная Ctrl+Alt+X обязаны закрыть программу
@@ -108,6 +116,7 @@ def main():
     desktop.quit_requested.connect(finish_abort)
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("bridge", controller)
+    engine.rootContext().setContextProperty("assistant", assistant)
     engine.load(QUrl.fromLocalFile(str(Path(__file__).parent / "qml" / "MainMvp.qml")))
     if not engine.rootObjects():
         desktop.close()
@@ -129,16 +138,31 @@ def main():
         tray.setToolTip("DotAudio")
         tray.show()
         window.setProperty("trayPresent", True)
-    shell = os.environ.get("DOTAUDIO_SHELL", "")
+    # По умолчанию - полное окно (навигация + главная страница Live).
+    # DOTAUDIO_SHELL=island|theater|app перекрывает для отладки и smoke.
+    shell = os.environ.get("DOTAUDIO_SHELL", "app")
     if shell in ("island", "theater", "app"):
         window.setProperty("shellMode", shell)
+        window.setProperty("stayOnTop", shell != "app")
+        if shell == "app":
+            # Центр экрана: до первого кадра QML onCompleted координаты
+            # ещё нулевые, поэтому здесь тоже выставляем разумный старт.
+            screen = app.primaryScreen()
+            if screen is not None:
+                geo = screen.availableGeometry()
+                w = int(window.property("width") or 1220)
+                h = int(window.property("height") or 790)
+                window.setProperty("x", max(40, (geo.width() - w) // 2 + geo.x()))
+                window.setProperty("y", max(40, (geo.height() - h) // 2 + geo.y()))
     controller.shutdownReady.connect(app.quit)
     app.aboutToQuit.connect(desktop.close)
+    app.aboutToQuit.connect(assistant.shutdown)
     app.aboutToQuit.connect(controller.shutdown)
     # Warm the selected local model after the UI is ready.  Preparation runs in
     # Controller's worker thread and never blocks the Qt event loop.  Smoke
     # tests and screenshots must remain model/network free.
     if not args.smoke_test and not args.screenshot:
+        controller.enableModelWarmup()
         QTimer.singleShot(0, controller.prepareSelectedModel)
     if args.smoke_test or args.screenshot:
         def finish():

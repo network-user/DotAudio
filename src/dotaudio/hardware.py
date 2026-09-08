@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 
 VENDOR_NVIDIA = "nvidia"
@@ -224,11 +225,12 @@ def physical_memory_gb() -> float | None:
         return round(pages * size / (1024**3), 1)
     try:
         import ctypes
-        from ctypes import wintypes
 
+        # ULONGLONG в ctypes.wintypes нет: обращение к нему поднимало
+        # AttributeError, и объём памяти всегда оставался «неизвестно».
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.GetPhysicallyInstalledSystemMemory.argtypes = [ctypes.POINTER(wintypes.ULONGLONG)]
-        kb = wintypes.ULONGLONG(0)
+        kernel32.GetPhysicallyInstalledSystemMemory.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
+        kb = ctypes.c_ulonglong(0)
         if not kernel32.GetPhysicallyInstalledSystemMemory(ctypes.byref(kb)):
             return None
         return round(kb.value / (1024 * 1024), 1)
@@ -247,6 +249,59 @@ def ctranslate2_cuda_devices() -> int:
         return 0
 
 
+@contextmanager
+def tolerant_dll_directories():
+    """Не давать несуществующей папке DLL сорвать импорт нативной библиотеки.
+
+    llama.cpp при импорте регистрирует в поиске DLL пути из ``CUDA_PATH`` и
+    ``HIP_PATH``. Если переменная осталась от удалённой версии Toolkit - а это
+    обычное дело после обновления драйвера, - ``os.add_dll_directory``
+    поднимает FileNotFoundError, и библиотека не загружается вовсе. Здесь
+    терпимой становится только регистрация каталога: сами переменные окружения
+    не меняются, потому что на них рассчитывают и другие библиотеки.
+    """
+
+    original = getattr(os, "add_dll_directory", None)
+    if original is None:
+        yield
+        return
+
+    def safe(path):
+        try:
+            return original(path)
+        except OSError:
+            return None
+
+    os.add_dll_directory = safe
+    try:
+        yield
+    finally:
+        os.add_dll_directory = original
+
+
+def import_llama_cpp():
+    """Модуль llama_cpp или ``None``, если его нет или он не загрузился.
+
+    Сборка с CUDA ищет cublas и cudart рядом с собой и в ``CUDA_PATH``. Если
+    библиотеки пришли pip-пакетами nvidia-*, их каталоги нужно зарегистрировать
+    до загрузки - и сделать это здесь, а не надеяться, что раньше кто-то вызвал
+    опрос устройства.
+    """
+
+    try:
+        from dotaudio.cuda_runtime import register_cuda_dll_directories
+
+        register_cuda_dll_directories()
+    except Exception:
+        pass
+    try:
+        with tolerant_dll_directories():
+            import llama_cpp
+    except Exception:
+        return None
+    return llama_cpp
+
+
 def llama_gpu_offload_supported() -> bool | None:
     """Умеет ли установленная сборка llama.cpp считать на видеокарте.
 
@@ -254,12 +309,11 @@ def llama_gpu_offload_supported() -> bool | None:
     иначе, чем про «сборка без ускорения».
     """
 
-    try:
-        import llama_cpp
-    except Exception:
+    module = import_llama_cpp()
+    if module is None:
         return None
     try:
-        return bool(llama_cpp.llama_supports_gpu_offload())
+        return bool(module.llama_supports_gpu_offload())
     except Exception:
         return False
 
@@ -607,3 +661,29 @@ def install_arguments(accelerator_id: str) -> list[str]:
             args += ["--extra-index-url", accelerator.wheel_index]
         return args
     return []
+
+
+# Сборка llama.cpp с CUDA ищет cublas и cudart от CUDA 12. На машине бывает
+# только новый Toolkit или вообще ни одного, и тогда библиотека загружается,
+# но GPU не находит. Эти pip-пакеты закрывают вопрос без установки Toolkit;
+# проверено на этой машине: CUDA появилась и у llama.cpp, и у CTranslate2.
+CUDA_RUNTIME_FOR_LLAMA: tuple[str, ...] = (
+    "nvidia-cublas-cu12",
+    "nvidia-cuda-runtime-cu12",
+)
+
+
+def install_steps(accelerator_id: str) -> list[list[str]]:
+    """Все шаги установки ускорителя по порядку.
+
+    Разделены, потому что ``--force-reinstall`` относится ко всей команде: он
+    нужен для самой сборки, но заново качать гигабайты библиотек CUDA незачем.
+    """
+
+    steps: list[list[str]] = []
+    if accelerator_id == "cuda":
+        steps.append(["-m", "pip", "install", *CUDA_RUNTIME_FOR_LLAMA])
+    wheel = install_arguments(accelerator_id)
+    if wheel:
+        steps.append(wheel)
+    return steps

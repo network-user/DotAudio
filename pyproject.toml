@@ -26,6 +26,12 @@ diarize = ["torch>=2.3", "speechbrain>=1.0"]
 # Лёгкий Kaldi-движок Live для очень слабого CPU. Выбирается вручную в
 # настройках; по умолчанию Live идёт на faster-whisper.
 vosk = ["vosk>=0.3.45,<1"]
+# Локальный ассистент по расшифровкам. Нативная сборка, поэтому опционально:
+# без неё приложение работает, только страница «Ассистент» просит установку.
+# Готовые колёса под CPU и ускорители лежат в отдельных индексах, например
+# pip install llama-cpp-python --extra-index-url
+#   https://abetlen.github.io/llama-cpp-python/whl/cpu
+llm = ["llama-cpp-python>=0.3,<1"]
 # CUDA runtime для Whisper на Windows без полного Toolkit. Ставится из UI
 # («Настроить GPU») или вручную: pip install -e ".[cuda]".
 cuda = [
@@ -43,7 +49,9 @@ dotaudio-server = "dotaudio.server:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-dotaudio = ["qml/*.qml"]
+# Theme.js импортируется из QML как обычный файл рядом с компонентами, и без
+# него собранный пакет остаётся без токенов оформления.
+dotaudio = ["qml/*.qml", "qml/*.js"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

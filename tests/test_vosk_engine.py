@@ -115,9 +115,24 @@ def test_short_window_returns_empty():
     assert eng.transcribe(_speech(0.1), _config()) == []
 
 
-def test_not_prepared_raises():
+def test_transcribe_prepares_model_lazily(monkeypatch):
+    """Live может открыть захват раньше фонового prepare - первый декод догружает."""
+
+    monkeypatch.setattr(ve, "_import_vosk", lambda: _FakeVosk())
+    eng = VoskEngine(model_size="small")
+    assert eng._model is None
+    segs = eng.transcribe(_speech(), _config())
+    assert eng._model is not None
+    assert len(segs) == 1
+
+
+def test_lazy_prepare_failure_surfaces(monkeypatch):
+    def boom():
+        raise RuntimeError("vosk missing")
+
+    monkeypatch.setattr(ve, "_import_vosk", boom)
     eng = VoskEngine()
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="vosk missing|Vosk"):
         eng.transcribe(_speech(), _config())
 
 

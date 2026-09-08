@@ -189,6 +189,7 @@ Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             segments: bridge.segments
+            hideLast: bridge.liveOpenPhrase
             confirmed: bridge.confirmedCaption
             pending: bridge.partialCaption
             placeholder: root.stageHint

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from dotaudio.engine import LIVE_TAIL_SECONDS, Engine, RecognitionConfig
+from dotaudio.engine import LIVE_CONTEXT_CHARS, LIVE_TAIL_SECONDS, Engine, RecognitionConfig
 
 
 class _Segment:
@@ -254,10 +254,12 @@ class _LiveModel:
         self.model = _Decoder(score)
         self.hf_tokenizer = object()
         self.hotwords = "unset"
+        self.previous: list[int] = []
 
-    def get_prompt(self, _tokenizer, _previous, without_timestamps=False, hotwords=None):
+    def get_prompt(self, _tokenizer, previous, without_timestamps=False, hotwords=None):
         assert without_timestamps is True
         self.hotwords = hotwords
+        self.previous = list(previous)
         return [50258, 50259, 50360, 50364]
 
     def transcribe(self, *_args, **_kwargs):
@@ -276,6 +278,10 @@ class _Tokenizer:
     def decode(self, tokens):
         assert tokens == [10, 11]
         return "  живой текст  "
+
+    def encode(self, text):
+        # One fake token per word is enough to see what reached the prompt.
+        return [1000 + index for index, _word in enumerate(text.split())]
 
 
 def _install_live_stack(monkeypatch, model):
@@ -318,6 +324,43 @@ def test_live_window_bounds_the_token_budget_and_the_dictionary_hint(monkeypatch
     # cap is what stops a looping decoder from blocking the next caption.
     assert model.model.kwargs["max_length"] == 4 + 32
     assert len(model.hotwords) <= 150
+
+
+def test_live_window_reads_the_previous_text_as_context(monkeypatch) -> None:
+    model = _LiveModel()
+    _install_live_stack(monkeypatch, model)
+    config = RecognitionConfig(
+        device="cpu", live_stream=True, live_context="Сегодня мы говорим о распознавании речи в реальном"
+    )
+
+    Engine().transcribe(np.zeros(16000, dtype=np.float32), config)
+
+    # Eight words of previous text reach the decoder as the previous segment.
+    assert len(model.previous) == 8
+
+    Engine().transcribe(np.zeros(16000, dtype=np.float32), RecognitionConfig(device="cpu", live_stream=True))
+    assert model.previous == []
+
+
+def test_live_context_is_bounded_and_cut_at_a_word() -> None:
+    long_text = " ".join(f"слово{index}" for index in range(100))
+    context = Engine._live_context(long_text)
+    assert len(context) <= LIVE_CONTEXT_CHARS
+    assert context.startswith("слово")
+    assert long_text.endswith(context)
+    assert Engine._live_context("  два   слова ") == "два слова"
+
+
+def test_live_window_drops_an_echo_of_the_context() -> None:
+    context = "Сегодня мы говорим о распознавании речи в реальном"
+    # The decoder repeated the end of the prompt before reading the audio.
+    assert Engine._drop_echo("в реальном времени. Живые субтитры", context) == "времени. Живые субтитры"
+    # An ending changed by the second pass still counts as the same word.
+    assert Engine._drop_echo("в реальный времени", context) == "времени"
+    # One shared word is not an echo: "и", "в", "не" begin many phrases.
+    assert Engine._drop_echo("реальном шаге вперёд", context) == "реальном шаге вперёд"
+    assert Engine._drop_echo("времени.", context) == "времени."
+    assert Engine._drop_echo("времени.", "") == "времени."
 
 
 def test_live_language_follows_the_phrases_but_not_the_previews(monkeypatch) -> None:

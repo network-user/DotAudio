@@ -20,6 +20,7 @@ from dotaudio.pipeline import (
     SpeechBuffer,
     VoiceActivity,
     open_voice_activity,
+    preload_voice_activity,
 )
 
 
@@ -954,6 +955,115 @@ def test_speech_buffer_follows_the_detector_and_not_loudness() -> None:
 
 
 def test_open_voice_activity_returns_nothing_without_the_model(monkeypatch) -> None:
+    import dotaudio.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "_vad_session", None)
     monkeypatch.setitem(sys.modules, "faster_whisper.vad", SimpleNamespace())
 
     assert open_voice_activity() is None
+
+
+def test_preload_voice_activity_caches_session(monkeypatch) -> None:
+    import dotaudio.pipeline as pipeline
+
+    session = object()
+    monkeypatch.setattr(pipeline, "_vad_session", None)
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper.vad",
+        SimpleNamespace(get_vad_model=lambda: SimpleNamespace(session=session)),
+    )
+
+    assert preload_voice_activity() is True
+    first = open_voice_activity()
+    second = open_voice_activity()
+    assert first is not None and second is not None
+    assert first.session is session
+    assert second.session is session
+    # Два детектора делят сессию, но не состояние рекуррентной сети.
+    assert first is not second
+
+
+def test_speech_buffer_marks_phrases_cut_by_the_limit() -> None:
+    buffer = SpeechBuffer(max_seconds=1.0, silence_seconds=0.3, threshold=0.1)
+    buffer.feed(np.full(int(SAMPLE_RATE * 0.4), 0.4, dtype=np.float32))
+    buffer.feed(np.zeros(int(SAMPLE_RATE * 0.2), dtype=np.float32))
+    assert buffer.feed(np.full(int(SAMPLE_RATE * 0.5), 0.4, dtype=np.float32)) is not None
+    assert buffer.cut_at_limit is True
+
+    # The remainder ends when the speaker pauses: that phrase is whole.
+    assert buffer.feed(np.zeros(int(SAMPLE_RATE * 0.4), dtype=np.float32)) is not None
+    assert buffer.cut_at_limit is False
+
+
+def test_live_finals_carry_the_cut_flag_and_condition_on_earlier_text() -> None:
+    class Engine:
+        def __init__(self) -> None:
+            self.contexts: list[tuple[bool, str]] = []
+            self.calls = 0
+
+        def transcribe(self, audio, config, _cancel, on_segment, _on_status):
+            self.calls += 1
+            self.contexts.append((config.live_preview, config.live_context))
+            on_segment({"start": 0.0, "end": len(audio) / SAMPLE_RATE, "text": f"фраза {self.calls}"})
+            return []
+
+    engine = Engine()
+    finals: list[dict] = []
+    partials: list[dict] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), finals.append, lambda _status: None,
+        lambda _error, _cancelled: None, partials.append, catch_up=True,
+    )
+    session._preview_generation = 1
+
+    # The first window of a session has nothing to condition on.
+    session._transcribe_preview(0.0, _speech(1.0), 0.0, 1)
+    assert engine.contexts[-1] == (True, "")
+
+    session._transcribe_final(0.0, _speech(2.0), None, True)
+    assert finals[-1]["cut"] is True
+    assert finals[-1]["text"] == "фраза 2"
+
+    # Every later preview and final reads the finals before it as previous text.
+    session._transcribe_preview(2.0, _speech(1.0), 0.0, 1)
+    assert engine.contexts[-1] == (True, "фраза 2")
+    session._transcribe_final(2.0, _speech(2.0))
+    assert engine.contexts[-1] == (False, "фраза 2")
+    assert finals[-1]["cut"] is False
+    session._transcribe_preview(4.0, _speech(1.0), 0.0, 1)
+    assert engine.contexts[-1] == (True, "фраза 2 фраза 4")
+
+
+def test_short_final_with_lead_audio_does_not_also_read_that_phrase_as_text() -> None:
+    contexts: list[str] = []
+
+    class Engine:
+        def __init__(self) -> None:
+            self.lines = ["первая фраза", "первая фраза и хвост"]
+            self.answered = Event()
+
+        def transcribe(self, audio, config, _cancel, on_segment, _on_status):
+            contexts.append(config.live_context)
+            on_segment({"start": 0.0, "end": len(audio) / SAMPLE_RATE, "text": self.lines[min(len(contexts), 2) - 1]})
+            self.answered.set()
+            return []
+
+    engine = Engine()
+    completed = Event()
+    finals: list[dict] = []
+    session = LiveSession(
+        engine, RecognitionConfig(), finals.append, lambda _status: None,
+        lambda _error, _cancelled: completed.set(), catch_up=True,
+    )
+    session.start(_Capture())
+    session.feed(_speech(2.0))
+    session.feed(_silence())
+    assert engine.answered.wait(2)
+    session.feed(_speech(0.2))
+    session.stop()
+    assert completed.wait(2)
+    # The lead audio already is the previous phrase; giving its text as well
+    # would make the decoder read the same speech twice.
+    assert contexts == ["", ""]
+    assert [final["text"] for final in finals] == ["первая фраза", "и хвост"]

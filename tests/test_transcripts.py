@@ -5,12 +5,49 @@ import json
 import pytest
 
 from dotaudio.transcripts import (
+    LIVE_SENTENCE_GAP_SECONDS,
     apply_keyword_cooldown,
+    blend_fragments,
+    continues_sentence,
     export_transcript,
+    join_fragments,
     match_keywords,
     regroup_for_subtitles,
+    sentence_open,
     timestamp,
 )
+
+
+def test_sentence_stays_open_without_terminal_punctuation_or_after_a_cut() -> None:
+    assert sentence_open("в реальном") is True
+    assert sentence_open("почти мгновенно,") is True
+    assert sentence_open("Привет.") is False
+    assert sentence_open("Как дела?») ") is False
+    # Точка от окна, обрезанного лимитом, ничего не значит.
+    assert sentence_open("почти мгновенно.", cut=True) is True
+    assert sentence_open("", cut=True) is False
+
+
+def test_continuation_follows_case_and_pause() -> None:
+    assert continues_sentence("в реальном", False, "времени.", 0.3) is True
+    # Строчная буква продолжает даже «законченное» предложение.
+    assert continues_sentence("без видеокарты.", False, "даже ночью.", 0.3) is True
+    assert continues_sentence("без видеокарты.", False, "Это главная задача.", 0.3) is False
+    # Долгая пауза заканчивает мысль, какой бы ни была пунктуация.
+    assert continues_sentence("в реальном", False, "времени.", LIVE_SENTENCE_GAP_SECONDS + 0.1) is False
+    # Слишком длинное предложение закрывается, чтобы живая строка читалась.
+    assert continues_sentence("слово " * 60, True, "ещё", 0.1) is False
+
+
+def test_cut_seam_becomes_a_comma_and_lower_case() -> None:
+    assert blend_fragments("почти мгновенно.", True, "Даже на слабом") == ("почти мгновенно,", "даже на слабом")
+    assert join_fragments("в реальном", True, "времени.") == "в реальном времени."
+    # Вопрос и восклицание декодера не переписываются, имена и аббревиатуры тоже.
+    assert blend_fragments("Правда?", True, "Да.") == ("Правда?", "Да.")
+    assert blend_fragments("работает.", True, "GPU нужен") == ("работает,", "GPU нужен")
+    assert blend_fragments("работает.", True, "Я думаю") == ("работает,", "я думаю")
+    # Без обрезки пунктуация - решение декодера.
+    assert blend_fragments("мгновенно.", False, "Даже") == ("мгновенно.", "Даже")
 
 SEGMENTS = [
     {"start": 0, "end": 1.25, "text": "Привет, мир"},

@@ -24,7 +24,10 @@ ApplicationWindow {
         }
     }
 
-    property string shellMode: "island"
+    // Старт - полное окно с навигацией. Остров и Live-сцена открываются
+    // по запросу (свёртка / старт записи), а не вместо главной страницы.
+    title: "DotAudio"
+    property string shellMode: "app"
     property bool logsOpen: false
     property bool islandModesOpen: false
     property bool morphGeo: false
@@ -67,8 +70,10 @@ ApplicationWindow {
     // Поверх всех окон живут только остров и сцена Live: они должны быть
     // видны во время другой работы. Полное окно - обычное окно, его может
     // перекрыть любое другое, включая браузер с черновиком статьи.
-    property bool stayOnTop: true
-    flags: Qt.FramelessWindowHint | (stayOnTop ? Qt.WindowStaysOnTopHint : 0)
+    property bool stayOnTop: false
+    // Qt.Window явно держит кнопку на панели задач; без Tool/Popup окно
+    // остаётся обычным приложением и в режиме острова.
+    flags: Qt.Window | Qt.FramelessWindowHint | (stayOnTop ? Qt.WindowStaysOnTopHint : 0)
     // Минимум один на все оболочки. Прежний минимум полного окна успевал
     // зажать высоту раньше, чем менялся режим, и остров не сворачивался:
     // окно оставалось высотой 660. Ручного изменения размера здесь нет,
@@ -233,19 +238,26 @@ ApplicationWindow {
 
     Component.onCompleted: {
         root.pageIndex = root.targetPageIndex
+        // Якорь острова храним всегда: при свёртке окно вернётся сюда.
         if (Number(bridge.settings.island_x) >= 0) {
-            root.x = Number(bridge.settings.island_x)
-            root.y = Number(bridge.settings.island_y)
-            root.islandCenterX = root.x + root.islandW / 2
-            root.islandTopY = root.y
+            root.islandCenterX = Number(bridge.settings.island_x) + root.islandW / 2
+            root.islandTopY = Number(bridge.settings.island_y)
         } else {
             root.islandCenterX = Screen.width / 2
             root.islandTopY = 32
+        }
+        if (root.shellMode === "app") {
+            // Главное окно по центру экрана, с боковой навигацией и Live.
+            bridge.selectPage(bridge.page && bridge.page.length ? bridge.page : "live")
+            bridge.applyIslandClickThrough(false)
+            root.x = Math.max(40, Math.round((Screen.width - root.width) / 2))
+            root.y = Math.max(40, Math.round((Screen.height - root.height) / 2))
+        } else {
             root.x = Math.round(root.islandCenterX - root.islandW / 2)
             root.y = root.islandTopY
+            if (Boolean(bridge.settings.island_click_through))
+                bridge.applyIslandClickThrough(true)
         }
-        if (Boolean(bridge.settings.island_click_through))
-            bridge.applyIslandClickThrough(true)
         Qt.callLater(function() { root.morphGeo = true })
     }
 
@@ -880,9 +892,17 @@ ApplicationWindow {
                         Component.onCompleted: if (current) wanted = true
                     }
                     TranscriptView { Layout.fillWidth: true; Layout.fillHeight: true }
-                    // Ассистент грузится вместе со страницей: список записей и
-                    // каталог моделей приходят из своего контроллера в фоне.
-                    AssistantPage { Layout.fillWidth: true; Layout.fillHeight: true }
+                    // Страница создаётся при первом открытии и дальше живёт: пока раздел
+                    // не открывали, его привязки не считаются вовсе.
+                    Loader {
+                        readonly property bool current: StackLayout.isCurrentItem
+                        property bool wanted: false
+                        asynchronous: true
+                        active: wanted
+                        source: "AssistantPage.qml"
+                        onCurrentChanged: if (current) wanted = true
+                        Component.onCompleted: if (current) wanted = true
+                    }
                 }
             }
         }

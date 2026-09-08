@@ -34,13 +34,18 @@ from dotaudio.pipeline import (
     SAMPLE_RATE,
     LiveSession,
     open_voice_activity,
+    preload_voice_activity,
 )
 from dotaudio.storage import Store
 from dotaudio.transcripts import (
     apply_keyword_cooldown,
+    blend_fragments,
+    continues_sentence,
     export_transcript,
+    join_fragments,
     match_keywords,
     regroup_for_subtitles,
+    sentence_open,
 )
 from dotaudio.vosk_engine import VoskEngine
 
@@ -405,6 +410,12 @@ class Controller(QObject):
         self._partial_end = 0.0
         self._final_end = 0.0
         self._confirmed_caption = ""
+        # Последняя фраза Live ещё не закончила предложение: она читается в
+        # живой строке вместе с черновиком, а не отдельной строкой истории.
+        self._open_phrase = False
+        # Последнее законченное предложение - для острова и зала, где нет
+        # колонки истории: оно остаётся на экране до следующей речи или паузы.
+        self._settled_caption = ""
         self._caption_revision = 0
         self._live_phase = "idle"
         self._live_latency_ms = 0.0
@@ -453,6 +464,9 @@ class Controller(QObject):
         self._model_prepare_done = threading.Event()
         self._prepared_model = ""
         self._model_prepare_error = ""
+        # Фоновый прогрев (и повтор после смены модели) включается только из
+        # app.main: unit-тесты не должны скачивать Whisper при setSetting.
+        self._warmup_enabled = False
         self._model_library = [Engine.disk_status(name) for name in ("tiny", "base", "small", "medium", "large-v3", "turbo")]
         # Сводка железа приехает фоном: импорт ctranslate2 для проверки CUDA
         # стоит сотни миллисекунд и не должен задерживать первый кадр окна.
@@ -1038,6 +1052,18 @@ class Controller(QObject):
     def displayCaption(self):
         return " ".join(part for part in (self._confirmed_caption, self._partial_caption) if part).strip()
 
+    @Property(bool, notify=segmentsChanged)
+    def liveOpenPhrase(self):
+        """Последний сегмент - незаконченное предложение, показанное в живой строке."""
+
+        return bool(self._open_phrase and self._segments)
+
+    @Property(str, notify=captionChanged)
+    def settledCaption(self):
+        """Последнее законченное предложение Live, пока не началась новая речь."""
+
+        return self._settled_caption
+
     @Property(int, notify=captionChanged)
     def captionRevision(self): return self._caption_revision
 
@@ -1134,7 +1160,22 @@ class Controller(QObject):
             self._record_log("info", f"Выбрана модель: {value}")
         elif name in ("device", "backend", "source", "live_source", "language", "task", "live_sensitivity"):
             self._record_log("info", f"Настройка {name}: {value}")
-        self.changed.emit()
+        # Смена Live-движка или модели - сразу греем в фоне, чтобы кнопка
+        # Live не ждала загрузку в момент нажатия. Только в живом приложении.
+        if name in ("model", "device", "backend", "profile", "live_engine", "vosk_size", "language", "task"):
+            self._prepared_model = ""
+            if self._warmup_enabled:
+                QTimer.singleShot(0, self.prepareSelectedModel)
+        # Настройки ассистента читает только его контроллер: общий changed
+        # иначе пересчитывает весь мост (устройства, остров, настройки).
+        if name not in ("assistant_model", "assistant_runtime"):
+            self.changed.emit()
+
+    @Slot()
+    def enableModelWarmup(self):
+        """Разрешить фоновую подготовку моделей после старта UI."""
+
+        self._warmup_enabled = True
 
     def _apply_quit_hotkey(self) -> None:
         """Re-register the exit combo after it changes in Settings."""
@@ -1215,7 +1256,7 @@ class Controller(QObject):
     @Property(str, notify=changed)
     def liveModelText(self):
         """Какая модель/движок сейчас стоит для Live - видно в статусе/острове."""
-        way = str(self._settings.get("live_engine") or "vosk")
+        way = str(self._settings.get("live_engine") or "whisper")
         if way == "vosk":
             return live_engine_label("vosk", "", str(self._settings.get("vosk_size") or "small"))
         return live_engine_label("whisper", str(self._settings.get("model") or ""))
@@ -1729,11 +1770,15 @@ class Controller(QObject):
             self._live_diagnostic = ""
             self.liveStateChanged.emit()
         if (
-            self.displayCaption
+            (self.displayCaption or self._settled_caption or self._open_phrase)
             and now - max(self._last_signal_at, self._capture_started_at) >= LIVE_CLEAR_SILENCE_SECONDS
         ):
+            # A pause this long ends the sentence, whatever punctuation the
+            # decoder left on it: the phrase moves into the history column.
+            self._close_open_phrase()
             self._confirmed_caption = ""
             self._partial_caption = ""
+            self._settled_caption = ""
             self._partial_end = 0.0
             self._caption_revision += 1
             self.captionChanged.emit()
@@ -1764,11 +1809,53 @@ class Controller(QObject):
         if self._jobs or self._model_preparing:
             return
         self._idle_model_release.stop()
+        way = str(self._settings.get("live_engine") or "whisper")
+        # Silero грузим всегда в фоне: даже при смене движка кнопка Live
+        # не должна платить сотни миллисекунд за ONNX.
+        preload_needed = str(self._settings.get("live_sensitivity") or "speech") == "speech"
+
+        if way == "vosk":
+            size = str(self._settings.get("vosk_size") or "small")
+            engine = self._vosk_engine_for(size)
+            model = engine.model_name if getattr(engine, "model_name", None) else size
+            self._begin_engine_prepare(
+                model_label=str(model),
+                prepare_fn=lambda on_status, on_progress: engine.prepare(
+                    self._config(live_stream=True), on_status, on_progress
+                ),
+                preload_vad=preload_needed,
+            )
+            return
+
         # Prepare the model for the first live window as well as for the final
         # decode.  This warms the decoder in the worker before the user starts
         # speaking, so the first caption does not pay the cold-start cost.
         config = self._config(live_stream=True)
         model = config.model
+        if (
+            self._prepared_model == model
+            and self.engine.has_cached_model(model, config.device)
+        ):
+            if preload_needed:
+                threading.Thread(
+                    target=preload_voice_activity,
+                    name="dotaudio-vad-preload",
+                    daemon=True,
+                ).start()
+            return
+        self._begin_engine_prepare(
+            model_label=model,
+            prepare_fn=lambda on_status, on_progress: self.engine.prepare(
+                config, on_status, on_progress
+            ),
+            preload_vad=preload_needed,
+        )
+
+    def _begin_engine_prepare(self, model_label: str, prepare_fn, preload_vad: bool) -> None:
+        """Общий фон подготовки Whisper/Vosk + опциональный VAD."""
+
+        if self._model_preparing:
+            return
         self._prepare_cancel = threading.Event()
         self._model_prepare_done.clear()
         self._prepared_model = ""
@@ -1776,36 +1863,70 @@ class Controller(QObject):
         self._model_preparing = True
         self._model_state = {
             "phase": "downloading",
-            "model": model,
+            "model": model_label,
             "message": "Проверяем кэш и готовим модель…",
         }
-        self._record_log("info", f"Подготовка модели {model} начата.")
+        self._record_log("info", f"Подготовка модели {model_label} начата.")
         self.changed.emit()
 
         def prepare():
             try:
-                self.modelProgressArrived.emit(model, "Загружаем или проверяем файлы модели…")
+                if preload_vad:
+                    preload_voice_activity()
+                self.modelProgressArrived.emit(
+                    model_label, "Загружаем или проверяем файлы модели…"
+                )
                 if self._prepare_cancel.is_set():
-                    self.modelFinished.emit(model, "", "Подготовка отменена")
+                    self.modelFinished.emit(model_label, "", "Подготовка отменена")
                     return
 
                 def progress(info):
-                    self.modelDownloadProgress.emit(model, info)
+                    self.modelDownloadProgress.emit(model_label, info)
 
-                device = self.engine.prepare(
-                    config,
+                device = prepare_fn(
                     lambda status: self.statusArrived.emit(status),
                     progress,
                 )
                 if self._prepare_cancel.is_set():
-                    self.modelFinished.emit(model, "", "Подготовка отменена")
+                    self.modelFinished.emit(model_label, "", "Подготовка отменена")
                     return
             except Exception as exc:
-                self.modelFinished.emit(model, "", str(exc))
+                self.modelFinished.emit(model_label, "", str(exc))
             else:
-                self.modelFinished.emit(model, device, "")
+                self.modelFinished.emit(model_label, device, "")
 
         threading.Thread(target=prepare, name="dotaudio-model-prepare", daemon=True).start()
+
+    def _ensure_live_model_loading(self, config: RecognitionConfig, vosk: bool, engine) -> None:
+        """Не блокируя захват: догрузить модель, если старт обогнал прогрев."""
+
+        if vosk:
+            if self._model_preparing:
+                return
+            if self._prepared_model:
+                return
+            self._begin_engine_prepare(
+                model_label=getattr(engine, "model_name", "vosk") or "vosk",
+                prepare_fn=lambda on_status, on_progress: engine.prepare(
+                    config, on_status, on_progress
+                ),
+                preload_vad=False,
+            )
+            return
+        if self._prepared_model == config.model:
+            return
+        if self._model_preparing:
+            return
+        if self.engine.has_cached_model(config.model, config.device):
+            self._prepared_model = config.model
+            return
+        self._begin_engine_prepare(
+            model_label=config.model,
+            prepare_fn=lambda on_status, on_progress: self.engine.prepare(
+                config, on_status, on_progress
+            ),
+            preload_vad=False,
+        )
 
     @Slot()
     def cancelModelPrepare(self):
@@ -1887,6 +2008,8 @@ class Controller(QObject):
         self._partial_end = 0.0
         self._final_end = 0.0
         self._confirmed_caption = ""
+        self._open_phrase = False
+        self._settled_caption = ""
         self._caption_revision += 1
         self._edit_undo = []
         self._edit_redo = []
@@ -1913,7 +2036,17 @@ class Controller(QObject):
             self._live_diagnostic = ""
             self._capture_started_at = None
         self._state = "recording"
-        self._status = "Готовим модель для Live…" if mode == "live" else "Слушаю · модель загрузится при первой фразе"
+        live_engine = str(self._settings.get("live_engine") or "whisper")
+        if mode == "live":
+            model_name = str(self._settings.get("model") or "")
+            if live_engine != "vosk" and self._prepared_model == model_name and not self._model_preparing:
+                self._status = "Слушаю…"
+            elif self._model_preparing:
+                self._status = "Открываем захват, модель ещё готовится…"
+            else:
+                self._status = "Готовим модель для Live…"
+        else:
+            self._status = "Слушаю · модель загрузится при первой фразе"
         self._last_status = ""
         self._record_log("info", f"Запущен режим: {mode}.")
         kind, _device = source_for_mode(mode, self._settings)
@@ -1935,7 +2068,7 @@ class Controller(QObject):
                 return
         for name, url in sources:
             config = self._config(live_stream=(mode == "live"))
-            use_vosk = mode == "live" and str(self._settings.get("live_engine") or "vosk") == "vosk"
+            use_vosk = mode == "live" and live_engine == "vosk"
             vosk_size = str(self._settings.get("vosk_size") or "small")
             engine_now = (
                 self._vosk_engine_for(vosk_size) if use_vosk else self.engine
@@ -1997,31 +2130,22 @@ class Controller(QObject):
                 else:
                     capture = open_live_capture(kind, self._settings, **args)
                 # Device startup and WASAPI initialization must not block the QML thread.
+                # Модель и захват больше не сериализуем: раньше кнопка Live ждала
+                # весь prepare (и Silero), и казалось, что она «не работает».
                 def start(live=live, capture=capture, sid=sid, config=config, mode=mode, engine=engine_now, vosk=use_vosk):
                     try:
                         if mode == "live":
-                            # "Всё подряд" не платит за модель VAD: буфер
-                            # остаётся на пороге энергии, и декодер получает
-                            # любой звук, включая песни.
                             if config.live_sensitivity == "speech":
                                 live.use_detector(open_voice_activity())
-                            if vosk:
-                                # vosk-модель подготавливается сама в рабочем
-                                # потоке; prepare идемпотентна и не трогает сеть
-                                # повторно, когда модель уже загружена.
-                                engine.prepare(config, self.statusArrived.emit)
-                            elif self._prepared_model == config.model:
-                                self.statusArrived.emit("model_ready")
-                            elif self._model_preparing:
-                                # Startup preparation owns model loading.  Do
-                                # not race it with a second WhisperModel
-                                # construction when Live is started early.
-                                self._model_prepare_done.wait()
-                                if self._model_prepare_error:
-                                    raise RuntimeError(self._model_prepare_error)
+                            if self._prepared_model and (
+                                vosk or self._prepared_model == config.model
+                            ):
                                 self.statusArrived.emit("model_ready")
                             else:
-                                self.engine.prepare(config, self.statusArrived.emit)
+                                self.statusArrived.emit("loading_model")
+                                self._ensure_live_model_loading(config, vosk, engine)
+                            # Захват открываем сразу. Первый декод сам ждёт
+                            # model_lock / inference_lock, если прогрев ещё идёт.
                         if live.cancel.is_set() or live.closed.is_set():
                             live.stop(cancel=True)
                             return
@@ -2177,32 +2301,41 @@ class Controller(QObject):
     def _on_segment(self, sid, segment):
         if sid not in self._jobs:
             return
-        identifiers = self.store.append_segments(sid, [segment])
         job = self._jobs[sid]
-        if sid == self._session_id:
-            self._segments = [*self._segments, {**segment, "id": identifiers[0]}]
-            self.segmentsChanged.emit()
-        if job["mode"] == "live" and sid == self._session_id:
+        live_here = job["mode"] == "live" and sid == self._session_id
+        if not (live_here and self._extends_open_phrase(sid, segment)):
+            identifiers = self.store.append_segments(sid, [segment])
+            if sid == self._session_id:
+                self._segments = [*self._segments, {**segment, "id": identifiers[0]}]
+                if live_here:
+                    self._open_phrase = sentence_open(
+                        str(segment.get("text", "")), bool(segment.get("cut"))
+                    )
+                self.segmentsChanged.emit()
+        if live_here:
+            if not self._open_phrase and self._segments:
+                self._settled_caption = str(self._segments[-1].get("text", "")).strip()
             segment_end = float(segment.get("end", 0.0))
             self._last_caption_at = time.monotonic()
             self._final_end = max(self._final_end, float(segment.get("audio_end", segment_end)))
             self._live_diagnostic = ""
             # The recogniser can finish an older phrase while the pipeline has
             # already shown a preview of the next one.  Persist every final,
-            # but never make the visible caption jump backwards in time.
-            replaces_preview = self._final_end >= self._partial_end
-            if replaces_preview:
-                self._confirmed_caption = str(segment.get("text", "")).strip()
+            # but never make the visible caption jump backwards in time: a
+            # preview of newer sound stays after the sentence it continues.
+            if self._partial_end <= self._final_end:
                 self._partial_caption = ""
                 self._partial_end = 0.0
-                self._caption_revision += 1
+            self._refresh_live_caption()
             self._live_latency_ms = max(
                 0.0,
                 (time.monotonic() - self._started - segment_end) * 1000,
             )
-            if replaces_preview:
-                self._live_phase = "listening" if self.recording else "stopping"
-                self.captionChanged.emit()
+            self._live_phase = (
+                "speech" if self._partial_caption
+                else "listening" if self.recording
+                else "stopping"
+            )
             self.liveStateChanged.emit()
         if job["mode"] == "monitor":
             keywords = [w.strip() for w in str(self._settings["keywords"]).split(",") if w.strip()]
@@ -2225,12 +2358,73 @@ class Controller(QObject):
         self.logsChanged.emit()
         self.captionChanged.emit()
 
+    def _extends_open_phrase(self, sid, segment) -> bool:
+        """Grow the unfinished sentence with this final instead of adding a row.
+
+        Live cuts speech every few seconds so the caption stays quick; the
+        pieces of one sentence come back as separate finals ("…в реальном",
+        "времени.").  Read as rows they are scraps.  Joined in place they are
+        the sentence, in history as well as on screen.
+        """
+
+        if not self._open_phrase or not self._segments:
+            return False
+        previous = self._segments[-1]
+        text = str(segment.get("text", "")).strip()
+        gap = float(segment.get("start", 0.0)) - float(previous.get("audio_end", previous.get("end", 0.0)))
+        if not continues_sentence(
+            str(previous.get("text", "")), bool(previous.get("cut")), text, gap
+        ):
+            return False
+        joined = join_fragments(str(previous.get("text", "")), bool(previous.get("cut")), text)
+        end = max(float(previous.get("end", 0.0)), float(segment.get("end", 0.0)))
+        merged = {
+            **previous,
+            "end": end,
+            "audio_end": max(
+                float(previous.get("audio_end", 0.0)),
+                float(segment.get("audio_end", segment.get("end", 0.0))),
+            ),
+            "text": joined,
+            "cut": bool(segment.get("cut")),
+        }
+        self.store.extend_segment(sid, int(previous["id"]), end, joined)
+        self._segments = [*self._segments[:-1], merged]
+        self._open_phrase = sentence_open(joined, bool(segment.get("cut")))
+        self.segmentsChanged.emit()
+        return True
+
+    def _refresh_live_caption(self):
+        """The live row: the unfinished sentence so far, then the preview."""
+
+        if self._open_phrase and self._segments:
+            last = self._segments[-1]
+            head, tail = blend_fragments(
+                str(last.get("text", "")), bool(last.get("cut")), self._partial_caption
+            )
+        else:
+            head, tail = "", self._partial_caption
+        self._confirmed_caption = head
+        self._partial_caption = tail
+        self._caption_revision += 1
+        self.captionChanged.emit()
+
+    def _close_open_phrase(self):
+        """Let the unfinished sentence stand as it is: the speaker stopped."""
+
+        if not self._open_phrase:
+            return
+        self._open_phrase = False
+        if self._segments:
+            self._settled_caption = str(self._segments[-1].get("text", "")).strip()
+        self.segmentsChanged.emit()
+
     def _on_partial(self, sid, segment):
         """Accept a disposable Live preview without persisting it.
 
-        The worker emits full phrase snapshots.  A future stabiliser may add a
-        ``stable_text`` prefix; until then the complete snapshot is explicitly
-        treated as provisional by the QML view.
+        The worker emits full phrase snapshots.  On screen the snapshot follows
+        the unfinished sentence from the finals before it, so the reader sees
+        one sentence growing rather than a new scrap every few seconds.
         """
 
         job = self._jobs.get(sid)
@@ -2243,19 +2437,12 @@ class Controller(QObject):
         end = float(segment.get("end", 0.0))
         if end < self._partial_end or end <= self._final_end:
             return
-        stable = str(segment.get("stable_text", "")).strip()
-        if stable and text.startswith(stable):
-            self._confirmed_caption = stable
-            self._partial_caption = text[len(stable):].strip()
-        else:
-            self._confirmed_caption = ""
-            self._partial_caption = text
-        self._caption_revision += 1
+        self._partial_caption = text
+        self._partial_end = end
         self._live_diagnostic = ""
         self._live_phase = "speech"
-        self._partial_end = end
         self._live_latency_ms = max(0.0, (time.monotonic() - self._started - end) * 1000)
-        self.captionChanged.emit()
+        self._refresh_live_caption()
         self.liveStateChanged.emit()
 
     def _on_finished(self, sid, error, cancelled):
@@ -2291,6 +2478,8 @@ class Controller(QObject):
             self._input_state = self.inputState
             self.levelChanged.emit()
             if job["mode"] == "live":
+                self._close_open_phrase()
+                self._confirmed_caption = ""
                 self._partial_caption = ""
                 self._partial_end = 0.0
                 self._live_phase = "error" if error else "idle"

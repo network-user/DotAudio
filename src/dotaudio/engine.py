@@ -47,6 +47,14 @@ LIVE_TAIL_SECONDS = 1.5
 LIVE_TOKENS_PER_SECOND = 24
 LIVE_MAX_TOKENS = 200
 LIVE_HINT_CHARS = 150
+# Сколько уже распознанного текста получает декодер перед новым окном.
+# Live режет речь на фразы по 4 с, и без контекста каждое окно начинается
+# «с чистого листа»: заглавная буква посреди предложения, потерянное
+# согласование («в реальном» | «Времени.»), догадка вместо термина, который
+# только что был произнесён. Это тот же механизм, что condition_on_previous_text
+# у Whisper, только ограниченный: длинный prompt - это и лишние токены на
+# каждом окне, и известный источник зацикливания.
+LIVE_CONTEXT_CHARS = 200
 # Mean token log probability below which the window is not reported as speech.
 # The ordinary faster-whisper call applies this check by default; the fast live
 # path bypasses that call, so it applies the same threshold itself.  Measured on
@@ -225,6 +233,11 @@ class RecognitionConfig:
     # Domain terms are supplied by the user-facing dictionary.  They remain a
     # hint to the recognizer, never a replacement for the spoken audio.
     initial_prompt: str = ""
+    # Text already recognised just before this live window.  The decoder reads
+    # it as the previous segment, so a phrase cut by the length limit continues
+    # the sentence instead of starting a new one.  Live only; bounded by
+    # LIVE_CONTEXT_CHARS from the end.
+    live_context: str = ""
 
 
 class Engine:
@@ -311,7 +324,7 @@ class Engine:
         self._ensure_model_files(config.model, on_progress)
         model, device = self._model_for(config.model, config.device)
         if config.live_stream:
-            warm_error = self._warm_live_decoder(model, config)
+            warm_error = self._warm_live_decoder(model, config, device)
             if warm_error is not None:
                 if (
                     config.device == "auto"
@@ -321,13 +334,18 @@ class Engine:
                     self._status(on_status, "gpu_unavailable_falling_back_cpu")
                     self._drop_model(config.model, "cuda")
                     model, device = self._model_for(config.model, "cpu")
-                    cpu_error = self._warm_live_decoder(model, config)
+                    cpu_error = self._warm_live_decoder(model, config, device)
                     if cpu_error is not None:
                         raise cpu_error
                 else:
                     raise warm_error
         self._status(on_status, "model_ready")
         return device
+
+    def has_cached_model(self, model_name: str, requested_device: str) -> bool:
+        """True, когда выбранная модель уже лежит в памяти процесса."""
+
+        return self._has_cached_model(model_name, requested_device)
 
     @staticmethod
     def _validate_config(config: RecognitionConfig) -> None:
@@ -549,8 +567,10 @@ class Engine:
             # The user dictionary is a hint, not a rewrite.  It is bounded hard:
             # every hint token is decoder context paid on each live window.
             terms = " ".join(str(config.initial_prompt).split())[:LIVE_HINT_CHARS]
+            context = self._live_context(config.live_context)
+            previous = tokenizer.encode(" " + context) if context else []
             prompt = model.get_prompt(
-                tokenizer, [], without_timestamps=True, hotwords=terms or None
+                tokenizer, previous, without_timestamps=True, hotwords=terms or None
             )
             budget = min(LIVE_MAX_TOKENS, int(seconds * LIVE_TOKENS_PER_SECOND) + 8)
             self._status(on_status, f"transcribing_{device}")
@@ -587,6 +607,7 @@ class Engine:
         # window contains voice is decided before it reaches the decoder.
         tokens = [token for token in result.sequences_ids[0] if token < tokenizer.eot]
         text = self._drop_restart(tokenizer.decode(tokens).strip())
+        text = self._drop_echo(text, context)
         if (
             text
             and config.live_sensitivity == "speech"
@@ -657,6 +678,37 @@ class Engine:
         return text
 
     _stem = staticmethod(stem)
+
+    @staticmethod
+    def _live_context(text: str) -> str:
+        """The end of the recognised text, cut at a word, for the decoder prompt."""
+
+        clean = " ".join(str(text).split())
+        if len(clean) <= LIVE_CONTEXT_CHARS:
+            return clean
+        cut = clean[-LIVE_CONTEXT_CHARS:]
+        _head, _space, rest = cut.partition(" ")
+        return rest or cut
+
+    @staticmethod
+    def _drop_echo(text: str, context: str) -> str:
+        """Remove the end of the prompt if the decoder repeated it first.
+
+        Conditioning on the previous text has a known failure: the decoder
+        sometimes starts by writing that text again before it reads the audio.
+        The repeated words are already on screen, so they are cut here, matched
+        on stems because the second pass often changes an ending.
+        """
+
+        if not text or not context:
+            return text
+        words = text.split()
+        old = [stem(word) for word in context.split()]
+        new = [stem(word) for word in words]
+        for size in range(min(len(old), len(new)), 1, -1):
+            if old[-size:] == new[:size]:
+                return " ".join(words[size:]).strip()
+        return text
 
     def _live_tokenizer(
         self,
@@ -779,13 +831,24 @@ class Engine:
             return (model_name, requested_device) in self._models
 
     def _warm_live_decoder(
-        self, model: Any, config: RecognitionConfig
+        self, model: Any, config: RecognitionConfig, device: str
     ) -> BaseException | None:
-        """Run a silent 300 ms pass so the first live caption is not a cold start."""
+        """Прогреть тот же путь, которым идёт Live, а не полный Whisper.transcribe.
 
-        language = None if config.language.strip().lower() == "auto" else config.language
-        silence = np.zeros(4800, dtype=np.float32)
+        Полный ``transcribe`` дополняет вход до 30 с и греет не те ядра: на
+        холодном старте Live всё равно платил за первый CTranslate2-прогон.
+        Тишина ~0,5 с достаточна, чтобы собрать mel и один generate.
+        """
+
+        silence = np.zeros(8000, dtype=np.float32)
         try:
+            # Без внешнего inference_lock: ``_run_live_window`` берёт его сам.
+            live = self._run_live_window(
+                model, config, device, silence, None, None, None
+            )
+            if live is not None:
+                return None
+            language = None if config.language.strip().lower() == "auto" else config.language
             with self._inference_lock:
                 segments, _info = model.transcribe(
                     silence,

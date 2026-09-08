@@ -16,9 +16,20 @@ Item {
 
     // Завершённые фразы (bridge.segments) и текущая, ещё не завершённая.
     property var segments: []
+    // Последняя фраза списка ещё не закончила предложение и уже стоит в
+    // живой строке как confirmed: в колонке её не повторяем, иначе одно и то
+    // же предложение читается дважды - выше мелко и ниже крупно.
+    property bool hideLast: false
     property string confirmed: ""
     property string pending: ""
     property string placeholder: ""
+
+    readonly property var shown: {
+        var items = segments || []
+        if (hideLast && items.length)
+            return items.slice(0, items.length - 1)
+        return items
+    }
 
     property int pixelSize: Theme.fsStageSm
     // Сколько строк держит живая строка. Место отводится заранее, поэтому
@@ -66,7 +77,7 @@ Item {
         topMargin: Math.max(0, height - contentHeight)
         clip: true
         spacing: Theme.gapSm
-        model: root.segments
+        model: root.shown
         boundsBehavior: Flickable.StopAtBounds
         // Список читают, а не перелистывают: колесо двигает на строку,
         // а не пролетает половину разговора.

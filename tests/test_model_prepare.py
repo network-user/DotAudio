@@ -43,6 +43,8 @@ def test_prepare_warms_live_decoder_when_requested(monkeypatch) -> None:
         "faster_whisper",
         SimpleNamespace(WhisperModel=lambda *_args, **_kwargs: FakeModel()),
     )
+    # Без feature_extractor живой путь недоступен: прогрев падает на
+    # обычный greedy transcribe (как и раньше по смыслу теста).
     device = Engine().prepare(
         RecognitionConfig(model="tiny", device="cpu", live_stream=True)
     )
@@ -51,6 +53,28 @@ def test_prepare_warms_live_decoder_when_requested(monkeypatch) -> None:
     assert isinstance(calls[0]["source"], np.ndarray)
     assert calls[0]["beam_size"] == 1
     assert calls[0]["without_timestamps"] is True
+
+
+def test_prepare_skips_repeat_when_model_already_cached(monkeypatch) -> None:
+    loads = {"n": 0}
+
+    class FakeModel:
+        def transcribe(self, source, **kwargs):
+            return iter(()), object()
+
+    def model(*_a, **_k):
+        loads["n"] += 1
+        return FakeModel()
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=model))
+    engine = Engine()
+    config = RecognitionConfig(model="tiny", device="cpu", live_stream=True)
+    assert engine.prepare(config) == "cpu"
+    assert engine.has_cached_model("tiny", "cpu")
+    assert loads["n"] == 1
+    # Повторный prepare берёт кеш: WhisperModel не создаётся снова.
+    assert engine.prepare(config) == "cpu"
+    assert loads["n"] == 1
 
 
 def test_prepare_live_falls_back_to_cpu_when_cuda_warmup_fails(monkeypatch) -> None:
