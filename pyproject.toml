@@ -17,6 +17,9 @@ dependencies = [
 server = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "python-multipart>=0.0.20,<1"]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1", "httpx>=0.28,<1"]
 build = ["pyinstaller>=6.12,<7"]
+# Идентификация голосов при транскрибации файла. Тяжёлое/нативное, поэтому
+# опционально: без него приложение работает, только говорящие не определяются.
+diarize = ["torch>=2.3", "speechbrain>=1.0"]
 
 [project.scripts]
 dotaudio = "dotaudio.app:main"

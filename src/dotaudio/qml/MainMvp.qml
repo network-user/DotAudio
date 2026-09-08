@@ -840,6 +840,7 @@ ApplicationWindow {
                                     IconButton { iconName: "undo"; enabled: bridge.canUndoEdit; onClicked: bridge.undoEdit(); ToolTip.visible: hovered; ToolTip.text: "Отменить правку" }
                                     IconButton { iconName: "redo"; enabled: bridge.canRedoEdit; onClicked: bridge.redoEdit(); ToolTip.visible: hovered; ToolTip.text: "Повторить правку" }
                                     Item { Layout.fillWidth: true }
+                                    PillButton { text: "слова→тишина"; enabled: bridge.segments.length > 0; onClicked: bridge.realignKaraoke(); ToolTip.visible: hovered; ToolTip.text: "Притянуть границы слов к тишине аудио (без повторного распознавания)" }
                                     PillButton { text: "ASS"; enabled: bridge.segments.length > 0; onClicked: bridge.exportKaraokeFile() }
                                     PillButton { text: bridge.rendering ? "Рендер…" : "MP4"; primary: true; enabled: bridge.segments.length > 0 && !bridge.rendering; onClicked: bridge.exportKaraokeVideo() }
                                 }

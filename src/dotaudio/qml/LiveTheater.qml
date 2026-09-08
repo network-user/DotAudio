@@ -133,14 +133,37 @@ Rectangle {
                 ToolTip.text: "«Речь» показывает только речь, «Всё» - любой звук, включая песни"
             }
 
-            PillButton {
-                compact: true
-                text: bridge.liveModelText
-                enabled: !bridge.recording && !bridge.busy
-                onClicked: bridge.cycleLiveModel()
-                ToolTip.visible: hovered
-                ToolTip.text: "Каким движком распознавать Live. Цикл: Vosk малая/большая, затем Whisper"
+            // Метка движка live: выбор и «какой по умолчанию» задаётся в
+            // Настройках (карточка «Движок распознавания»), чтобы не было двух
+            // мест, меняющих двигатель. Здесь - только индикация.
+            Item {
+                Layout.fillWidth: false
+                implicitWidth: modelChip.implicitWidth + 14
+                implicitHeight: modelChip.implicitHeight + 8
+                Rectangle {
+                    id: modelChip
+                    anchors.centerIn: parent
+                    implicitWidth: lab.implicitWidth + 18
+                    implicitHeight: lab.implicitHeight + 8
+                    radius: Math.round((lab.implicitHeight + 8) / 2)
+                    color: Theme.surface2
+                    border.width: 1
+                    border.color: Theme.border
+                    Label {
+                        id: lab
+                        anchors.centerIn: parent
+                        text: bridge.liveModelText
+                        color: Theme.text
+                        font.pixelSize: Theme.fsSmall
+                        font.weight: Font.DemiBold
+                        font.family: Theme.fontFamily
+                    }
+                    HoverHandler { id: chipHover }
+                    ToolTip.visible: chipHover.hovered
+                    ToolTip.text: "Используется при Live. Изменить - в «Настройки»"
+                }
             }
+
 
             PillButton {
                 compact: true
