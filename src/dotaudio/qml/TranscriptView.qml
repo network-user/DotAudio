@@ -44,7 +44,13 @@ Rectangle {
     property int exportFormatIndex: 0
     property bool exportTimestamps: false
     property bool exportSpeakers: true
+    property bool exportConfidence: false
+    property bool exportReviewFlags: false
+    property bool exportHeader: false
+    property bool exportPhraseNumbers: false
+    property bool exportFlaggedOnly: false
     property bool exportFocusedOnly: false
+    property string exportPreview: ""
     property bool onlyFlagged: false
     property var mutedKeys: ({})
     property var soloKeys: ({})
@@ -311,6 +317,55 @@ Rectangle {
     onFocusKeyChanged: {
         if (view.focusKey <= 0)
             view.exportFocusedOnly = false
+        view.refreshExportPreview()
+    }
+
+    function formatIndexFromKey(key) {
+        var want = String(key || "txt")
+        for (var i = 0; i < view.exportFormats.length; ++i)
+            if (String(view.exportFormats[i].key) === want)
+                return i
+        return 0
+    }
+
+    function exportOptions() {
+        return {
+            format: view.exportFormatKey,
+            include_timestamps: view.exportTimesForced || view.exportTimestamps,
+            include_speakers: view.exportSpeakers,
+            include_confidence: view.exportConfidence,
+            include_review_flags: view.exportReviewFlags,
+            include_header: view.exportHeader,
+            include_phrase_numbers: view.exportPhraseNumbers,
+            speaker_key: view.exportFocusedOnly ? view.focusKey : 0,
+            only_flagged: view.exportFlaggedOnly
+        }
+    }
+
+    function loadExportSettings() {
+        var s = bridge.settings || {}
+        view.exportFormatIndex = view.formatIndexFromKey(s.export_format)
+        view.exportTimestamps = Boolean(s.export_timestamps)
+        view.exportSpeakers = s.export_speakers === undefined ? true : Boolean(s.export_speakers)
+        view.exportConfidence = Boolean(s.export_confidence)
+        view.exportReviewFlags = Boolean(s.export_review_flags)
+        view.exportHeader = Boolean(s.export_header)
+        view.exportPhraseNumbers = Boolean(s.export_phrase_numbers)
+        view.exportFlaggedOnly = Boolean(s.export_flagged_only)
+        view.refreshExportPreview()
+    }
+
+    function refreshExportPreview() {
+        if (!view.exportOpen || view.segs.length === 0) {
+            view.exportPreview = ""
+            return
+        }
+        view.exportPreview = String(bridge.transcriptExportPreview(view.exportOptions()) || "")
+    }
+
+    onExportOpenChanged: {
+        if (view.exportOpen)
+            view.loadExportSettings()
     }
 
     // Воспроизвести фразу и кратко подсветить её в полном списке.
@@ -632,7 +687,6 @@ Rectangle {
                             }
                         }
 
-                        // Фильтры сохранения: формат, таймкоды, голоса.
                         Rectangle {
                             Layout.fillWidth: true
                             visible: view.exportOpen && view.segs.length > 0 && !view.busyPhase
@@ -643,18 +697,20 @@ Rectangle {
                             border.color: Theme.border
                             ColumnLayout {
                                 id: exportBox
-                                anchors.fill: parent
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
                                 anchors.margins: Theme.padCard
                                 spacing: Theme.gapSm
                                 Label {
-                                    text: "Сохранение расшифровки"
+                                    text: "Формат и фильтры сохранения"
                                     color: Theme.text
                                     font.pixelSize: Theme.fsLabel
                                     font.weight: Font.DemiBold
                                 }
                                 Label {
                                     Layout.fillWidth: true
-                                    text: "Выберите формат и что включить в файл: таймкоды, имена говорящих или только выбранный голос."
+                                    text: "Переключатели меняют файл: с таймкодами или без, с говорящими или без, с уверенностью, шапкой и номерами фраз. Справа - как это будет выглядеть."
                                     color: Theme.muted
                                     font.pixelSize: Theme.fsSmall
                                     wrapMode: Text.Wrap
@@ -677,20 +733,14 @@ Rectangle {
                                             view.exportFormatIndex = index
                                             if (view.exportTimesForced)
                                                 view.exportTimestamps = true
+                                            view.refreshExportPreview()
                                         }
                                     }
                                     Item { Layout.fillWidth: true }
                                     PillButton {
                                         text: "Скачать файл"
                                         primary: true
-                                        onClicked: {
-                                            bridge.transcriptExport(
-                                                view.exportFormatKey,
-                                                view.exportTimesForced || view.exportTimestamps,
-                                                view.exportSpeakers,
-                                                view.exportFocusedOnly ? view.focusKey : 0
-                                            )
-                                        }
+                                        onClicked: bridge.transcriptExportWithOptions(view.exportOptions())
                                     }
                                 }
                                 Flow {
@@ -698,44 +748,123 @@ Rectangle {
                                     spacing: Theme.gapMd
                                     ToggleSwitch {
                                         text: view.exportTimesForced
-                                              ? "Таймкоды (обязательны для субтитров)"
-                                              : "Таймкоды у строк"
+                                              ? "Таймкоды (нужны субтитрам)"
+                                              : "С таймкодами"
                                         checked: view.exportTimesForced || view.exportTimestamps
                                         enabled: !view.exportTimesForced
-                                        onToggled: view.exportTimestamps = checked
+                                        onToggled: {
+                                            view.exportTimestamps = checked
+                                            view.refreshExportPreview()
+                                        }
                                     }
                                     ToggleSwitch {
-                                        text: "Имена говорящих"
+                                        text: "С говорящими"
                                         checked: view.exportSpeakers
-                                        onToggled: view.exportSpeakers = checked
+                                        onToggled: {
+                                            view.exportSpeakers = checked
+                                            view.refreshExportPreview()
+                                        }
+                                    }
+                                    ToggleSwitch {
+                                        text: "С уверенностью"
+                                        checked: view.exportConfidence
+                                        onToggled: {
+                                            view.exportConfidence = checked
+                                            view.refreshExportPreview()
+                                        }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Метки «на проверку»"
+                                        checked: view.exportReviewFlags
+                                        onToggled: {
+                                            view.exportReviewFlags = checked
+                                            view.refreshExportPreview()
+                                        }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Шапка файла"
+                                        checked: view.exportHeader
+                                        enabled: view.exportFormatKey === "txt" || view.exportFormatKey === "md"
+                                        onToggled: {
+                                            view.exportHeader = checked
+                                            view.refreshExportPreview()
+                                        }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Номера фраз"
+                                        checked: view.exportPhraseNumbers
+                                        enabled: view.exportFormatKey === "txt" || view.exportFormatKey === "md"
+                                        onToggled: {
+                                            view.exportPhraseNumbers = checked
+                                            view.refreshExportPreview()
+                                        }
                                     }
                                     ToggleSwitch {
                                         text: view.focusKey > 0
                                               ? "Только выбранный голос"
-                                              : "Только выбранный голос (сначала фильтр сверху)"
+                                              : "Только выбранный голос"
                                         checked: view.exportFocusedOnly
                                         enabled: view.focusKey > 0
-                                        onToggled: view.exportFocusedOnly = checked
+                                        onToggled: {
+                                            view.exportFocusedOnly = checked
+                                            view.refreshExportPreview()
+                                        }
+                                    }
+                                    ToggleSwitch {
+                                        text: "Только проблемные"
+                                        checked: view.exportFlaggedOnly
+                                        onToggled: {
+                                            view.exportFlaggedOnly = checked
+                                            view.refreshExportPreview()
+                                        }
                                     }
                                 }
                                 Label {
                                     Layout.fillWidth: true
                                     text: {
                                         var parts = [view.exportFormatKey.toUpperCase()]
-                                        if (view.exportTimesForced || view.exportTimestamps)
-                                            parts.push("с таймкодами")
-                                        else
-                                            parts.push("без таймкодов")
-                                        parts.push(view.exportSpeakers ? "с голосами" : "только текст")
+                                        parts.push((view.exportTimesForced || view.exportTimestamps) ? "с таймкодами" : "без таймкодов")
+                                        parts.push(view.exportSpeakers ? "с говорящими" : "без говорящих")
+                                        parts.push(view.exportConfidence ? "с уверенностью" : "без уверенности")
+                                        if (view.exportReviewFlags)
+                                            parts.push("метки проверки")
+                                        if (view.exportHeader && (view.exportFormatKey === "txt" || view.exportFormatKey === "md"))
+                                            parts.push("шапка")
+                                        if (view.exportPhraseNumbers && (view.exportFormatKey === "txt" || view.exportFormatKey === "md"))
+                                            parts.push("номера")
                                         if (view.exportFocusedOnly && view.focusKey > 0)
                                             parts.push("один голос")
-                                        return "Будет сохранено: " + parts.join(" · ")
-                                              + " · " + view.phrases(view.exportFocusedOnly && view.focusKey > 0
-                                                                      ? view.rows.length : view.segs.length)
+                                        if (view.exportFlaggedOnly)
+                                            parts.push("только проблемные")
+                                        return "Файл: " + parts.join(" · ")
                                     }
                                     color: Theme.faint
                                     font.pixelSize: Theme.fsMicro
                                     wrapMode: Text.Wrap
+                                }
+                                Label {
+                                    text: "Как будет выглядеть"
+                                    color: Theme.muted
+                                    font.pixelSize: Theme.fsSmall
+                                    font.weight: Font.DemiBold
+                                }
+                                TextArea {
+                                    id: exportPreviewBox
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 160
+                                    readOnly: true
+                                    wrapMode: TextEdit.Wrap
+                                    selectByMouse: true
+                                    color: Theme.text
+                                    font.family: Theme.monoFamily
+                                    font.pixelSize: Theme.fsSmall
+                                    text: view.exportPreview
+                                    background: Rectangle {
+                                        radius: Theme.radiusSm
+                                        color: Theme.fill
+                                        border.width: 1
+                                        border.color: Theme.hairline
+                                    }
                                 }
                             }
                         }

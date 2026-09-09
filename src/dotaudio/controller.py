@@ -56,6 +56,7 @@ from dotaudio.transcript_pro import (
     merge_segments,
     preset_list,
     quality_stats,
+    render_export,
     serialize_compare_report,
     set_phrase_window,
     split_segment,
@@ -178,6 +179,14 @@ DEFAULTS = {
     "gpu_hint_dismissed": False,
     # Мастер первого запуска: опрос железа, брифинг и фоновая подготовка.
     "setup_completed": False,
+    "export_format": "txt",
+    "export_timestamps": False,
+    "export_speakers": True,
+    "export_confidence": False,
+    "export_review_flags": False,
+    "export_header": False,
+    "export_phrase_numbers": False,
+    "export_flagged_only": False,
 }
 
 # Подписи движков голосов для интерфейса и журнала.
@@ -5360,39 +5369,90 @@ class Controller(QObject):
                     continue
                 self.store.update_segment(session_id, item_id, new_text)
 
-    @Slot(str, bool, bool, int)
-    def transcriptExport(
-        self,
-        format: str = "txt",
-        include_timestamps: bool = False,
-        include_speakers: bool = True,
-        speaker_key: int = 0,
-    ):
-        """Сохранить расшифровку с фильтрами формата, таймкодов и голосов.
+    def _export_options_from_map(self, options=None) -> dict:
+        raw = dict(options or {})
+        fmt = str(raw.get("format") or self._settings.get("export_format") or "txt")
+        fmt = fmt.strip().lower()
+        if fmt not in ("txt", "md", "srt", "vtt", "json"):
+            fmt = "txt"
+        times = bool(raw.get("include_timestamps", self._settings.get("export_timestamps")))
+        if fmt in ("srt", "vtt"):
+            times = True
+        return {
+            "format": fmt,
+            "include_timestamps": times,
+            "include_speakers": bool(
+                raw.get("include_speakers", self._settings.get("export_speakers", True))
+            ),
+            "include_confidence": bool(
+                raw.get("include_confidence", self._settings.get("export_confidence"))
+            ),
+            "include_review_flags": bool(
+                raw.get("include_review_flags", self._settings.get("export_review_flags"))
+            ),
+            "include_header": bool(
+                raw.get("include_header", self._settings.get("export_header"))
+            ),
+            "include_phrase_numbers": bool(
+                raw.get("include_phrase_numbers", self._settings.get("export_phrase_numbers"))
+            ),
+            "speaker_key": int(raw.get("speaker_key") or 0),
+            "only_flagged": bool(raw.get("only_flagged", False)),
+            "title": str(self._trans_state.get("file") or ""),
+            "source": str(self._trans_state.get("path") or ""),
+            "model": str(self._settings.get("model") or ""),
+        }
 
-        ``speaker_key`` > 0 оставляет только реплики этого голоса (как фильтр
-        на странице). SRT/VTT всегда несут cue-тайминги; флаг таймкодов для
-        них не отключается.
-        """
+    def _persist_export_options(self, options: dict) -> None:
+        mapping = {
+            "export_format": str(options.get("format") or "txt"),
+            "export_timestamps": bool(options.get("include_timestamps")),
+            "export_speakers": bool(options.get("include_speakers")),
+            "export_confidence": bool(options.get("include_confidence")),
+            "export_review_flags": bool(options.get("include_review_flags")),
+            "export_header": bool(options.get("include_header")),
+            "export_phrase_numbers": bool(options.get("include_phrase_numbers")),
+            "export_flagged_only": bool(options.get("only_flagged")),
+        }
+        self._settings.update(mapping)
+        self.store.save_settings(self._settings)
+
+    @Slot("QVariantMap", result=str)
+    def transcriptExportPreview(self, options=None) -> str:
+        """Собрать текст файла по фильтрам, без диалога и без записи на диск."""
+
+        segments = list(self._trans_state.get("segments") or [])
+        if not segments:
+            return "Нет фраз для сохранения."
+        try:
+            text, _fmt = render_export(segments, self._export_options_from_map(options))
+        except ValueError as exc:
+            return str(exc)
+        if not text.strip():
+            return "Нет фраз с выбранными фильтрами."
+        lines = text.splitlines()
+        if len(lines) > 28:
+            return "\n".join(lines[:28]) + "\n…"
+        return text
+
+    @Slot("QVariantMap")
+    def transcriptExportWithOptions(self, options=None):
+        """Сохранить расшифровку со всеми фильтрами форматирования."""
+
         segments = list(self._trans_state.get("segments") or [])
         if not segments:
             return
-        fmt = str(format or "txt").strip().lower()
-        if fmt not in ("txt", "md", "srt", "vtt", "json"):
-            self.transcribeStatus.emit(f"Неизвестный формат экспорта: {fmt}")
+        opts = self._export_options_from_map(options)
+        try:
+            body, fmt = render_export(segments, opts)
+        except ValueError as exc:
+            self.transcribeStatus.emit(str(exc))
             self.transcribeChanged.emit()
             return
-        key = int(speaker_key or 0)
-        if key > 0:
-            segments = [
-                row for row in segments if int(row.get("role") or 0) == key
-            ]
-            if not segments:
-                self.transcribeStatus.emit("Нет реплик выбранного голоса для сохранения.")
-                self.transcribeChanged.emit()
-                return
-        with_times = bool(include_timestamps)
-        with_speakers = bool(include_speakers)
+        if not body.strip():
+            self.transcribeStatus.emit("Нет фраз с выбранными фильтрами.")
+            self.transcribeChanged.emit()
+            return
         filters = {
             "txt": "Текст (*.txt)",
             "md": "Markdown (*.md)",
@@ -5408,29 +5468,36 @@ class Controller(QObject):
         )
         if not path:
             return
-        # Расширение из диалога может отличаться - доверяем выбранному формату.
         if Path(path).suffix.lower() != f".{fmt}":
             path = str(Path(path).with_suffix(f".{fmt}"))
-        payload = segments
-        if fmt in ("srt", "vtt"):
-            payload = regroup_for_subtitles(segments)
-            # Regroup снимает speaker: вернём метку по пересечению времени.
-            if with_speakers:
-                payload = self._attach_speakers_to_cues(segments, payload)
         try:
-            Path(path).write_text(
-                export_transcript(
-                    payload,
-                    fmt,
-                    include_timestamps=with_times,
-                    include_speakers=with_speakers,
-                ),
-                encoding="utf-8",
-            )
-            self.transcribeStatus.emit(f"Сохранено: {Path(path).name}")
+            Path(path).write_text(body, encoding="utf-8")
         except OSError as exc:
             self.transcribeStatus.emit(f"Не удалось сохранить: {exc}")
+            self.transcribeChanged.emit()
+            return
+        self._persist_export_options(opts)
+        self.transcribeStatus.emit(f"Сохранено: {Path(path).name}")
         self.transcribeChanged.emit()
+
+    @Slot(str, bool, bool, int)
+    def transcriptExport(
+        self,
+        format: str = "txt",
+        include_timestamps: bool = False,
+        include_speakers: bool = True,
+        speaker_key: int = 0,
+    ):
+        """Старый вызов из QML: формат, таймкоды, голоса, выбранный голос."""
+
+        self.transcriptExportWithOptions(
+            {
+                "format": format,
+                "include_timestamps": include_timestamps,
+                "include_speakers": include_speakers,
+                "speaker_key": speaker_key,
+            }
+        )
 
     @staticmethod
     def _attach_speakers_to_cues(

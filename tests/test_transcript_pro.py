@@ -10,6 +10,7 @@ from dotaudio.transcript_pro import (
     needs_review,
     preset_list,
     quality_stats,
+    render_export,
     resolve_export_options,
     split_segment,
 )
@@ -131,6 +132,94 @@ def test_export_option_overrides() -> None:
     court = next(item for item in presets if item["key"] == "court")
     assert court["include_confidence"] is True
     assert court["include_speakers"] is True
+
+
+def test_render_export_honours_save_filters() -> None:
+    rows = [
+        {
+            "start": 0.0,
+            "end": 1.2,
+            "text": "Привет",
+            "speaker": "Анна",
+            "role": 1,
+            "confidence": 0.91,
+            "reviewed": True,
+        },
+        {
+            "start": 2.0,
+            "end": 3.5,
+            "text": "хм",
+            "speaker": "Борис",
+            "role": 2,
+            "confidence": 0.31,
+            "reviewed": False,
+        },
+    ]
+    plain, fmt = render_export(
+        rows,
+        {
+            "format": "txt",
+            "include_timestamps": False,
+            "include_speakers": False,
+            "include_confidence": False,
+        },
+    )
+    assert fmt == "txt"
+    assert plain == "Привет\nхм"
+
+    rich, _ = render_export(
+        rows,
+        {
+            "format": "txt",
+            "include_timestamps": True,
+            "include_speakers": True,
+            "include_confidence": True,
+        },
+    )
+    assert "[Анна] Привет" in rich
+    assert "91%" in rich
+    assert "[Борис]" in rich
+
+    flagged, _ = render_export(
+        rows,
+        {"format": "txt", "only_flagged": True, "include_speakers": True},
+    )
+    assert "хм" in flagged
+    assert "Привет" not in flagged
+
+    one, _ = render_export(
+        rows,
+        {"format": "txt", "speaker_key": 1, "include_speakers": True},
+    )
+    assert "Анна" in one
+    assert "Борис" not in one
+
+    headed, _ = render_export(
+        rows,
+        {
+            "format": "txt",
+            "include_header": True,
+            "include_phrase_numbers": True,
+            "include_speakers": True,
+            "title": "встреча.wav",
+        },
+    )
+    assert headed.startswith("Расшифровка")
+    assert "1." in headed
+    assert "встреча.wav" in headed
+
+    payload, ext = render_export(
+        rows,
+        {
+            "format": "json",
+            "include_timestamps": False,
+            "include_speakers": True,
+            "include_confidence": True,
+        },
+    )
+    assert ext == "json"
+    assert '"confidence"' in payload
+    assert '"start"' not in payload
 
 
 def test_model_diff_picks_winner() -> None:

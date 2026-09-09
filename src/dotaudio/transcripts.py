@@ -354,6 +354,8 @@ def export_transcript(
     *,
     include_timestamps: bool | None = None,
     include_speakers: bool = False,
+    include_confidence: bool = False,
+    include_review_flags: bool = False,
 ) -> str:
     """Export segments as TXT, MD, SRT, VTT or a compact JSON document.
 
@@ -411,6 +413,16 @@ def export_transcript(
                 row["end"] = end
             if include_speakers and speaker:
                 row["speaker"] = speaker
+            if include_confidence:
+                raw = segment.get("confidence")
+                try:
+                    score = float(raw)
+                except (TypeError, ValueError):
+                    score = None
+                if score is not None and score >= 0:
+                    row["confidence"] = score
+            if include_review_flags:
+                row["reviewed"] = bool(segment.get("reviewed"))
             words = segment.get("words")
             if isinstance(words, list) and words:
                 row["words"] = words

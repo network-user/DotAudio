@@ -509,6 +509,197 @@ def _annotate_text(
     return f"{body} [{'; '.join(notes)}]".strip()
 
 
+def filter_export_rows(
+    segments: list[dict[str, Any]],
+    *,
+    speaker_key: int = 0,
+    only_flagged: bool = False,
+) -> list[dict[str, Any]]:
+    """Keep phrases that match save filters (voice and review)."""
+
+    rows = list(segments or [])
+    key = int(speaker_key or 0)
+    if key > 0:
+        rows = [row for row in rows if int(row.get("role") or 0) == key]
+    if only_flagged:
+        rows = [row for row in rows if needs_review(row) and not bool(row.get("reviewed"))]
+    return rows
+
+
+def formatted_document(
+    segments: list[dict[str, Any]],
+    *,
+    fmt: str = "txt",
+    title: str = "",
+    source: str = "",
+    include_timestamps: bool = True,
+    include_speakers: bool = True,
+    include_confidence: bool = False,
+    include_review_flags: bool = False,
+    include_header: bool = True,
+    include_phrase_numbers: bool = True,
+) -> str:
+    """Readable TXT/MD dump driven by the same save toggles as the preview."""
+
+    kind = str(fmt or "txt").strip().lower()
+    lines: list[str] = []
+    if include_header:
+        if kind == "md":
+            lines.append("# Расшифровка")
+            if title:
+                lines.append(f"**Файл:** {title}")
+            if source and source != title:
+                lines.append(f"**Источник:** {source}")
+            lines.append(f"**Фраз:** {len(segments)}")
+            lines.append("")
+        else:
+            lines.append("Расшифровка")
+            if title:
+                lines.append(f"Файл: {title}")
+            if source and source != title:
+                lines.append(f"Источник: {source}")
+            lines.append(f"Фраз: {len(segments)}")
+            lines.append("")
+    for index, row in enumerate(segments, start=1):
+        start = float(row.get("start", 0.0))
+        end = float(row.get("end", start))
+        speaker = str(row.get("speaker") or "").strip()
+        text = str(row.get("text") or "").strip()
+        notes: list[str] = []
+        if include_review_flags and needs_review(row) and not row.get("reviewed"):
+            notes.append("на проверку")
+        elif include_confidence:
+            conf = segment_confidence(row)
+            if conf >= 0:
+                notes.append(f"{conf:.0%}")
+        note = f" [{'; '.join(notes)}]" if notes else ""
+        head_parts: list[str] = []
+        if include_phrase_numbers:
+            head_parts.append(f"{index}.")
+        if include_timestamps:
+            head_parts.append(_fmt_range(start, end))
+        head = " ".join(head_parts)
+        if kind == "md":
+            who = f"**{speaker}.** " if include_speakers and speaker else ""
+            prefix = f"{head} " if head else ""
+            lines.append(f"{prefix}{who}{text}{note}".strip())
+            lines.append("")
+        else:
+            if head:
+                lines.append(head)
+            if include_speakers and speaker:
+                indent = "   " if head else ""
+                lines.append(f"{indent}{speaker}: {text}{note}")
+            else:
+                indent = "   " if head else ""
+                lines.append(f"{indent}{text}{note}")
+            lines.append("")
+    return "\n".join(lines).rstrip() + ("\n" if lines else "")
+
+
+def render_export(
+    segments: list[dict[str, Any]],
+    options: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Build the saved document from format + filter toggles.
+
+    Returns ``(text, format_ext)``. Empty text means no phrases matched.
+    """
+
+    from dotaudio.transcripts import export_transcript, regroup_for_subtitles
+
+    opts = dict(options or {})
+    fmt = str(opts.get("format") or "txt").strip().lower()
+    if fmt not in ("txt", "md", "srt", "vtt", "json"):
+        raise ValueError(f"unsupported transcript format: {fmt}")
+    rows = filter_export_rows(
+        list(segments or []),
+        speaker_key=int(opts.get("speaker_key") or 0),
+        only_flagged=bool(opts.get("only_flagged")),
+    )
+    if not rows:
+        return "", fmt
+
+    with_times = bool(opts.get("include_timestamps"))
+    with_speakers = bool(opts.get("include_speakers"))
+    with_conf = bool(opts.get("include_confidence"))
+    with_flags = bool(opts.get("include_review_flags"))
+    with_header = bool(opts.get("include_header"))
+    with_numbers = bool(opts.get("include_phrase_numbers"))
+    if fmt in ("srt", "vtt"):
+        with_times = True
+
+    if fmt in ("txt", "md") and (with_header or with_numbers):
+        return (
+            formatted_document(
+                rows,
+                fmt=fmt,
+                title=str(opts.get("title") or ""),
+                source=str(opts.get("source") or ""),
+                include_timestamps=with_times,
+                include_speakers=with_speakers,
+                include_confidence=with_conf,
+                include_review_flags=with_flags,
+                include_header=with_header,
+                include_phrase_numbers=with_numbers,
+            ),
+            fmt,
+        )
+
+    if fmt in ("srt", "vtt"):
+        cues = regroup_for_subtitles(rows)
+        enriched: list[dict[str, Any]] = []
+        for cue in cues:
+            mid = (float(cue["start"]) + float(cue["end"])) / 2.0
+            speaker = ""
+            source_row: dict[str, Any] = cue
+            for seg in rows:
+                if float(seg["start"]) <= mid <= float(seg["end"]):
+                    speaker = str(seg.get("speaker") or "").strip()
+                    source_row = seg
+                    break
+            item = {**cue, "speaker": speaker}
+            item["text"] = _annotate_text(
+                str(cue.get("text") or ""),
+                source_row,
+                include_confidence=with_conf,
+                include_review_flags=with_flags,
+            )
+            enriched.append(item)
+        return (
+            export_transcript(
+                enriched,
+                fmt,
+                include_timestamps=True,
+                include_speakers=with_speakers,
+            ),
+            fmt,
+        )
+
+    annotated = []
+    for row in rows:
+        item = dict(row)
+        if fmt != "json":
+            item["text"] = _annotate_text(
+                str(row.get("text") or ""),
+                row,
+                include_confidence=with_conf,
+                include_review_flags=with_flags,
+            )
+        annotated.append(item)
+    return (
+        export_transcript(
+            annotated,
+            fmt,
+            include_timestamps=with_times,
+            include_speakers=with_speakers,
+            include_confidence=with_conf if fmt == "json" else False,
+            include_review_flags=with_flags if fmt == "json" else False,
+        ),
+        fmt,
+    )
+
+
 def export_with_preset(
     segments: list[dict[str, Any]],
     preset_key: str,
@@ -524,10 +715,7 @@ def export_with_preset(
     review flags, header, phrase numbers.
     """
 
-    from dotaudio.transcripts import export_transcript, regroup_for_subtitles
-
     opts = resolve_export_options(preset_key, options)
-    fmt = str(opts["format"])
     style = str(opts["style"])
     rows = list(segments)
     with_times = bool(opts["include_timestamps"])
@@ -565,66 +753,16 @@ def export_with_preset(
             "protocol",
         )
 
-    # Enrich cue/segment text with optional confidence / review notes.
-    def annotated(source_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for row in source_rows:
-            item = dict(row)
-            item["text"] = _annotate_text(
-                str(row.get("text") or ""),
-                row,
-                include_confidence=with_conf,
-                include_review_flags=with_flags,
-            )
-            out.append(item)
-        return out
-
+    payload = dict(opts)
+    payload["title"] = title
+    payload["source"] = source
+    payload["model"] = model
+    body, ext = render_export(rows, payload)
     if style == "plain":
-        body = export_transcript(
-            annotated(rows),
-            "txt",
-            include_timestamps=with_times,
-            include_speakers=with_speakers,
-        )
         return body, "txt", "transcript"
-    if fmt in ("srt", "vtt"):
-        cues = regroup_for_subtitles(rows)
-        if with_speakers or with_conf or with_flags:
-            enriched = []
-            for cue in cues:
-                mid = (float(cue["start"]) + float(cue["end"])) / 2.0
-                speaker = ""
-                source_row: dict[str, Any] = cue
-                for seg in rows:
-                    if float(seg["start"]) <= mid <= float(seg["end"]):
-                        speaker = str(seg.get("speaker") or "").strip()
-                        source_row = seg
-                        break
-                item = {**cue, "speaker": speaker}
-                item["text"] = _annotate_text(
-                    str(cue.get("text") or ""),
-                    source_row,
-                    include_confidence=with_conf,
-                    include_review_flags=with_flags,
-                )
-                enriched.append(item)
-            cues = enriched
-        body = export_transcript(
-            cues,
-            fmt,
-            include_timestamps=True,
-            include_speakers=with_speakers,
-        )
-        return body, fmt, f"subtitles_{fmt}"
-    body = export_transcript(
-        annotated(rows),
-        fmt,
-        include_timestamps=with_times,
-        include_speakers=with_speakers,
-        include_confidence=with_conf,
-        include_review_flags=with_flags,
-    )
-    return body, fmt, f"transcript_{fmt}"
+    if ext in ("srt", "vtt"):
+        return body, ext, f"subtitles_{ext}"
+    return body, ext, f"transcript_{ext}"
 
 
 def diff_transcripts(
