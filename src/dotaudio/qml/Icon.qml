@@ -125,7 +125,44 @@ Item {
                 ctx.lineTo(15, 10)
                 ctx.lineTo(7, 15)
                 ctx.closePath()
+                ctx.fill()
+                break
+            case "pause":
+                rounded(ctx, 5.5, 4.5, 3.2, 11, 1)
+                ctx.fill()
+                rounded(ctx, 11.3, 4.5, 3.2, 11, 1)
+                ctx.fill()
+                break
+            case "volume":
+                // Динамик + две дуги громкости.
+                ctx.beginPath()
+                ctx.moveTo(3.5, 7.5)
+                ctx.lineTo(7, 7.5)
+                ctx.lineTo(10.5, 4.5)
+                ctx.lineTo(10.5, 15.5)
+                ctx.lineTo(7, 12.5)
+                ctx.lineTo(3.5, 12.5)
+                ctx.closePath()
+                ctx.fill()
+                ctx.beginPath()
+                ctx.arc(11.2, 10, 3.2, -0.7, 0.7)
                 ctx.stroke()
+                ctx.beginPath()
+                ctx.arc(11.2, 10, 5.4, -0.7, 0.7)
+                ctx.stroke()
+                break
+            case "mute":
+                ctx.beginPath()
+                ctx.moveTo(3.5, 7.5)
+                ctx.lineTo(7, 7.5)
+                ctx.lineTo(10.5, 4.5)
+                ctx.lineTo(10.5, 15.5)
+                ctx.lineTo(7, 12.5)
+                ctx.lineTo(3.5, 12.5)
+                ctx.closePath()
+                ctx.fill()
+                line(ctx, 13, 7, 17, 13)
+                line(ctx, 17, 7, 13, 13)
                 break
             case "models":
                 ctx.beginPath()

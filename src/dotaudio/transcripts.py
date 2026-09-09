@@ -326,39 +326,105 @@ def timestamp(seconds: float, separator: str = ",") -> str:
     )
 
 
-def export_transcript(
-    segments: Iterable[dict[str, Any]], format: str
+def _speaker_label(segment: dict[str, Any]) -> str:
+    raw = segment.get("speaker")
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
+def _line_text(
+    text: str,
+    *,
+    speaker: str,
+    include_speakers: bool,
 ) -> str:
-    """Export segments as TXT, SRT, VTT or a compact JSON document."""
+    body = text.strip()
+    if not include_speakers or not speaker:
+        return body
+    return f"[{speaker}] {body}".strip()
+
+
+def export_transcript(
+    segments: Iterable[dict[str, Any]],
+    format: str,
+    *,
+    include_timestamps: bool | None = None,
+    include_speakers: bool = False,
+) -> str:
+    """Export segments as TXT, MD, SRT, VTT or a compact JSON document.
+
+    ``include_timestamps`` defaults to off for TXT/MD and on for JSON.
+    SRT/VTT always keep cue timings (the format requires them); the flag only
+    affects whether a line-prefix time is added to plain text and whether
+    JSON rows keep ``start``/``end``.
+    ``include_speakers`` prefixes ``[speaker]`` when the segment has a label.
+    """
     source_segments = list(segments)
     prepared = [_segment_values(segment) for segment in source_segments]
+    speakers = [_speaker_label(segment) for segment in source_segments]
     output_format = format.strip().upper()
 
-    if output_format == "TXT":
-        return "\n".join(text for _, _, text in prepared)
+    if output_format in ("TXT", "MD"):
+        with_times = False if include_timestamps is None else bool(include_timestamps)
+        if output_format == "TXT":
+            lines: list[str] = []
+            for (start, _end, text), speaker in zip(prepared, speakers, strict=True):
+                body = _line_text(text, speaker=speaker, include_speakers=include_speakers)
+                if with_times:
+                    stamp = timestamp(start, ".")
+                    lines.append(f"[{stamp}] {body}".strip() if body else f"[{stamp}]")
+                else:
+                    lines.append(body)
+            return "\n".join(lines)
+        # Markdown: optional speaker headings when labels are requested.
+        blocks: list[str] = []
+        previous = None
+        for (start, _end, text), speaker in zip(prepared, speakers, strict=True):
+            body = text.strip()
+            if include_speakers and speaker and speaker != previous:
+                blocks.append(f"### {speaker}")
+                previous = speaker
+            if with_times:
+                stamp = timestamp(start, ".")
+                blocks.append(f"`{stamp}` {body}".strip() if body else f"`{stamp}`")
+            else:
+                blocks.append(body)
+        return "\n\n".join(part for part in blocks if part)
+
     if output_format == "JSON":
-        return json.dumps(
-            [
-                {
-                    "start": start,
-                    "end": end,
-                    "text": text,
-                    **({"words": segment["words"]} if isinstance(segment.get("words"), list) and segment["words"] else {}),
-                }
-                for (start, end, text), segment in zip(prepared, source_segments, strict=True)
-            ],
-            ensure_ascii=False,
-            indent=2,
-        )
+        with_times = True if include_timestamps is None else bool(include_timestamps)
+        rows: list[dict[str, Any]] = []
+        for (start, end, text), segment, speaker in zip(
+            prepared, source_segments, speakers, strict=True
+        ):
+            row: dict[str, Any] = {
+                "text": _line_text(
+                    text, speaker=speaker, include_speakers=False
+                ),
+            }
+            if with_times:
+                row["start"] = start
+                row["end"] = end
+            if include_speakers and speaker:
+                row["speaker"] = speaker
+            words = segment.get("words")
+            if isinstance(words, list) and words:
+                row["words"] = words
+            rows.append(row)
+        return json.dumps(rows, ensure_ascii=False, indent=2)
 
     cues = []
-    for index, (start, end, text) in enumerate(prepared, start=1):
+    for index, ((start, end, text), speaker) in enumerate(
+        zip(prepared, speakers, strict=True), start=1
+    ):
+        body = _line_text(text, speaker=speaker, include_speakers=include_speakers)
         timing = f"{timestamp(start, '.' if output_format == 'VTT' else ',')} --> "
         timing += timestamp(end, '.' if output_format == 'VTT' else ',')
         if output_format == "SRT":
-            cues.append(f"{index}\n{timing}\n{text}")
+            cues.append(f"{index}\n{timing}\n{body}")
         elif output_format == "VTT":
-            cues.append(f"{timing}\n{text}")
+            cues.append(f"{timing}\n{body}")
         else:
             raise ValueError(f"unsupported transcript format: {format}")
 

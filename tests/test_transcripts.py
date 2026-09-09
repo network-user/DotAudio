@@ -92,6 +92,38 @@ def test_exports_use_expected_timestamp_formats() -> None:
     assert json.loads(export_transcript(SEGMENTS, "json")) == SEGMENTS
 
 
+def test_export_filters_timestamps_speakers_and_markdown() -> None:
+    rows = [
+        {"start": 0, "end": 1.0, "text": "Раз", "speaker": "Анна"},
+        {"start": 2, "end": 3.5, "text": "Два", "speaker": "Борис"},
+    ]
+    plain = export_transcript(rows, "txt", include_timestamps=False, include_speakers=False)
+    assert plain == "Раз\nДва"
+
+    stamped = export_transcript(rows, "txt", include_timestamps=True, include_speakers=True)
+    assert stamped == (
+        "[00:00:00.000] [Анна] Раз\n"
+        "[00:00:02.000] [Борис] Два"
+    )
+
+    srt = export_transcript(rows, "srt", include_speakers=True)
+    assert "[Анна] Раз" in srt
+    assert "00:00:00,000 --> 00:00:01,000" in srt
+
+    payload = json.loads(
+        export_transcript(rows, "json", include_timestamps=False, include_speakers=True)
+    )
+    assert payload == [
+        {"text": "Раз", "speaker": "Анна"},
+        {"text": "Два", "speaker": "Борис"},
+    ]
+
+    md = export_transcript(rows, "md", include_timestamps=True, include_speakers=True)
+    assert "### Анна" in md
+    assert "`00:00:00.000` Раз" in md
+    assert "### Борис" in md
+
+
 def test_keyword_matching_respects_unicode_word_and_phrase_boundaries() -> None:
     text = "Ёлка и новая новость. Новостной выпуск не про елкуx."
 
@@ -110,7 +142,7 @@ def test_keyword_cooldown_ignores_repeats_until_the_window_elapses() -> None:
 
 def test_unknown_export_format_and_negative_timestamp_fail() -> None:
     with pytest.raises(ValueError):
-        export_transcript(SEGMENTS, "md")
+        export_transcript(SEGMENTS, "docx")
     with pytest.raises(ValueError):
         timestamp(-0.001)
 

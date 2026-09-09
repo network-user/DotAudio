@@ -58,6 +58,17 @@ from dotaudio.transcripts import (
     split_caption_window,
     text_after_prefix,
 )
+from dotaudio.translate import (
+    Translator,
+    apply_post_translate,
+    language_task_for,
+    needs_post_translate,
+    next_speech_mode,
+    normalize_speech_mode,
+    speech_mode_from_language_task,
+    speech_mode_hint,
+    speech_mode_label,
+)
 from dotaudio.vosk_engine import VoskEngine
 from dotaudio.watch_folder import WatchFolder
 
@@ -85,6 +96,11 @@ MODEL_CATALOG = {
 
 DEFAULTS = {
     "model": "small", "device": "auto", "language": "ru", "task": "transcribe",
+    # Режимы речи для Live / диктовки / транскрибации. language+task
+    # остаются полями RecognitionConfig и синхронизируются с speech_mode.
+    # ru_en - Whisper Translate (только в английский); en_ru - ASR en +
+    # сетевой текстовый перевод (тестово, см. translate.py).
+    "speech_mode": "ru",
     "backend": "local", "server_url": "http://127.0.0.1:8765", "source": "microphone",
     "live_source": "system",
     "input_device": "", "auto_paste": True, "keywords": "Whisper, искусственный интеллект",
@@ -96,7 +112,10 @@ DEFAULTS = {
     "caption_screen": -1, "caption_autohide": False, "caption_locked": True,
     "reduce_motion": False,
     "live_sensitivity": "speech",
-    "live_greedy_finals": False,
+    # Live финалы greedy: beam>1 почти не улучшает русскую фразу на
+    # коротком окне, а на CPU/GPU добавляет задержку. Диктовка и медиа
+    # этот флаг не читают (у них свой profile.beam).
+    "live_greedy_finals": True,
     # Живой движок распознавания. Whisper по умолчанию: на замерах этого
     # проекта он даёт WER 8% против 52% у vosk на той же записи, а vosk -
     # необязательный пакет, которого на чистой установке может не быть.
@@ -216,7 +235,14 @@ STATUS_LABELS = {
     "live_no_text": "Звук есть, но речь не распознана. Проверьте источник и язык.",
     "live_slow": "Модель считает дольше, чем длится речь. Выберите профиль «Быстро».",
     "live_unrecognized": "Звук есть, но речи не распознаём. Музыка или шум?",
+    "dictation_refine_1": "Уточняем · проход 1/2…",
+    "dictation_refine_2": "Уточняем · проход 2/2…",
 }
+
+# Диктовка держит весь take в памяти для постобработки после Stop.
+# После refine буфер сбрасывается; на диск WAV не пишется.
+DICTATION_PCM_SECONDS = 300.0
+DICTATION_REFINE_MIN_SECONDS = 0.35
 
 
 MODEL_IDLE_RELEASE_MS = 10 * 60 * 1000
@@ -377,6 +403,8 @@ class Controller(QObject):
     islandRequested = Signal()
     segmentArrived = Signal(str, object)
     partialArrived = Signal(str, object)
+    # sid, сегменты черновика/финала, подпись статуса прохода
+    dictationRefineProgress = Signal(str, object, str)
     jobFinished = Signal(str, str, bool)
     statusArrived = Signal(str)
     levelArrived = Signal(float)
@@ -419,6 +447,9 @@ class Controller(QObject):
         self._vosk_engine: VoskEngine | None = None
         self._vosk_size: str = ""
         self._settings = {**DEFAULTS, **self.store.get_settings()}
+        self._translator = Translator()
+        self._translate_notice_shown = False
+        self._sync_speech_mode_settings(persist=False)
         saved_bindings = {
             "dictate": resolve_hotkey(str(self._settings["dictate_hotkey"])),
             "island": resolve_hotkey(str(self._settings["island_hotkey"])),
@@ -559,6 +590,7 @@ class Controller(QObject):
         self.changed.connect(self.liveStateChanged)
         self.segmentArrived.connect(self._on_segment)
         self.partialArrived.connect(self._on_partial)
+        self.dictationRefineProgress.connect(self._on_dictation_refine_progress)
         self.jobFinished.connect(self._on_finished)
         self.transcriptPersisted.connect(self._on_transcript_persisted)
         self.transcribeTick.connect(self._on_transcribe_tick)
@@ -1085,6 +1117,57 @@ class Controller(QObject):
         self.setSetting("live_sensitivity", "speech" if current == "everything" else "everything")
 
     @Property(str, notify=changed)
+    def speechModeLabel(self):
+        return speech_mode_label(self._settings.get("speech_mode"))
+
+    @Property(str, notify=changed)
+    def speechModeHint(self):
+        return speech_mode_hint(self._settings.get("speech_mode"))
+
+    @Slot()
+    def cycleSpeechMode(self):
+        if self._jobs:
+            return
+        self.setSetting(
+            "speech_mode",
+            next_speech_mode(self._settings.get("speech_mode")),
+        )
+
+    def _sync_speech_mode_settings(self, *, persist: bool = True) -> None:
+        """Keep speech_mode, language and task aligned after load or edit."""
+
+        raw = self.store.get_settings() if hasattr(self, "store") else {}
+        saved_mode = raw.get("speech_mode") if isinstance(raw, dict) else None
+        if saved_mode not in ("ru", "en", "ru_en", "en_ru"):
+            mode = speech_mode_from_language_task(
+                self._settings.get("language"), self._settings.get("task")
+            )
+        else:
+            mode = normalize_speech_mode(self._settings.get("speech_mode"))
+        language, task = language_task_for(mode)
+        self._settings["speech_mode"] = mode
+        self._settings["language"] = language
+        self._settings["task"] = task
+        if persist:
+            self.store.save_settings(self._settings)
+
+    def _translate_segment(self, segment: dict) -> dict:
+        """Post-ASR EN→RU on the worker thread when speech_mode needs it."""
+
+        mode = self._settings.get("speech_mode")
+        if not needs_post_translate(mode):
+            return segment
+        updated = apply_post_translate(segment, mode, translator=self._translator)
+        error = self._translator.last_error
+        if error and not self._translate_notice_shown:
+            self._translate_notice_shown = True
+            self.logArrived.emit(
+                "warning",
+                f"Перевод EN→RU не удался, показан английский текст: {error}",
+            )
+        return updated
+
+    @Property(str, notify=changed)
     def sessionTitle(self): return self._session_title
 
     @Property(str, notify=changed)
@@ -1187,6 +1270,7 @@ class Controller(QObject):
             "model": ("tiny", "base", "small", "medium", "large-v3", "turbo"),
             "device": ("auto", "cpu", "cuda"), "language": ("auto", "ru", "en", "de", "es", "fr", "zh"),
             "task": ("transcribe", "translate"), "backend": ("local", "remote"),
+            "speech_mode": ("ru", "en", "ru_en", "en_ru"),
             "source": ("microphone", "system"), "live_source": ("microphone", "system", "mixed"),
             "live_sensitivity": ("speech", "everything"),
             "live_engine": ("vosk", "whisper"),
@@ -1219,6 +1303,19 @@ class Controller(QObject):
             and self._settings.get(name) != value
         )
         self._settings[name] = value
+        if name == "speech_mode":
+            language, task = language_task_for(value)
+            self._settings["language"] = language
+            self._settings["task"] = task
+            self._translate_notice_shown = False
+            self._translator.clear()
+        elif name in ("language", "task"):
+            # Старый UI и тесты ещё пишут language/task напрямую.
+            # en_ru из пары language+task не восстанавливается - остаётся en.
+            self._settings["speech_mode"] = speech_mode_from_language_task(
+                self._settings.get("language"), self._settings.get("task")
+            )
+            self._translate_notice_shown = False
         if name == "live_source":
             self._settings["source"] = value if value in ("microphone", "system") else "system"
         elif name == "source":
@@ -1251,11 +1348,17 @@ class Controller(QObject):
                 "message": "Модель выбрана и ждёт подготовки",
             }
             self._record_log("info", f"Выбрана модель: {value}")
-        elif name in ("device", "backend", "source", "live_source", "language", "task", "live_sensitivity"):
+        elif name in (
+            "device", "backend", "source", "live_source", "language", "task",
+            "speech_mode", "live_sensitivity",
+        ):
             self._record_log("info", f"Настройка {name}: {value}")
         # Смена Live-движка или модели - сразу греем в фоне, чтобы кнопка
         # Live не ждала загрузку в момент нажатия. Только в живом приложении.
-        if name in ("model", "device", "backend", "profile", "live_engine", "vosk_size", "language", "task"):
+        if name in (
+            "model", "device", "backend", "profile", "live_engine", "vosk_size",
+            "language", "task", "speech_mode",
+        ):
             self._prepared_model = ""
             if self._warmup_enabled:
                 QTimer.singleShot(0, self.prepareSelectedModel)
@@ -1326,9 +1429,16 @@ class Controller(QObject):
     def _config(self, media_mode=False, live_stream=False):
         values = {key: self._settings[key] for key in
                   ("model", "device", "language", "task", "backend", "server_url", "profile")}
+        language, task = language_task_for(self._settings.get("speech_mode"))
+        values["language"] = language
+        values["task"] = task
         if live_stream:
             values["live_sensitivity"] = str(self._settings["live_sensitivity"])
-            values["live_greedy_finals"] = bool(self._settings.get("live_greedy_finals", False))
+            # Live: greedy всегда. Beam профиля оставляем файлам и диктовке;
+            # на коротком live-окне beam>1 почти не поднимает русский, а
+            # добавляет задержку. Выключатель в настройках больше не тормозит
+            # Live старым False из базы.
+            values["live_greedy_finals"] = True
         if str(values.get("backend") or "local") == "remote":
             values["initial_prompt"] = ""
         else:
@@ -2373,6 +2483,15 @@ class Controller(QObject):
         for name, url in sources:
             config = self._config(live_stream=(mode == "live"))
             use_vosk = mode == "live" and live_engine == "vosk"
+            speech_mode = normalize_speech_mode(self._settings.get("speech_mode"))
+            if use_vosk and speech_mode != "ru":
+                # vosk в проекте - только русские модели; перевод и English
+                # идут через Whisper, иначе пользователь получит мусор.
+                use_vosk = False
+                self._record_log(
+                    "warning",
+                    "Vosk умеет только русский: для выбранного языка/перевода включён Whisper.",
+                )
             vosk_size = str(self._settings.get("vosk_size") or "small")
             engine_now = (
                 self._vosk_engine_for(vosk_size) if use_vosk else self.engine
@@ -2390,15 +2509,20 @@ class Controller(QObject):
             self._session_id = sid
             if sid == self._session_id:
                 self._session_title = name
+            self._translate_notice_shown = False
+
+            def _emit_segment(segment, sid=sid):
+                self.segmentArrived.emit(sid, self._translate_segment(segment))
+
+            def _emit_partial(segment, sid=sid):
+                self.partialArrived.emit(sid, self._translate_segment(segment))
+
             live = LiveSession(
                 engine_now, config,
-                lambda segment, sid=sid: self.segmentArrived.emit(sid, segment),
+                _emit_segment,
                 self.statusArrived.emit,
                 lambda error, cancelled, sid=sid: self.jobFinished.emit(sid, error, cancelled),
-                on_partial=(
-                    (lambda segment, sid=sid: self.partialArrived.emit(sid, segment))
-                    if mode == "live" else None
-                ),
+                on_partial=_emit_partial if mode == "live" else None,
                 catch_up=(mode == "live"),
             )
             self._jobs[sid] = {"live": live, "mode": mode, "name": name, "hotkey": hotkey, "engine": engine_now, "vosk": use_vosk}
@@ -2605,9 +2729,15 @@ class Controller(QObject):
         def process():
             error = ""
             try:
-                self.engine.transcribe(str(media), config, cancel,
-                                       lambda segment: self.segmentArrived.emit(sid, segment),
-                                       self.statusArrived.emit)
+                self.engine.transcribe(
+                    str(media),
+                    config,
+                    cancel,
+                    lambda segment: self.segmentArrived.emit(
+                        sid, self._translate_segment(segment)
+                    ),
+                    self.statusArrived.emit,
+                )
             except Exception as exc:
                 error = str(exc)
             self.jobFinished.emit(sid, error, cancel.is_set())
@@ -3695,6 +3825,7 @@ class Controller(QObject):
                                   "segments": [], "engine": "", "engineNote": "", "duration": 0.0,
                                   "sessionId": "", "progress": 0.0,
                                   "diarization": False})
+        self._schedule_media_peaks(path)
         self.transcribeChanged.emit()
 
     @Slot(str)
@@ -3714,6 +3845,7 @@ class Controller(QObject):
                                   "segments": [], "engine": "", "engineNote": "", "duration": 0.0,
                                   "sessionId": "", "progress": 0.0,
                                   "diarization": False})
+        self._schedule_media_peaks(str(media.resolve()))
         self.transcribeChanged.emit()
 
     @Slot()
@@ -3834,12 +3966,15 @@ class Controller(QObject):
         source = audio if audio is not None else path
 
         def on_segment(segment):
+            segment = self._translate_segment(segment)
             row = {
                 "start": float(segment.get("start", 0.0)),
                 "end": float(segment.get("end", 0.0)),
                 "text": str(segment.get("text", "")).strip(),
                 "words": segment.get("words", []),
             }
+            if segment.get("source_text"):
+                row["source_text"] = segment.get("source_text")
             collected.append(row)
             end = float(row["end"])
             progress = min(0.99, end / duration) if duration > 0 else -1.0
@@ -3857,6 +3992,8 @@ class Controller(QObject):
             on_segment,
             lambda s: self.transcribeStatus.emit(s.upper()),
         )
+        if needs_post_translate(self._settings.get("speech_mode")):
+            results = [self._translate_segment(item) for item in results]
         collected = [item for item in collected if item["text"]] or results
         if self._trans_cancel.is_set():
             return ""
@@ -4091,6 +4228,7 @@ class Controller(QObject):
                                   "error": "", "speakers": [], "segments": [],
                                   "diarization": False, "engine": "", "engineNote": "",
                                   "duration": 0.0, "sessionId": "", "progress": 0.0})
+        self._clear_media_peaks()
         self.transcribeChanged.emit()
 
     @Slot(int, str)
@@ -4242,33 +4380,97 @@ class Controller(QObject):
                     continue
                 self.store.update_segment(session_id, item_id, new_text)
 
-    @Slot()
-    def transcriptExport(self):
-        segments = self._trans_state["segments"]
+    @Slot(str, bool, bool, int)
+    def transcriptExport(
+        self,
+        format: str = "txt",
+        include_timestamps: bool = False,
+        include_speakers: bool = True,
+        speaker_key: int = 0,
+    ):
+        """Сохранить расшифровку с фильтрами формата, таймкодов и голосов.
+
+        ``speaker_key`` > 0 оставляет только реплики этого голоса (как фильтр
+        на странице). SRT/VTT всегда несут cue-тайминги; флаг таймкодов для
+        них не отключается.
+        """
+        segments = list(self._trans_state.get("segments") or [])
         if not segments:
             return
-        from dotaudio.transcripts import export_transcript
-        path, _ = QFileDialog.getSaveFileName(None, "Сохранить транскрибацию",
-                                              "transcript.txt", "TXT (*.txt);;SRT (*.srt);;VTT (*.vtt);;JSON (*.json)")
+        fmt = str(format or "txt").strip().lower()
+        if fmt not in ("txt", "md", "srt", "vtt", "json"):
+            self.transcribeStatus.emit(f"Неизвестный формат экспорта: {fmt}")
+            self.transcribeChanged.emit()
+            return
+        key = int(speaker_key or 0)
+        if key > 0:
+            segments = [
+                row for row in segments if int(row.get("role") or 0) == key
+            ]
+            if not segments:
+                self.transcribeStatus.emit("Нет реплик выбранного голоса для сохранения.")
+                self.transcribeChanged.emit()
+                return
+        with_times = bool(include_timestamps)
+        with_speakers = bool(include_speakers)
+        filters = {
+            "txt": "Текст (*.txt)",
+            "md": "Markdown (*.md)",
+            "srt": "Субтитры SRT (*.srt)",
+            "vtt": "Субтитры VTT (*.vtt)",
+            "json": "JSON (*.json)",
+        }
+        path, _ = QFileDialog.getSaveFileName(
+            None,
+            "Сохранить транскрибацию",
+            f"transcript.{fmt}",
+            filters[fmt],
+        )
         if not path:
             return
-        fmt = Path(path).suffix.lstrip(".") or "txt"
+        # Расширение из диалога может отличаться - доверяем выбранному формату.
+        if Path(path).suffix.lower() != f".{fmt}":
+            path = str(Path(path).with_suffix(f".{fmt}"))
         payload = segments
         if fmt in ("srt", "vtt"):
-            from dotaudio.transcripts import regroup_for_subtitles
             payload = regroup_for_subtitles(segments)
-        # Говорящий выносим в текст перед экспортом (без права менять из строк).
-        rows = []
-        for seg in payload:
-            speaker = str(seg.get("speaker") or "").strip()
-            text = str(seg.get("text") or "").strip()
-            rows.append({**seg, "text": f"[{speaker}] {text}".strip() if speaker else text})
+            # Regroup снимает speaker: вернём метку по пересечению времени.
+            if with_speakers:
+                payload = self._attach_speakers_to_cues(segments, payload)
         try:
-            Path(path).write_text(export_transcript(rows, fmt), encoding="utf-8")
+            Path(path).write_text(
+                export_transcript(
+                    payload,
+                    fmt,
+                    include_timestamps=with_times,
+                    include_speakers=with_speakers,
+                ),
+                encoding="utf-8",
+            )
             self.transcribeStatus.emit(f"Сохранено: {Path(path).name}")
         except OSError as exc:
             self.transcribeStatus.emit(f"Не удалось сохранить: {exc}")
         self.transcribeChanged.emit()
+
+    @staticmethod
+    def _attach_speakers_to_cues(
+        source: list[dict], cues: list[dict]
+    ) -> list[dict]:
+        """Подставить speaker в cue после regroup_for_subtitles."""
+
+        rows: list[dict] = []
+        for cue in cues:
+            mid = (float(cue["start"]) + float(cue["end"])) / 2.0
+            speaker = ""
+            for seg in source:
+                if float(seg["start"]) <= mid < float(seg["end"]) or (
+                    float(seg["start"]) <= mid <= float(seg["end"])
+                    and abs(float(seg["end"]) - float(seg["start"])) < 1e-6
+                ):
+                    speaker = str(seg.get("speaker") or "").strip()
+                    break
+            rows.append({**cue, "speaker": speaker})
+        return rows
 
     def shutdown(self):
         self._closing = True

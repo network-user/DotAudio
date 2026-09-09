@@ -39,6 +39,22 @@ Rectangle {
     property int playIndex: -1
     // Глобальный индекс карточки в режиме правки (-1 = никто).
     property int editingIndex: -1
+    // Панель сохранения: формат и фильтры экспорта.
+    property bool exportOpen: false
+    property int exportFormatIndex: 0
+    property bool exportTimestamps: false
+    property bool exportSpeakers: true
+    property bool exportFocusedOnly: false
+
+    readonly property var exportFormats: [
+        { key: "txt", label: "TXT - простой текст" },
+        { key: "md", label: "MD - Markdown" },
+        { key: "srt", label: "SRT - субтитры" },
+        { key: "vtt", label: "VTT - веб-субтитры" },
+        { key: "json", label: "JSON - данные" }
+    ]
+    readonly property string exportFormatKey: view.exportFormats[Math.max(0, Math.min(view.exportFormatIndex, view.exportFormats.length - 1))].key
+    readonly property bool exportTimesForced: view.exportFormatKey === "srt" || view.exportFormatKey === "vtt"
 
     readonly property var rows: focusKey > 0
         ? segs.filter(function (row) { return Number(row.role) === view.focusKey })
@@ -151,6 +167,11 @@ Rectangle {
     onBusyPhaseChanged: {
         if (busyPhase)
             view.editingIndex = -1
+    }
+
+    onFocusKeyChanged: {
+        if (view.focusKey <= 0)
+            view.exportFocusedOnly = false
     }
 
     // Воспроизвести фразу и кратко подсветить её в полном списке.
@@ -266,10 +287,33 @@ Rectangle {
                             wrapMode: Text.Wrap
                         }
                     }
-                    PillButton { text: "Открыть"; enabled: !view.busyPhase; onClicked: bridge.pickTranscriptFile() }
-                    PillButton { text: view.busyPhase ? "Стоп" : "Транскрибировать"; primary: !view.busyPhase; enabled: view.file.length > 0; onClicked: view.busyPhase ? bridge.stopTranscript() : bridge.runTranscript() }
-                    PillButton { text: "Очистить"; enabled: (view.file.length > 0 || view.segs.length > 0) && !view.busyPhase; onClicked: bridge.clearTranscript() }
-                    PillButton { text: "Сохранить…"; enabled: view.segs.length > 0 && !view.busyPhase; onClicked: bridge.transcriptExport() }
+                    PillButton { text: "Открыть файл"; enabled: !view.busyPhase; onClicked: bridge.pickTranscriptFile() }
+                    PillButton {
+                        text: view.busyPhase ? "Стоп" : "Расшифровать"
+                        primary: !view.busyPhase
+                        enabled: view.file.length > 0
+                        onClicked: view.busyPhase ? bridge.stopTranscript() : bridge.runTranscript()
+                    }
+                    PillButton {
+                        text: bridge.speechModeLabel
+                        enabled: !view.busyPhase
+                        onClicked: bridge.cycleSpeechMode()
+                        ToolTip.visible: hovered
+                        ToolTip.text: bridge.speechModeHint
+                    }
+                    PillButton {
+                        text: "Очистить"
+                        enabled: (view.file.length > 0 || view.segs.length > 0) && !view.busyPhase
+                        onClicked: {
+                            view.exportOpen = false
+                            bridge.clearTranscript()
+                        }
+                    }
+                    PillButton {
+                        text: view.exportOpen ? "Скрыть сохранение" : "Сохранить…"
+                        enabled: view.segs.length > 0 && !view.busyPhase
+                        onClicked: view.exportOpen = !view.exportOpen
+                    }
                     PillButton {
                         text: "В ассистент"
                         primary: true
@@ -279,6 +323,114 @@ Rectangle {
                         onClicked: bridge.openTranscriptInAssistant()
                         ToolTip.visible: hovered
                         ToolTip.text: "Открыть эту расшифровку в чате ассистента"
+                    }
+                }
+
+                // Фильтры сохранения: формат, таймкоды, голоса.
+                Rectangle {
+                    Layout.fillWidth: true
+                    visible: view.exportOpen && view.segs.length > 0 && !view.busyPhase
+                    implicitHeight: exportBox.implicitHeight + 2 * Theme.padCard
+                    radius: Theme.radiusMd
+                    color: Theme.surface2
+                    border.width: 1
+                    border.color: Theme.border
+                    ColumnLayout {
+                        id: exportBox
+                        anchors.fill: parent
+                        anchors.margins: Theme.padCard
+                        spacing: Theme.gapSm
+                        Label {
+                            text: "Сохранение расшифровки"
+                            color: Theme.text
+                            font.pixelSize: Theme.fsLabel
+                            font.weight: Font.DemiBold
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: "Выберите формат и что включить в файл: таймкоды, имена говорящих или только выбранный голос."
+                            color: Theme.muted
+                            font.pixelSize: Theme.fsSmall
+                            wrapMode: Text.Wrap
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.gapSm
+                            Label {
+                                text: "Формат"
+                                color: Theme.muted
+                                font.pixelSize: Theme.fsLabel
+                            }
+                            Dropdown {
+                                id: formatPick
+                                Layout.preferredWidth: 220
+                                model: view.exportFormats
+                                textRole: "label"
+                                currentIndex: view.exportFormatIndex
+                                onActivated: function (index) {
+                                    view.exportFormatIndex = index
+                                    if (view.exportTimesForced)
+                                        view.exportTimestamps = true
+                                }
+                            }
+                            Item { Layout.fillWidth: true }
+                            PillButton {
+                                text: "Скачать файл"
+                                primary: true
+                                onClicked: {
+                                    bridge.transcriptExport(
+                                        view.exportFormatKey,
+                                        view.exportTimesForced || view.exportTimestamps,
+                                        view.exportSpeakers,
+                                        view.exportFocusedOnly ? view.focusKey : 0
+                                    )
+                                }
+                            }
+                        }
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: Theme.gapMd
+                            ToggleSwitch {
+                                text: view.exportTimesForced
+                                      ? "Таймкоды (обязательны для субтитров)"
+                                      : "Таймкоды у строк"
+                                checked: view.exportTimesForced || view.exportTimestamps
+                                enabled: !view.exportTimesForced
+                                onToggled: view.exportTimestamps = checked
+                            }
+                            ToggleSwitch {
+                                text: "Имена говорящих"
+                                checked: view.exportSpeakers
+                                onToggled: view.exportSpeakers = checked
+                            }
+                            ToggleSwitch {
+                                text: view.focusKey > 0
+                                      ? "Только выбранный голос"
+                                      : "Только выбранный голос (сначала фильтр сверху)"
+                                checked: view.exportFocusedOnly
+                                enabled: view.focusKey > 0
+                                onToggled: view.exportFocusedOnly = checked
+                            }
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: {
+                                var parts = [view.exportFormatKey.toUpperCase()]
+                                if (view.exportTimesForced || view.exportTimestamps)
+                                    parts.push("с таймкодами")
+                                else
+                                    parts.push("без таймкодов")
+                                parts.push(view.exportSpeakers ? "с голосами" : "только текст")
+                                if (view.exportFocusedOnly && view.focusKey > 0)
+                                    parts.push("один голос")
+                                return "Будет сохранено: " + parts.join(" · ")
+                                      + " · " + view.phrases(view.exportFocusedOnly && view.focusKey > 0
+                                                              ? view.rows.length : view.segs.length)
+                            }
+                            color: Theme.faint
+                            font.pixelSize: Theme.fsMicro
+                            wrapMode: Text.Wrap
+                        }
                     }
                 }
 
@@ -347,6 +499,9 @@ Rectangle {
             Layout.fillWidth: true
             visible: view.hasMedia
             source: view.mediaUrl
+            segments: view.segs
+            peaks: bridge.mediaPeaks
+            peaksDuration: bridge.mediaPeaksDuration
             onPlayingChanged: view.syncPlayIndex()
             onPositionChanged: view.syncPlayIndex()
             onDurationChanged: view.applyPendingSeek()
@@ -639,7 +794,7 @@ Rectangle {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
-                    text: "Откройте или перетащите запись. После расшифровки нажмите на фразу, чтобы услышать её."
+                    text: "Откройте или перетащите запись. Сверху появится плеер: можно сразу слушать весь файл. После расшифровки нажмите на фразу, чтобы услышать её."
                     color: Theme.muted
                     font.pixelSize: Theme.fsBody
                 }
@@ -662,7 +817,7 @@ Rectangle {
                     wrapMode: Text.Wrap
                     color: Theme.muted
                     font.pixelSize: Theme.fsBody
-                    text: "Можно слушать исходник в плеере выше. После расшифровки нажмите на фразу, чтобы услышать её."
+                    text: "Слушайте весь файл кнопкой ▶ в плеере выше. После расшифровки нажмите на фразу, чтобы услышать её отдельно."
                 }
             }
             ListView {
@@ -936,7 +1091,7 @@ Rectangle {
                                           : "Править слова или автора"
                         }
                         IconButton {
-                            iconName: "live"
+                            iconName: "media"
                             Layout.alignment: Qt.AlignVCenter
                             onClicked: segCard.replay()
                             ToolTip.visible: hovered
@@ -953,7 +1108,7 @@ Rectangle {
                 anchors.bottomMargin: Theme.gapSm
                 visible: view.segs.length > 0 && view.phase === "done" && !view.busyPhase
                          && view.focusKey === 0 && view.playIndex < 0 && view.markedIndex < 0
-                text: "Нажмите Править, если модель ошиблась в словах или авторе. Пробел - пауза или продолжение."
+                text: "▶ слушает весь файл · клик по фразе - только её · Править - слова или автор · Сохранить - формат и фильтры · Пробел - пауза"
                 color: Theme.faint
                 font.pixelSize: Theme.fsMicro
             }

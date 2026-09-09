@@ -11,6 +11,8 @@ Item {
     property var peaks: []
     property real peaksDuration: 0
 
+    signal seeked(real seconds)
+
     readonly property real durationSec: {
         var fromPeaks = Number(root.peaksDuration)
         if (fromPeaks > 0)
@@ -108,6 +110,7 @@ Item {
                 var ratio = Math.max(0, Math.min(1, mouse.x / Math.max(1, width)))
                 var sec = ratio * root.durationSec
                 root.player.position = Math.round(sec * 1000)
+                root.seeked(sec)
             }
         }
     }
