@@ -498,7 +498,7 @@ Item {
                     }
                     Label {
                         text: Boolean(bridge.settings.auto_paste)
-                            ? "После диктовки текст копируется и вставляется в то окно, где вы работали. Enter не нажимается."
+                            ? "После диктовки остров показывает текст, запись уточняется в два прохода, затем копируется и вставляется в то окно, где вы работали. Enter не нажимается."
                             : "Текст только копируется в буфер обмена; вставить можно самому или клавишей " + bridge.settings.paste_last_hotkey + "."
                         color: Theme.faint
                         font.pixelSize: Theme.fsSmall
@@ -506,7 +506,7 @@ Item {
                         Layout.fillWidth: true
                     }
                     Label {
-                        text: "По умолчанию повтор " + bridge.settings.dictate_hotkey + " начинает и останавливает запись. Вставка последнего текста: " + bridge.settings.paste_last_hotkey + "."
+                        text: "Горячая клавиша " + bridge.settings.dictate_hotkey + " поднимает остров и начинает запись. Повтор останавливает. Вставка последнего текста: " + bridge.settings.paste_last_hotkey + "."
                         color: Theme.muted
                         font.pixelSize: Theme.fsSmall
                         wrapMode: Text.Wrap

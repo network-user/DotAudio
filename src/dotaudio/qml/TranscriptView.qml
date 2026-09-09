@@ -108,10 +108,73 @@ Rectangle {
         return 0
     }
 
+    readonly property var whisperModels: [
+        { key: "tiny", label: "tiny · быстро" },
+        { key: "base", label: "base · легче" },
+        { key: "small", label: "small · баланс" },
+        { key: "medium", label: "medium · точнее" },
+        { key: "large-v3", label: "large-v3 · качество" },
+        { key: "turbo", label: "turbo · быстрее large" }
+    ]
+
+    function whisperModelIndex() {
+        var key = String(bridge.settings.model || "small")
+        for (var i = 0; i < view.whisperModels.length; ++i)
+            if (String(view.whisperModels[i].key) === key)
+                return i
+        return 2
+    }
+
+    function whisperDisk(modelKey) {
+        var lib = bridge.modelLibrary || []
+        for (var i = 0; i < lib.length; ++i) {
+            if (String(lib[i].model) === String(modelKey))
+                return lib[i]
+        }
+        return { ready: false, bytes: 0 }
+    }
+
+    function whisperModelNote() {
+        var key = String(bridge.settings.model || "small")
+        var spec = bridge.modelCatalog[key] || null
+        var disk = view.whisperDisk(key)
+        var fit = bridge.modelFit(key)
+        var parts = []
+        if (disk.ready)
+            parts.push("в кеше")
+        else if (bridge.modelPreparing && String(bridge.modelState.model) === key)
+            parts.push(bridge.modelDownload.phase === "download"
+                       ? ("скачивание " + Math.round(bridge.modelDownload.percent || 0) + "%")
+                       : "готовим…")
+        else
+            parts.push("не загружена")
+        if (spec)
+            parts.push("~" + spec.download_mb + " МБ · ~" + spec.ram_gb + " ГБ ОЗУ")
+        if (String(bridge.recommendedModel || "") === key)
+            parts.push("рекомендуем для этого ПК")
+        else if (fit && fit.note)
+            parts.push(String(fit.note))
+        return parts.join(" · ")
+    }
+
+    function selectWhisperModel(index) {
+        if (view.busyPhase || index < 0 || index >= view.whisperModels.length)
+            return
+        var key = String(view.whisperModels[index].key)
+        if (key === String(bridge.settings.model || ""))
+            return
+        bridge.setSetting("model", key)
+        var disk = view.whisperDisk(key)
+        if (!disk.ready && !bridge.modelPreparing)
+            bridge.prepareSelectedModel()
+    }
+
     function busyMessage() {
+        var model = String(bridge.settings.model || "small")
         if (view.stage === "voices")
             return "Слова готовы. Определяем, кто из говорящих что произнёс…"
-        return "Распознаём на процессоре и расставляем таймкоды. На длинной записи это занимает время."
+        return "Распознаём моделью Whisper «" + model
+               + "». На длинной записи это занимает время."
     }
 
     function focusIsTextEdit() {
@@ -439,6 +502,61 @@ Rectangle {
                     Layout.topMargin: 2
                     implicitHeight: 1
                     color: Theme.hairline
+                }
+
+                // Модель Whisper для этой расшифровки (общая настройка приложения).
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.gapSm
+                    Label {
+                        text: "Whisper"
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsLabel
+                    }
+                    Dropdown {
+                        id: whisperPick
+                        Layout.preferredWidth: 210
+                        enabled: !view.busyPhase && !bridge.modelPreparing
+                        model: view.whisperModels
+                        textRole: "label"
+                        currentIndex: view.whisperModelIndex()
+                        onActivated: function (index) {
+                            view.selectWhisperModel(index)
+                        }
+                    }
+                    StatusDot {
+                        active: Boolean(view.whisperDisk(bridge.settings.model).ready)
+                        tint: Boolean(view.whisperDisk(bridge.settings.model).ready)
+                              ? Theme.text
+                              : (bridge.modelPreparing
+                                 && String(bridge.modelState.model) === String(bridge.settings.model)
+                                 ? Theme.muted : Theme.rec)
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        text: view.whisperModelNote()
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsSmall
+                        elide: Text.ElideRight
+                    }
+                    PillButton {
+                        text: "Загрузить"
+                        compact: true
+                        visible: !Boolean(view.whisperDisk(bridge.settings.model).ready)
+                                 && !(bridge.modelPreparing
+                                      && String(bridge.modelState.model) === String(bridge.settings.model))
+                        enabled: !view.busyPhase && !bridge.modelPreparing
+                        onClicked: bridge.prepareSelectedModel()
+                        ToolTip.visible: hovered
+                        ToolTip.text: "Скачать выбранную модель Whisper в локальный кеш"
+                    }
+                    PillButton {
+                        text: "Отмена"
+                        compact: true
+                        visible: bridge.modelPreparing
+                                 && String(bridge.modelState.model) === String(bridge.settings.model)
+                        onClicked: bridge.cancelModelPrepare()
+                    }
                 }
 
                 // Выбор движка голосов и его готовность.

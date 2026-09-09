@@ -75,6 +75,13 @@ def test_engine_statuses_have_russian_labels() -> None:
     assert STATUS_LABELS["loading_model"].startswith("Загружаем")
     assert STATUS_LABELS["transcribing_cpu"].startswith("Распознаём")
     assert STATUS_LABELS["live_backlog"].startswith("Догоняем")
+    assert STATUS_LABELS["dictation_refine_1"].startswith("Уточняем")
+    assert STATUS_LABELS["dictation_refine_2"].startswith("Уточняем")
+
+
+def test_dictation_defaults_enable_auto_paste() -> None:
+    assert DEFAULTS["auto_paste"] is True
+    assert DEFAULTS["dictate_hotkey"] == "Ctrl+Alt+Space"
 
 
 def test_dictation_rules_preserve_raw_text_until_explicit_final_processing() -> None:
