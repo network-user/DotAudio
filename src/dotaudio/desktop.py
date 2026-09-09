@@ -247,6 +247,15 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         self.user32.GetAsyncKeyState.restype = wintypes.SHORT
         self.user32.SetForegroundWindow.argtypes = [wintypes.HWND]
         self.user32.SetForegroundWindow.restype = wintypes.BOOL
+        self.user32.ReleaseCapture.argtypes = []
+        self.user32.ReleaseCapture.restype = wintypes.BOOL
+        self.user32.SendMessageW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        self.user32.SendMessageW.restype = wintypes.LPARAM
 
     def set_hotkeys(self, bindings: Mapping[str, Hotkey]) -> bool:
         """Atomically register the application hotkeys.
@@ -400,6 +409,32 @@ class Desktop(QObject, QAbstractNativeEventFilter):
     @staticmethod
     def _keyboard_input(key: int, flags: int = 0) -> _INPUT:
         return _INPUT(type=INPUT_KEYBOARD, ki=_KEYBDINPUT(key, 0, flags, 0, 0))
+
+    def primary_button_down(self) -> bool:
+        if not self.user32:
+            return False
+        try:
+            return bool(self.user32.GetAsyncKeyState(0x01) & _ASYNC_DOWN)
+        except (OSError, AttributeError):
+            return False
+
+    def begin_window_drag(self, window_id: int) -> bool:
+        """Hand the drag to Windows (HTCAPTION). Blocks until the mouse is released.
+
+        Moving a frameless HWND from QML each mouse event fights DWM and looks
+        stuttery.  The caption-drag message lets the compositor own the move.
+        """
+
+        if not self.user32 or not window_id:
+            return False
+        try:
+            hwnd = wintypes.HWND(int(window_id))
+            self.user32.ReleaseCapture()
+            # WM_NCLBUTTONDOWN + HTCAPTION: the system move loop until button up.
+            self.user32.SendMessageW(hwnd, 0x00A1, 2, 0)
+            return True
+        except (OSError, ValueError, TypeError, OverflowError):
+            return False
 
     def set_click_through(self, window_id: int, enabled: bool) -> bool:
         """Let a transparent island pass mouse input through on Windows.

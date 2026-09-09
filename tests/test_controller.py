@@ -91,12 +91,55 @@ def test_dictation_rules_preserve_raw_text_until_explicit_final_processing() -> 
 def test_hotkey_options_are_valid_and_actions_do_not_overlap() -> None:
     assert HOTKEY_OPTIONS["Ctrl+Alt+Space"] != HOTKEY_OPTIONS["Ctrl+Alt+O"]
     assert HOTKEY_OPTIONS["Shift+Alt+Z"] != HOTKEY_OPTIONS["Ctrl+Alt+Space"]
+    assert HOTKEY_OPTIONS["Ctrl+Alt+V"] != HOTKEY_OPTIONS["Shift+Alt+Z"]
     assert DEFAULTS["dictate_hold"] is False
     assert DEFAULTS["paste_last_hotkey"] == "Shift+Alt+Z"
     assert DEFAULTS["caption_position"] == "bottom"
     assert DEFAULTS["caption_locked"] is True
     assert DEFAULTS["caption_autohide"] is False
     assert DEFAULTS["reduce_motion"] is False
+
+
+def test_paste_hotkey_can_be_rebound() -> None:
+    saved: list[dict] = []
+    registered: list[dict] = []
+    controller = Controller.__new__(Controller)
+    controller._jobs = {}
+    controller._settings = dict(DEFAULTS)
+    controller._notice = ""
+    controller.store = type("Store", (), {"save_settings": staticmethod(lambda settings: saved.append(dict(settings)))})()
+    controller.desktop = type(
+        "Desktop",
+        (),
+        {"set_hotkeys": staticmethod(lambda bindings: registered.append(bindings) or True)},
+    )()
+    controller._record_log = lambda *_args: None
+    controller.changed = _Signal()
+
+    Controller.setPasteHotkey(controller, "Ctrl+Alt+V")
+
+    assert controller._settings["paste_last_hotkey"] == "Ctrl+Alt+V"
+    assert controller._settings["dictate_hotkey"] == DEFAULTS["dictate_hotkey"]
+    assert registered and "paste_last" in registered[0]
+    assert saved
+
+
+def test_mic_check_playing_phase_keeps_test_busy() -> None:
+    logs: list[tuple] = []
+    controller = Controller.__new__(Controller)
+    controller._testing_device = True
+    controller._device_test = {"phase": "listening", "message": "", "level": 0.2}
+    controller._record_log = lambda kind, message: logs.append((kind, message))
+    controller.changed = _Signal()
+
+    Controller._on_device_test_finished(controller, "playing", "Воспроизводим…")
+    assert controller._testing_device is True
+    assert controller._device_test["phase"] == "playing"
+    assert logs == []
+
+    Controller._on_device_test_finished(controller, "ready", "Микрофон работает.")
+    assert controller._testing_device is False
+    assert logs == [("success", "Микрофон работает.")]
 
 
 def test_disk_status_describes_cache_without_downloading() -> None:
@@ -124,9 +167,11 @@ def test_model_fit_compares_memory_with_the_real_machine() -> None:
     # Каталог покрывает все карточки страницы, рекомендация существует.
     assert set(MODEL_CATALOG) == {"tiny", "base", "small", "medium", "large-v3", "turbo"}
     assert recommended_model(known) == "small"
+    assert recommended_model({"threads": 4, "ram_gb": 16.0, "cuda_devices": 0}) == "base"
     assert recommended_model({"threads": 2, "ram_gb": 8.0, "cuda_devices": 0}) == "base"
     assert recommended_model({"threads": 0, "ram_gb": None, "cuda_devices": 0}) == "tiny"
     assert recommended_model({"threads": 8, "ram_gb": 32.0, "cuda_devices": 1, "gpuVramGb": 8}) == "medium"
+    assert model_fit("small", {"threads": 4, "ram_gb": 16.0, "cuda_devices": 0})["state"] == "slow"
 
 
 def test_show_gpu_hint_for_nvidia_until_dismissed() -> None:

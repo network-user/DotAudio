@@ -136,27 +136,33 @@ Rectangle {
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.SizeAllCursor
-                    property real grabOffsetX: 0
-                    property real grabOffsetY: 0
+                    property real pressSX: 0
+                    property real pressSY: 0
+                    property bool dragArmed: false
                     onPressed: function (mouse) {
-                        var win = Window.window
-                        if (!win)
-                            return
-                        grabOffsetX = mouse.screenX - win.x
-                        grabOffsetY = mouse.screenY - win.y
-                        root.shellDragStarted()
+                        pressSX = mouse.screenX
+                        pressSY = mouse.screenY
+                        dragArmed = true
                     }
                     onPositionChanged: function (mouse) {
-                        if (!pressed)
+                        if (!pressed || !dragArmed)
                             return
-                        var win = Window.window
-                        if (!win)
+                        var dx = mouse.screenX - pressSX
+                        var dy = mouse.screenY - pressSY
+                        if (dx * dx + dy * dy < 16)
                             return
-                        win.x = Math.round(mouse.screenX - grabOffsetX)
-                        win.y = Math.round(mouse.screenY - grabOffsetY)
+                        dragArmed = false
+                        root.shellDragStarted()
+                        if (bridge.beginWindowDrag())
+                            root.shellDragReleased()
+                        else {
+                            var win = Window.window
+                            if (win)
+                                win.startSystemMove()
+                        }
                     }
-                    onReleased: root.shellDragReleased()
-                    onCanceled: root.shellDragReleased()
+                    onReleased: dragArmed = false
+                    onCanceled: dragArmed = false
                 }
                 Icon { name: "move"; ink: Theme.muted; width: 15; height: 15; anchors.centerIn: parent }
             }

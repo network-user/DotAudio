@@ -207,6 +207,9 @@ ApplicationWindow {
             bridge.clearWindowMask()
             return
         }
+        // Во время native drag маску не трогаем — SetWindowMask даёт хитч.
+        if (root.dragging)
+            return
         var mx = Math.round((root.islandCanvasW - root.islandW) / 2)
         var my = Math.round((root.islandCanvasH - root.islandH) / 2)
         bridge.setWindowMask(mx, my, root.islandW, root.islandH, root.islandR)
@@ -357,6 +360,32 @@ ApplicationWindow {
         onTriggered: root.quietHeld = true
     }
 
+    // Fallback после startSystemMove: MouseArea уже не получит released.
+    Timer {
+        interval: 32
+        running: root.dragging
+        repeat: true
+        onTriggered: {
+            if (bridge.primaryButtonDown())
+                return
+            if (root.shellMode === "island") {
+                root.islandCenterX = root.x + root.islandCanvasW / 2
+                root.islandTopY = root.y
+                root.dragging = false
+                bridge.saveIslandPosition(root.x, root.y)
+                root.refreshIslandMask()
+            } else if (root.shellMode === "theater") {
+                root.dragging = false
+                root.theaterX = root.x
+                root.theaterY = root.y
+                root.theaterW = Math.round(root.width)
+                root.theaterH = Math.round(root.height)
+            } else {
+                root.dragging = false
+            }
+        }
+    }
+
     ParallelAnimation {
         id: shellIn
         NumberAnimation {
@@ -462,7 +491,7 @@ ApplicationWindow {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.verticalCenter: parent.verticalCenter
         opacity: root.shellFade * Math.max(0.9, Number(bridge.settings.island_opacity))
-        transform: Translate { y: root.shellRise }
+        shellRise: root.shellRise
         phase: root.islandPhase
         radius: root.islandR
         clickThrough: Boolean(bridge.settings.island_click_through) && root.shellMode === "island"
@@ -470,12 +499,17 @@ ApplicationWindow {
         onRequestApp: root.openApp(page)
         onRequestModePick: root.islandModesOpen = true
         onCloseModes: root.islandModesOpen = false
-        onDragStarted: root.dragging = true
+        onDragStarted: {
+            root.dragging = true
+            // Маска мешает HTCAPTION-drag на части сборок Windows.
+            bridge.clearWindowMask()
+        }
         onDragReleased: {
             root.islandCenterX = root.x + root.islandCanvasW / 2
             root.islandTopY = root.y
             root.dragging = false
             bridge.saveIslandPosition(root.x, root.y)
+            root.refreshIslandMask()
         }
     }
 

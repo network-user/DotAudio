@@ -4,42 +4,72 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "Theme.js" as Theme
 
-// Остров. HWND - фиксированный холст в MainMvp; здесь морфит ширина/высота
-// и кроссфейд фаз. Drag идёт по mouse.screenX/Y — без mapToGlobal на
-// движущемся item (там дрожала привязка).
+// Остров. HWND - фиксированный холст в MainMvp. Размер хрома меняется
+// сразу (без Behavior по width/height: каждый кадр ломал layout и давал
+// рывки). Плавность - кроссфейд фаз и лёгкий scale. Drag отдаём Windows
+// (HTCAPTION) после небольшого порога сдвига, чтобы не ломать double-click.
 Rectangle {
     id: root
 
     property string phase: "ready"
     property bool hoveredIsland: false
     property bool clickThrough: false
+    property real visualScale: 1
+    // Подъём при появлении оболочки задаёт родитель; держим здесь, чтобы не
+    // перетереть Scale снаружи одним transform.
+    property real shellRise: 0
 
     color: Theme.islandFill
     border.width: 1
     border.color: bridge.recording || bridge.busy ? Theme.borderHi : Theme.border
     clip: true
+    transform: [
+        Scale {
+            origin.x: root.width / 2
+            origin.y: root.height / 2
+            xScale: root.visualScale
+            yScale: root.visualScale
+        },
+        Translate { y: root.shellRise }
+    ]
 
     Behavior on border.color { ColorAnimation { duration: Theme.slowMs } }
-    Behavior on width {
-        NumberAnimation {
-            duration: Theme.morphMs
-            easing.type: Easing.Bezier
-            easing.bezierCurve: Theme.easeOut
-        }
-    }
-    Behavior on height {
-        NumberAnimation {
-            duration: Theme.morphMs
-            easing.type: Easing.Bezier
-            easing.bezierCurve: Theme.easeOut
-        }
-    }
     Behavior on radius {
         NumberAnimation {
             duration: Theme.morphMs
             easing.type: Easing.Bezier
             easing.bezierCurve: Theme.easeOut
         }
+    }
+    Behavior on visualScale {
+        NumberAnimation {
+            duration: Theme.morphMs
+            easing.type: Easing.Bezier
+            easing.bezierCurve: Theme.easeOut
+        }
+    }
+
+    property int _prevW: 0
+    property int _prevH: 0
+    onWidthChanged: root._pulseScale()
+    onHeightChanged: root._pulseScale()
+    function _pulseScale() {
+        // Один кадр «из прошлого размера», затем Behavior дотягивает до 1.
+        if (_prevW < 8 || _prevH < 8 || width < 8 || height < 8) {
+            _prevW = Math.round(width)
+            _prevH = Math.round(height)
+            visualScale = 1
+            return
+        }
+        var sx = _prevW / width
+        var sy = _prevH / height
+        var s = Math.max(0.82, Math.min(1.18, Math.min(sx, sy)))
+        _prevW = Math.round(width)
+        _prevH = Math.round(height)
+        if (Math.abs(s - 1) < 0.02)
+            return
+        visualScale = s
+        Qt.callLater(function () { root.visualScale = 1 })
     }
 
     signal requestTheater()
@@ -85,30 +115,40 @@ Rectangle {
         anchors.fill: parent
         hoverEnabled: !root.clickThrough
         z: 0
-        property real grabOffsetX: 0
-        property real grabOffsetY: 0
+        property real pressSX: 0
+        property real pressSY: 0
+        property bool dragArmed: false
         onEntered: root.hoveredIsland = true
         onExited: root.hoveredIsland = false
         onPressed: function (mouse) {
-            var win = Window.window
-            if (!win)
-                return
-            grabOffsetX = mouse.screenX - win.x
-            grabOffsetY = mouse.screenY - win.y
-            root.dragStarted()
+            pressSX = mouse.screenX
+            pressSY = mouse.screenY
+            dragArmed = true
         }
         onPositionChanged: function (mouse) {
-            if (!pressed)
+            if (!pressed || !dragArmed)
                 return
-            var win = Window.window
-            if (!win)
+            var dx = mouse.screenX - pressSX
+            var dy = mouse.screenY - pressSY
+            // 4 px: клик и double-click остаются кликами.
+            if (dx * dx + dy * dy < 16)
                 return
-            win.x = Math.round(mouse.screenX - grabOffsetX)
-            win.y = Math.round(mouse.screenY - grabOffsetY)
+            dragArmed = false
+            root.dragStarted()
+            // Native drag блокирует до mouse-up. Fallback startSystemMove —
+            // нет: тогда MainMvp сам закончит drag по отпусканию кнопки.
+            if (bridge.beginWindowDrag())
+                root.dragReleased()
+            else {
+                var win = Window.window
+                if (win)
+                    win.startSystemMove()
+            }
         }
-        onReleased: root.dragReleased()
-        onCanceled: root.dragReleased()
+        onReleased: dragArmed = false
+        onCanceled: dragArmed = false
         onDoubleClicked: {
+            dragArmed = false
             if (root.livePage)
                 root.requestTheater()
             else

@@ -18,6 +18,7 @@ from dotaudio.capture import (
     next_live_source,
     open_live_capture,
     play_output_tone,
+    play_pcm,
     playback_device_for_loopback,
     source_for_mode,
 )
@@ -74,15 +75,97 @@ def test_list_input_devices_filters_outputs(monkeypatch) -> None:
         "sounddevice",
         SimpleNamespace(
             query_devices=lambda: [
-                {"name": "Output", "max_input_channels": 0},
-                {"name": "Mic", "max_input_channels": 2},
-            ]
+                {"name": "Output", "max_input_channels": 0, "hostapi": 0},
+                {"name": "Mic", "max_input_channels": 2, "hostapi": 0},
+            ],
+            query_hostapis=lambda: [{"name": "MME"}],
         ),
     )
     assert list_input_devices() == [{"id": 1, "name": "Mic"}]
 
 
-def test_list_output_devices_filters_inputs(monkeypatch) -> None:
+def test_list_input_devices_dedupes_hostapi_aliases(monkeypatch) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(
+            query_devices=lambda: [
+                {"name": "Микрофон (UNA USB audio)", "max_input_channels": 1, "hostapi": 0},
+                {"name": "Микрофон (UNA USB audio)", "max_input_channels": 1, "hostapi": 1},
+                {"name": "Первичный драйвер записи звука", "max_input_channels": 2, "hostapi": 1},
+                {"name": "Микрофон (Steam Streaming Microphone)", "max_input_channels": 1, "hostapi": 0},
+            ],
+            query_hostapis=lambda: [
+                {"name": "MME"},
+                {"name": "Windows WDM-KS"},
+            ],
+        ),
+    )
+    assert list_input_devices() == [{"id": 1, "name": "Микрофон (UNA USB audio)"}]
+
+
+def test_resolve_microphone_candidates_prefers_wdm_ks(monkeypatch) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(
+            query_devices=lambda: [
+                {"name": "Mic (USB)", "max_input_channels": 1, "hostapi": 0},
+                {"name": "Mic (USB)", "max_input_channels": 1, "hostapi": 1},
+            ],
+            query_hostapis=lambda: [{"name": "MME"}, {"name": "Windows WDM-KS"}],
+            default=SimpleNamespace(device=[0, 1]),
+        ),
+    )
+    from dotaudio.capture import resolve_microphone_candidates
+
+    assert resolve_microphone_candidates(0) == [1, 0]
+    assert resolve_microphone_candidates(None) == [1, 0]
+
+
+def test_resample_to_target_halves_length() -> None:
+    from dotaudio.capture import _resample_to_target
+
+    source = np.linspace(-0.5, 0.5, 32, dtype=np.float32)
+    out = _resample_to_target(source, 32000, 16000)
+    assert 14 <= out.size <= 18
+
+
+def test_list_input_devices_drops_dead_wdm_only_ghosts(monkeypatch) -> None:
+    class DeadStream:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(
+            query_devices=lambda *args, **kwargs: [
+                {"name": "Микрофон (G435)", "max_input_channels": 1, "hostapi": 0, "default_samplerate": 48000},
+                {"name": "Микрофон (UNA)", "max_input_channels": 1, "hostapi": 1, "default_samplerate": 48000},
+            ]
+            if not args
+            else {
+                "name": "Микрофон (G435)",
+                "max_input_channels": 1,
+                "hostapi": 0,
+                "default_samplerate": 48000,
+            },
+            query_hostapis=lambda: [{"name": "Windows WDM-KS"}, {"name": "MME"}],
+            InputStream=DeadStream,
+        ),
+    )
+    monkeypatch.setattr("dotaudio.capture.time.sleep", lambda _seconds: None)
+    assert list_input_devices() == [{"id": 1, "name": "Микрофон (UNA)"}]
     monkeypatch.setitem(
         sys.modules,
         "sounddevice",
@@ -141,10 +224,29 @@ def test_output_tone_rejects_unreasonable_duration() -> None:
         play_output_tone(None, duration=0)
 
 
+def test_play_pcm_rejects_empty_and_plays_mono(monkeypatch) -> None:
+    played: list[tuple] = []
+
+    class FakeSd:
+        @staticmethod
+        def play(audio, samplerate=16000, device=None, blocking=True):
+            played.append((audio.copy(), samplerate, device, blocking))
+
+    monkeypatch.setitem(sys.modules, "sounddevice", FakeSd)
+
+    with pytest.raises(ValueError):
+        play_pcm(np.array([], dtype=np.float32))
+    play_pcm(np.array([0.5, -0.5, 0.25], dtype=np.float32), device=3, samplerate=16000)
+    assert played[0][1] == 16000
+    assert played[0][2] == 3
+    assert float(np.max(np.abs(played[0][0]))) <= 0.55 + 1e-6
+
+
 def test_capture_error_explains_how_to_recover() -> None:
     capture = AudioCapture(kind="microphone")
     message = capture._start_error(RuntimeError("driver failed"))
     assert "разрешение Windows" in message
+    assert "Среде" in message or "Диктовка" in message
     assert "driver failed" in message
 
 

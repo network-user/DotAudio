@@ -51,7 +51,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 # Theme.js импортируется из QML как обычный файл рядом с компонентами, и без
 # него собранный пакет остаётся без токенов оформления.
-dotaudio = ["qml/*.qml", "qml/*.js"]
+dotaudio = ["qml/*.qml", "qml/*.js", "assets/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

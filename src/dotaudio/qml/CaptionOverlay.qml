@@ -158,20 +158,42 @@ Window {
             anchors.fill: parent
             enabled: !overlay.locked
             cursorShape: overlay.locked ? Qt.ArrowCursor : Qt.SizeAllCursor
-            property real grabOffsetX: 0
-            property real grabOffsetY: 0
+            property real pressSX: 0
+            property real pressSY: 0
+            property bool dragArmed: false
             onPressed: function (mouse) {
-                overlay.dragging = true
-                grabOffsetX = mouse.screenX - overlay.x
-                grabOffsetY = mouse.screenY - overlay.y
+                pressSX = mouse.screenX
+                pressSY = mouse.screenY
+                dragArmed = true
             }
             onPositionChanged: function (mouse) {
-                if (!pressed)
+                if (!pressed || !dragArmed || overlay.locked)
                     return
-                overlay.x = Math.round(mouse.screenX - grabOffsetX)
-                overlay.y = Math.round(mouse.screenY - grabOffsetY)
+                var dx = mouse.screenX - pressSX
+                var dy = mouse.screenY - pressSY
+                if (dx * dx + dy * dy < 16)
+                    return
+                dragArmed = false
+                overlay.dragging = true
+                if (bridge.beginWindowDragId(overlay.winId())) {
+                    overlay.dragging = false
+                    bridge.setSetting("caption_position", "floating")
+                    bridge.setSetting("caption_x", Math.round(overlay.x))
+                    bridge.setSetting("caption_y", Math.round(overlay.y))
+                } else {
+                    overlay.startSystemMove()
+                }
             }
-            onReleased: {
+            onReleased: dragArmed = false
+        }
+
+        Timer {
+            interval: 32
+            running: overlay.dragging
+            repeat: true
+            onTriggered: {
+                if (bridge.primaryButtonDown())
+                    return
                 overlay.dragging = false
                 bridge.setSetting("caption_position", "floating")
                 bridge.setSetting("caption_x", Math.round(overlay.x))

@@ -239,6 +239,13 @@ Item {
                         wrapMode: Text.Wrap
                     }
                     Label { text: "Микрофон диктовки"; color: Theme.text; font.pixelSize: Theme.fsLabel; font.weight: Font.DemiBold }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "Если микрофона наушников нет в списке - Windows отдаёт только их вывод, без входа. Включите микрофон гарнитуры в Параметры → Система → Звук → Ввод (или в приложении производителя), затем «Обновить». Пока его нет, выберите UNA или другой рабочий вход."
+                        color: Theme.faint
+                        font.pixelSize: Theme.fsSmall
+                        wrapMode: Text.Wrap
+                    }
                     RowLayout {
                         Layout.fillWidth: true
                         Dropdown {
