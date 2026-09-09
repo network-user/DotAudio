@@ -6,9 +6,18 @@
 
 from __future__ import annotations
 
+import shutil
 from typing import Any
 
+from dotaudio.adapt import (
+    PROFILE_FOR_MODEL,
+    integrated_whisper_hint,
+    plan_whisper,
+    recommend_device,
+    recommended_whisper,
+)
 from dotaudio.llm import MODELS_BY_ID, get_model, recommend_model
+from dotaudio.nemo_diarize import MODEL_DOWNLOAD_MB, RUNTIME_DOWNLOAD_MB
 
 # Оценки размера кеша faster-whisper. Должны совпадать с MODEL_CATALOG
 # в controller.py; здесь дублируются, чтобы модуль оставался Qt-free.
@@ -30,15 +39,6 @@ WHISPER_LABELS = {
     "turbo": "Whisper Turbo",
 }
 
-PROFILE_FOR_MODEL = {
-    "tiny": "fast",
-    "base": "fast",
-    "small": "balanced",
-    "medium": "balanced",
-    "large-v3": "quality",
-    "turbo": "quality",
-}
-
 
 def _mb(value: float | int | None) -> int:
     try:
@@ -47,36 +47,10 @@ def _mb(value: float | int | None) -> int:
         return 0
 
 
-def recommended_whisper(hardware: dict) -> str:
-    """Модель Whisper по умолчанию под это устройство."""
+def ffmpeg_available() -> bool:
+    """FFmpeg в PATH: нужен для караоке-экспорта и HTTP-потоков."""
 
-    if int(hardware.get("cuda_devices") or 0) > 0:
-        vram = hardware.get("gpuVramGb")
-        if vram is None:
-            vram = hardware.get("vram_gb")
-        try:
-            if vram is not None and float(vram) >= 6.0:
-                return "medium"
-        except (TypeError, ValueError):
-            pass
-        return "small"
-    threads = int(hardware.get("threads") or 0)
-    if threads >= 4:
-        return "small"
-    if threads >= 2:
-        return "base"
-    return "tiny"
-
-
-def recommend_device(hardware: dict) -> str:
-    """Вычислительное устройство по факту CUDA, не по желанию."""
-
-    advice = str(hardware.get("computeAdvice") or "")
-    if advice == "ready" or int(hardware.get("cuda_devices") or 0) > 0:
-        return "cuda"
-    if advice == "needs_runtime":
-        return "auto"
-    return "cpu"
+    return shutil.which("ffmpeg") is not None
 
 
 def recommend_llm_id(hardware: dict) -> str:
@@ -117,7 +91,12 @@ def recommend_llm_id(hardware: dict) -> str:
     return recommend_model(profile)
 
 
-def technology_cards(hardware: dict) -> list[dict[str, Any]]:
+def technology_cards(
+    hardware: dict,
+    *,
+    nemo_ready: bool = False,
+    ffmpeg_ready: bool = False,
+) -> list[dict[str, Any]]:
     """Короткий список найденных технологий для брифинга."""
 
     advice = str(hardware.get("computeAdvice") or "")
@@ -167,6 +146,15 @@ def technology_cards(hardware: dict) -> list[dict[str, Any]]:
                 "state": "info",
             }
         )
+    elif advice == "integrated":
+        cards.append(
+            {
+                "id": "gpu",
+                "title": "Встроенная графика",
+                "detail": gpu_label or "Iris/UHD · Whisper на CPU",
+                "state": "info",
+            }
+        )
     else:
         cards.append(
             {
@@ -186,6 +174,26 @@ def technology_cards(hardware: dict) -> list[dict[str, Any]]:
     )
     cards.append(
         {
+            "id": "nemo",
+            "title": "NVIDIA NeMo",
+            "detail": (
+                "голоса в транскрибации · готово"
+                if nemo_ready
+                else "голоса в транскрибации · рантайм + Sortformer"
+            ),
+            "state": "ready" if nemo_ready else "needed",
+        }
+    )
+    cards.append(
+        {
+            "id": "ffmpeg",
+            "title": "FFmpeg",
+            "detail": "в PATH" if ffmpeg_ready else "не найден · караоке и эфиры",
+            "state": "ready" if ffmpeg_ready else "info",
+        }
+    )
+    cards.append(
+        {
             "id": "llm",
             "title": "Ассистент",
             "detail": "локальная языковая модель",
@@ -200,11 +208,14 @@ def build_briefing(
     *,
     whisper_ready: bool = False,
     llm_ready: bool = False,
+    nemo_ready: bool = False,
+    ffmpeg_ready: bool | None = None,
 ) -> dict[str, Any]:
     """Рекомендации и оценки размера для экрана брифинга."""
 
-    model = recommended_whisper(hardware)
-    device = recommend_device(hardware)
+    plan = plan_whisper(hardware)
+    model = plan.model
+    device = plan.device
     llm_id = recommend_llm_id(hardware)
     llm = get_model(llm_id)
     advice = str(hardware.get("computeAdvice") or "")
@@ -212,6 +223,10 @@ def build_briefing(
     llm_mb = _mb((llm.size_bytes / (1024 * 1024)) if llm else 0)
     cuda_needed = advice == "needs_runtime"
     cuda_mb = 1800 if cuda_needed else 0
+    prefer_cuda = advice in {"ready", "needs_runtime"} or int(hardware.get("cuda_devices") or 0) > 0
+    nemo_mb = 0 if nemo_ready else (RUNTIME_DOWNLOAD_MB + MODEL_DOWNLOAD_MB)
+    if ffmpeg_ready is None:
+        ffmpeg_ready = ffmpeg_available()
     total_mb = 0
     if cuda_needed:
         total_mb += cuda_mb
@@ -219,12 +234,15 @@ def build_briefing(
         total_mb += whisper_mb
     if not llm_ready:
         total_mb += llm_mb
+    if not nemo_ready:
+        total_mb += nemo_mb
+    hint = str(hardware.get("computeHint") or "") or integrated_whisper_hint(hardware) or plan.note
     return {
         "whisperModel": model,
         "whisperLabel": WHISPER_LABELS.get(model, model),
         "whisperMb": whisper_mb,
         "whisperReady": bool(whisper_ready),
-        "profile": PROFILE_FOR_MODEL.get(model, "balanced"),
+        "profile": plan.profile,
         "device": device,
         "deviceLabel": {
             "cuda": "Видеокарта (CUDA)",
@@ -240,10 +258,22 @@ def build_briefing(
         "llmReady": bool(llm_ready),
         "downloadLlm": not llm_ready,
         "downloadWhisper": not whisper_ready,
+        "nemoReady": bool(nemo_ready),
+        "downloadNemo": not nemo_ready,
+        "nemoMb": nemo_mb if not nemo_ready else 0,
+        "nemoPreferCuda": prefer_cuda,
+        "ffmpegReady": bool(ffmpeg_ready),
         "totalMb": total_mb,
-        "computeHint": str(hardware.get("computeHint") or ""),
+        "computeHint": hint,
         "gpuLabel": str(hardware.get("gpuLabel") or hardware.get("gpuName") or ""),
-        "technologies": technology_cards(hardware),
+        "tier": plan.tier,
+        "tierLabel": plan.label,
+        "liveGreedyFinals": plan.live_greedy_finals,
+        "technologies": technology_cards(
+            hardware,
+            nemo_ready=bool(nemo_ready),
+            ffmpeg_ready=bool(ffmpeg_ready),
+        ),
     }
 
 
@@ -264,7 +294,7 @@ def build_steps(briefing: dict[str, Any]) -> list[dict[str, Any]]:
                 "id": "cuda",
                 "title": "CUDA runtime",
                 "detail": "Пакеты ускорения Whisper для NVIDIA",
-                "weight": 25,
+                "weight": 20,
             }
         )
     if briefing.get("downloadWhisper"):
@@ -274,7 +304,7 @@ def build_steps(briefing: dict[str, Any]) -> list[dict[str, Any]]:
                 "id": "whisper",
                 "title": str(label),
                 "detail": f"Модель распознавания · ~{int(briefing.get('whisperMb') or 0)} МБ",
-                "weight": 40,
+                "weight": 30,
             }
         )
     else:
@@ -283,7 +313,27 @@ def build_steps(briefing: dict[str, Any]) -> list[dict[str, Any]]:
                 "id": "whisper",
                 "title": str(briefing.get("whisperLabel") or "Whisper"),
                 "detail": "Уже в кеше · прогрев",
-                "weight": 15,
+                "weight": 12,
+            }
+        )
+    if briefing.get("downloadNemo"):
+        steps.append(
+            {
+                "id": "nemo",
+                "title": "NVIDIA NeMo",
+                "detail": (
+                    f"Рантайм + Sortformer · ~{int(briefing.get('nemoMb') or 0)} МБ"
+                ),
+                "weight": 25,
+            }
+        )
+    elif briefing.get("nemoReady"):
+        steps.append(
+            {
+                "id": "nemo",
+                "title": "NVIDIA NeMo",
+                "detail": "Уже установлен · сверяем модель Sortformer",
+                "weight": 8,
             }
         )
     if briefing.get("downloadLlm"):
@@ -292,7 +342,7 @@ def build_steps(briefing: dict[str, Any]) -> list[dict[str, Any]]:
                 "id": "llm",
                 "title": str(briefing.get("llmLabel") or "Ассистент"),
                 "detail": f"Языковая модель · ~{int(briefing.get('llmMb') or 0)} МБ",
-                "weight": 30,
+                "weight": 20,
             }
         )
     return steps
@@ -310,6 +360,9 @@ def merge_briefing(base: dict[str, Any], overrides: dict[str, Any] | None) -> di
     result["whisperLabel"] = WHISPER_LABELS.get(model, model)
     result["whisperMb"] = _mb(WHISPER_DOWNLOAD_MB.get(model))
     result["profile"] = PROFILE_FOR_MODEL.get(model, "balanced")
+    result["liveGreedyFinals"] = result["profile"] == "fast"
+    if "liveGreedyFinals" in data:
+        result["liveGreedyFinals"] = bool(data["liveGreedyFinals"])
 
     if "useGpu" in data:
         result["useGpu"] = bool(data["useGpu"])
@@ -317,6 +370,8 @@ def merge_briefing(base: dict[str, Any], overrides: dict[str, Any] | None) -> di
         result["downloadLlm"] = bool(data["downloadLlm"])
     if "downloadWhisper" in data:
         result["downloadWhisper"] = bool(data["downloadWhisper"])
+    if "downloadNemo" in data:
+        result["downloadNemo"] = bool(data["downloadNemo"])
 
     llm_id = str(data.get("llmId") or result.get("llmId") or "")
     if llm_id in MODELS_BY_ID:
@@ -336,11 +391,20 @@ def merge_briefing(base: dict[str, Any], overrides: dict[str, Any] | None) -> di
         "auto": "Авто",
     }.get(str(result["device"]), str(result["device"]))
 
+    if result.get("downloadNemo") and not result.get("nemoReady"):
+        result["nemoMb"] = RUNTIME_DOWNLOAD_MB + MODEL_DOWNLOAD_MB
+    elif result.get("downloadNemo"):
+        result["nemoMb"] = MODEL_DOWNLOAD_MB
+    else:
+        result["nemoMb"] = 0
+
     total = 0
     if result.get("useGpu") and result.get("cudaNeeded"):
         total += int(result.get("cudaMb") or 0)
     if result.get("downloadWhisper"):
         total += int(result.get("whisperMb") or 0)
+    if result.get("downloadNemo"):
+        total += int(result.get("nemoMb") or 0)
     if result.get("downloadLlm"):
         total += int(result.get("llmMb") or 0)
     result["totalMb"] = total
@@ -353,7 +417,9 @@ __all__ = [
     "WHISPER_LABELS",
     "build_briefing",
     "build_steps",
+    "ffmpeg_available",
     "merge_briefing",
+    "plan_whisper",
     "recommend_device",
     "recommend_llm_id",
     "recommended_whisper",

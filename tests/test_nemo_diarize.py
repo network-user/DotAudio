@@ -145,6 +145,29 @@ def test_diarize_without_the_runtime_names_the_reason(monkeypatch):
         diarize_audio(np.zeros(16000, dtype=np.float32))
 
 
+def test_install_runtime_skips_when_already_available(monkeypatch):
+    monkeypatch.setattr(nemo_diarize, "executable", lambda: r"C:\nemo\nemo-speech.exe")
+    monkeypatch.setattr(
+        nemo_diarize,
+        "probe",
+        lambda cancel=None: {
+            "available": True,
+            "message": "NeMo 0.1.0 · CPU",
+            "path": r"C:\nemo\nemo-speech.exe",
+        },
+    )
+    result = nemo_diarize.install_runtime()
+    assert result["ok"] is True
+    assert result["installed"] is False
+
+
+def test_install_runtime_refuses_non_windows(monkeypatch):
+    monkeypatch.setattr(nemo_diarize, "executable", lambda: "")
+    monkeypatch.setattr(nemo_diarize.sys, "platform", "linux")
+    with pytest.raises(RuntimeError, match="Windows"):
+        nemo_diarize.install_runtime()
+
+
 @pytest.mark.parametrize(
     "device, expected",
     [("", False), ("auto", False), ("cpu", True), ("cuda", True)],

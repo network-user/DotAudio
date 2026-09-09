@@ -382,6 +382,55 @@ Item {
                         }
                     }
 
+                    // NVIDIA NeMo
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: nemoRow.implicitHeight + 24
+                        radius: Theme.radiusMd
+                        color: Theme.surface2
+                        border.width: 1
+                        border.color: Theme.hairline
+                        RowLayout {
+                            id: nemoRow
+                            anchors.fill: parent
+                            anchors.margins: 12
+                            spacing: Theme.gapMd
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+                                Label {
+                                    text: "NVIDIA NeMo · голоса"
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fsTitle
+                                    font.weight: Font.DemiBold
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: setup.briefing.nemoReady
+                                          ? "Рантайм готов · сверим модель Sortformer"
+                                          : ("Рантайм + Sortformer · ~" + (setup.briefing.nemoMb || 0) + " МБ · для транскрибации")
+                                    color: Theme.muted
+                                    font.pixelSize: Theme.fsSmall
+                                    wrapMode: Text.Wrap
+                                }
+                            }
+                            ToggleSwitch {
+                                checked: Boolean(setup.briefing.downloadNemo) || Boolean(setup.briefing.nemoReady)
+                                enabled: !Boolean(setup.briefing.nemoReady)
+                                onToggled: setup.updateBriefing({ downloadNemo: checked })
+                            }
+                        }
+                    }
+
+                    Label {
+                        visible: !Boolean(setup.briefing.ffmpegReady)
+                        Layout.fillWidth: true
+                        text: "FFmpeg не найден в PATH. Караоке-экспорт и разбор эфиров попросят поставить его отдельно."
+                        color: Theme.faint
+                        font.pixelSize: Theme.fsSmall
+                        wrapMode: Text.Wrap
+                    }
+
                     Label {
                         visible: Number(setup.briefing.totalMb) > 0
                         Layout.fillWidth: true

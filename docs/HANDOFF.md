@@ -1192,6 +1192,15 @@ Binding держал центр острова и одновременно пе�
 Проверки: `tests/test_setup.py`, полный `pytest -q` (337 passed, 11 skipped),
 `ruff check`, QML smoke-test offscreen.
 
+### Дополнение: NeMo и инструменты в автонастройке
+
+- Шаг `nemo`: скачивает zip NeMo-Speech.cpp с GitHub Releases (CUDA при
+  NVIDIA, иначе CPU), проверяет SHA-256, ставит в `%LOCALAPPDATA%\Programs\NeMoSpeech`,
+  затем `nemo-speech pull sortformer` (~140 МБ).
+- В брифинге переключатель «NVIDIA NeMo · голоса»; после успеха
+  `diarize_engine=nemo` и `refreshDiarizeStatus`.
+- FFmpeg: только статус в брифинге (в PATH / нет), автоустановки нет.
+
 ## Итерация холста острова, 2026-09-09
 
 Дожатие плавности после жалобы «до сих пор дёргается»:
@@ -1200,3 +1209,30 @@ Binding держал центр острова и одновременно пе�
 - Маска окна (`setWindowMask`) — клики только по хрому, поля холста сквозные.
 - Drag острова/сцены/зала по `mouse.screenX/Y` вместо `mapToGlobal`.
 - Прозрачность острова на хроме, не на HWND.
+
+## Итерация адаптации под два класса железа, 2026-09-09
+
+Пользователь: мультиподдержка устройств и выжим максимума. Целевые профили:
+
+1. i5-12500H + RTX 3060 + 16 ГБ (dual-GPU с UHD);
+2. Surface Laptop 4: Iris Xe ~2 ГБ + 4 потока + 16 ГБ.
+
+- `adapt.py`: единый `plan_whisper` (tier → model/profile/device/greedy).
+- RTX ≥6 ГБ VRAM → `medium` + balanced; без CUDA runtime тоже планирует
+  medium и `device=auto`, чтобы мастер не скатывался на CPU-small.
+- Iris / ≤4 потоков → `base` + fast + `live_greedy_finals`; совет
+  `computeAdvice=integrated` (не «видеокарта не найдена»).
+- `live_cpu_threads`: на ≤4 ядрах оставляет одно системе (3 из 4).
+- Мастер пишет profile → model (medium больше не затирается small);
+  `setSetting(profile)` не трогает модель того же профиля.
+- Тесты: `tests/test_adapt.py` на оба профиля.
+
+## Итерация native drag, 2026-09-09
+
+Пользователь: всё ещё дёргается, нужна «плавность плавность».
+
+Причина: позиция HWND выставлялась из QML на каждый mouse-move — DWM не
+успевал, движение выглядело ступенчатым. Теперь drag отдаётся Windows
+(`ReleaseCapture` + `WM_NCLBUTTONDOWN`/`HTCAPTION`) после порога 4 px.
+Behavior по width/height убран (ломал layout); вместо него лёгкий scale-pulse.
+Маска на время drag снимается.

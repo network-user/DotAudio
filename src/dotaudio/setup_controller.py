@@ -39,6 +39,11 @@ def _empty_briefing() -> dict:
         "llmReady": False,
         "downloadLlm": True,
         "downloadWhisper": True,
+        "nemoReady": False,
+        "downloadNemo": True,
+        "nemoMb": 0,
+        "nemoPreferCuda": False,
+        "ffmpegReady": False,
         "totalMb": 0,
         "computeHint": "",
         "gpuLabel": "",
@@ -52,7 +57,7 @@ class SetupController(QObject):
     changed = Signal()
     progressChanged = Signal()
     # Воркеры → GUI.
-    scanFinished = Signal(object, object, bool, bool)
+    scanFinished = Signal(object, "QVariantMap")
     stepProgress = Signal(str, float, str)
     stepFinished = Signal(str, bool, str)
     runFinished = Signal(bool, str)
@@ -160,6 +165,7 @@ class SetupController(QObject):
                     "computeHint": str(exc),
                     "gpus": [],
                 }
+            from dotaudio import nemo_diarize
             from dotaudio.setup import recommended_whisper
 
             model_name = recommended_whisper(summary)
@@ -170,21 +176,33 @@ class SetupController(QObject):
             if llm is not None:
                 status = modelhub.disk_status(self.models_dir, llm.file)
                 llm_ready = bool(status.get("ready"))
-            self.scanFinished.emit(summary, None, whisper_ready, llm_ready)
+            try:
+                nemo_ready = bool(nemo_diarize.probe().get("available"))
+            except Exception:
+                nemo_ready = False
+            readiness = {
+                "whisperReady": whisper_ready,
+                "llmReady": llm_ready,
+                "nemoReady": nemo_ready,
+                "ffmpegReady": plan.ffmpeg_available(),
+            }
+            self.scanFinished.emit(summary, readiness)
 
         threading.Thread(target=work, name="dotaudio-setup-scan", daemon=True).start()
 
-    def _on_scan_finished(self, summary, _unused, whisper_ready, llm_ready) -> None:
+    def _on_scan_finished(self, summary, readiness) -> None:
         self._hardware = dict(summary or {})
-        # Обновляем сводку у основного контроллера тем же результатом.
+        ready = dict(readiness or {})
         try:
             self.controller.hardwareArrived.emit(self._hardware)
         except RuntimeError:
             pass
         self._briefing = plan.build_briefing(
             self._hardware,
-            whisper_ready=bool(whisper_ready),
-            llm_ready=bool(llm_ready),
+            whisper_ready=bool(ready.get("whisperReady")),
+            llm_ready=bool(ready.get("llmReady")),
+            nemo_ready=bool(ready.get("nemoReady")),
+            ffmpeg_ready=bool(ready.get("ffmpegReady")),
         )
         self._phase = "brief"
         self._busy = False
@@ -247,6 +265,8 @@ class SetupController(QObject):
                         self._run_cuda(cancel)
                     elif step_id == "whisper":
                         self._run_whisper(briefing, cancel)
+                    elif step_id == "nemo":
+                        self._run_nemo(briefing, cancel)
                     elif step_id == "llm":
                         self._run_llm(briefing, cancel)
                     else:
@@ -267,11 +287,18 @@ class SetupController(QObject):
         device = str(briefing.get("device") or "auto")
         profile = str(briefing.get("profile") or "balanced")
         llm_id = str(briefing.get("llmId") or "")
-        self.controller.setSetting("model", model)
+        # Сначала профиль, потом модель: иначе setSetting(profile) мог
+        # переписать medium на small (см. PROFILE_FOR_MODEL).
         self.controller.setSetting("profile", profile)
+        self.controller.setSetting("model", model)
         self.controller.setSetting("device", device)
+        self.controller.setSetting(
+            "live_greedy_finals", bool(briefing.get("liveGreedyFinals"))
+        )
         if llm_id:
             self.controller.setSetting("assistant_model", llm_id)
+        if briefing.get("downloadNemo") or briefing.get("nemoReady"):
+            self.controller.setSetting("diarize_engine", "nemo")
         self.controller.setSetting("gpu_hint_dismissed", True)
 
     def _run_cuda(self, cancel: threading.Event) -> None:
@@ -333,6 +360,43 @@ class SetupController(QObject):
         if cancel.is_set():
             raise RuntimeError("Подготовка Whisper отменена")
         self.stepProgress.emit("whisper", 100.0, f"Готово · {device_used}")
+
+    def _run_nemo(self, briefing: dict, cancel: threading.Event) -> None:
+        from dotaudio import nemo_diarize
+
+        prefer_cuda = bool(briefing.get("nemoPreferCuda"))
+
+        def progress(info):
+            raw = float((info or {}).get("percent") or 0.0)
+            # Установка рантайма - до 55%, pull модели - вторая половина.
+            message = str((info or {}).get("message") or "NeMo…")
+            self.stepProgress.emit("nemo", min(55.0, raw * 0.55), message)
+
+        if not nemo_diarize.executable():
+            result = nemo_diarize.install_runtime(
+                backend="auto",
+                prefer_cuda=prefer_cuda,
+                cancel=cancel,
+                on_progress=progress,
+            )
+            if cancel.is_set():
+                raise RuntimeError("Установка NeMo отменена")
+            if not result.get("ok"):
+                raise RuntimeError(str(result.get("message") or "NeMo не установился"))
+        else:
+            self.stepProgress.emit("nemo", 40.0, "Рантайм уже на диске")
+
+        def status(message: str) -> None:
+            self.stepProgress.emit("nemo", 85.0, str(message or "Модель Sortformer…"))
+
+        self.stepProgress.emit("nemo", 60.0, "Скачиваем модель Sortformer…")
+        nemo_diarize.ensure_model(cancel=cancel, on_status=status)
+        if cancel.is_set():
+            raise RuntimeError("Загрузка модели NeMo отменена")
+        report = nemo_diarize.probe(cancel)
+        if not report.get("available"):
+            raise RuntimeError(str(report.get("message") or "NeMo не готов после установки"))
+        self.stepProgress.emit("nemo", 100.0, str(report.get("message") or "NeMo готов"))
 
     def _run_llm(self, briefing: dict, cancel: threading.Event) -> None:
         llm_id = str(briefing.get("llmId") or "")
@@ -451,6 +515,11 @@ class SetupController(QObject):
         try:
             self.assistant.refreshCatalog()
             self.assistant.refreshHardware()
+        except Exception:
+            pass
+        try:
+            if hasattr(self.controller, "refreshDiarizeStatus"):
+                self.controller.refreshDiarizeStatus()
         except Exception:
             pass
 

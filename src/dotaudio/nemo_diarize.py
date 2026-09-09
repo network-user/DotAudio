@@ -13,22 +13,28 @@ NeMo Framework для `windows-amd64` стоит «No support yet», а офиц
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import platform
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import wave
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
 from typing import Any, Callable
 
+import httpx
 import numpy as np
 
 StatusCallback = Callable[[str], None]
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 CLI_NAME = "nemo-speech"
 # Индексный идентификатор модели по умолчанию: потоковый Sortformer на
@@ -43,6 +49,18 @@ INSTALL_COMMAND_WINDOWS = (
 INSTALL_COMMAND_UNIX = (
     "curl -fsSL https://github.com/NVIDIA/NeMo-Speech.cpp/raw/main/scripts/install.sh | sh"
 )
+
+VERSION_URL = "https://raw.githubusercontent.com/NVIDIA/NeMo-Speech.cpp/main/VERSION"
+RELEASE_BASE = os.environ.get(
+    "NEMO_SPEECH_RELEASE_BASE_URL",
+    "https://github.com/NVIDIA/NeMo-Speech.cpp/releases",
+).rstrip("/")
+# Оценки для брифинга автонастройки (замерено по опубликованным артефактам).
+RUNTIME_DOWNLOAD_MB = 101
+MODEL_DOWNLOAD_MB = 140
+CHUNK_BYTES = 1024 * 1024
+PROGRESS_STEP_BYTES = 2 * 1024 * 1024
+DOWNLOAD_TIMEOUT = 60.0
 
 # Бюджеты времени. Скачивание весов вынесено в отдельный шаг `pull`, чтобы
 # медленная сеть не съедала бюджет самого прохода. Замерено на этом CPU:
@@ -238,6 +256,269 @@ def ensure_model(
         _fail(result, "не удалось скачать модель голосов")
 
 
+def install_prefix() -> Path:
+    """Каталог установки NeMo-Speech.cpp на этой ОС."""
+
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(local) / "Programs" / "NeMoSpeech"
+    return Path.home() / ".local" / "nemo-speech"
+
+
+def resolve_release_version(cancel: Event | None = None) -> str:
+    """Версия из upstream VERSION; при сбое - пустая строка."""
+
+    if cancel is not None and cancel.is_set():
+        raise RuntimeError("установка NeMo отменена")
+    try:
+        with httpx.Client(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT) as client:
+            response = client.get(VERSION_URL)
+            response.raise_for_status()
+            match = re.search(
+                r"(?m)^NEMO_SPEECH_VERSION:\s*([^\s]+)\s*$",
+                response.text or "",
+            )
+            if match:
+                return match.group(1).strip()
+    except (httpx.HTTPError, OSError, ValueError):
+        return ""
+    return ""
+
+
+def _host_arch() -> str:
+    machine = platform.machine().lower()
+    if machine in {"amd64", "x86_64", "x64"}:
+        return "x86_64"
+    if machine in {"arm64", "aarch64"}:
+        return "aarch64"
+    raise RuntimeError(f"архитектура {machine} не поддержана установщиком NeMo")
+
+
+def preferred_backend(*, prefer_cuda: bool = False) -> str:
+    """Бэкенд архива: cuda при NVIDIA, иначе cpu. Vulkan не трогаем."""
+
+    if prefer_cuda and sys.platform == "win32":
+        return "cuda"
+    return "cpu"
+
+
+def _download_file(
+    url: str,
+    target: Path,
+    *,
+    cancel: Event | None = None,
+    on_progress: ProgressCallback | None = None,
+    progress_start: float = 0.0,
+    progress_span: float = 100.0,
+) -> None:
+    """Скачать URL в файл с процентом внутри заданного окна."""
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    part = target.with_suffix(target.suffix + ".part")
+    done = part.stat().st_size if part.exists() else 0
+    headers = {"Accept-Encoding": "identity"}
+    if done:
+        headers["Range"] = f"bytes={done}-"
+    expected = 0
+
+    def report(force: bool = False) -> None:
+        if on_progress is None:
+            return
+        ratio = (done / expected) if expected else 0.0
+        on_progress(
+            {
+                "phase": "download",
+                "percent": progress_start + min(progress_span, ratio * progress_span),
+                "message": (
+                    f"Скачиваем NeMo · {done / (1024 * 1024):.0f}"
+                    + (f" / {expected / (1024 * 1024):.0f}" if expected else "")
+                    + " МБ"
+                ),
+                "bytes": done,
+                "total": expected,
+            }
+        )
+
+    with httpx.Client(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT) as client:
+        with client.stream("GET", url, headers=headers) as response:
+            if response.status_code == 416 and part.exists():
+                part.replace(target)
+                report(force=True)
+                return
+            if done and response.status_code == 200:
+                done = 0
+                part.unlink(missing_ok=True)
+            response.raise_for_status()
+            length = response.headers.get("Content-Length")
+            if length and length.isdigit():
+                expected = done + int(length)
+            mode = "ab" if done else "wb"
+            next_report = done
+            with part.open(mode) as handle:
+                for chunk in response.iter_bytes(CHUNK_BYTES):
+                    if cancel is not None and cancel.is_set():
+                        handle.flush()
+                        raise RuntimeError("установка NeMo отменена")
+                    handle.write(chunk)
+                    done += len(chunk)
+                    if done >= next_report:
+                        next_report = done + PROGRESS_STEP_BYTES
+                        report()
+    part.replace(target)
+    report(force=True)
+
+
+def _verify_sha256(archive: Path, digest_file: Path) -> None:
+    expected = digest_file.read_text(encoding="utf-8", errors="replace").strip().split()[0].lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise RuntimeError("контрольная сумма NeMo повреждена")
+    hasher = hashlib.sha256()
+    with archive.open("rb") as handle:
+        while True:
+            chunk = handle.read(CHUNK_BYTES)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    if hasher.hexdigest().lower() != expected:
+        raise RuntimeError("SHA-256 архива NeMo не совпал")
+
+
+def install_runtime(
+    *,
+    backend: str = "auto",
+    prefer_cuda: bool = False,
+    prefix: Path | None = None,
+    cancel: Event | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    """Скачать готовый архив NeMo-Speech.cpp и поставить в prefix.
+
+    Без PowerShell и без сборки из исходников: только опубликованный zip
+    с GitHub Releases. На Windows путь совпадает с официальным установщиком.
+    """
+
+    def progress(phase: str, percent: float, message: str) -> None:
+        if on_progress is not None:
+            on_progress({"phase": phase, "percent": percent, "message": message})
+
+    if sys.platform != "win32":
+        raise RuntimeError(
+            "Автоустановка NeMo сейчас есть только для Windows. "
+            f"Вручную: {INSTALL_COMMAND_UNIX}"
+        )
+
+    existing = executable()
+    if existing:
+        report = probe(cancel)
+        if report.get("available"):
+            progress("ready", 100.0, str(report.get("message") or "NeMo уже установлен"))
+            return {"ok": True, "path": existing, "installed": False, "message": report.get("message")}
+
+    progress("resolve", 2.0, "Определяем версию NeMo…")
+    version = resolve_release_version(cancel)
+    if not version:
+        raise RuntimeError("не удалось узнать версию NeMo-Speech.cpp")
+    if cancel is not None and cancel.is_set():
+        raise RuntimeError("установка NeMo отменена")
+
+    selected = preferred_backend(prefer_cuda=prefer_cuda) if backend == "auto" else backend
+    if selected not in {"cpu", "cuda"}:
+        selected = "cpu"
+    arch = _host_arch()
+    tag = version if version.startswith("v") else f"v{version}"
+    release_version = version.lstrip("v")
+    archive_name = f"nemo-speech-{release_version}-windows-{arch}-{selected}.zip"
+    url = f"{RELEASE_BASE}/download/{tag}/{archive_name}"
+
+    target_root = Path(prefix) if prefix is not None else install_prefix()
+    work = Path(tempfile.mkdtemp(prefix="dotaudio-nemo-setup-"))
+    archive_path = work / archive_name
+    digest_path = work / f"{archive_name}.sha256"
+    try:
+        progress("download", 5.0, f"Скачиваем {archive_name}…")
+        try:
+            _download_file(
+                url,
+                archive_path,
+                cancel=cancel,
+                on_progress=on_progress,
+                progress_start=5.0,
+                progress_span=55.0,
+            )
+        except Exception:
+            if selected == "cuda":
+                # Нет CUDA-сборки - берём CPU, диаризация всё равно работает.
+                selected = "cpu"
+                archive_name = f"nemo-speech-{release_version}-windows-{arch}-{selected}.zip"
+                url = f"{RELEASE_BASE}/download/{tag}/{archive_name}"
+                archive_path = work / archive_name
+                digest_path = work / f"{archive_name}.sha256"
+                _download_file(
+                    url,
+                    archive_path,
+                    cancel=cancel,
+                    on_progress=on_progress,
+                    progress_start=5.0,
+                    progress_span=55.0,
+                )
+            else:
+                raise
+
+        progress("checksum", 62.0, "Проверяем контрольную сумму…")
+        _download_file(
+            f"{url}.sha256",
+            digest_path,
+            cancel=cancel,
+            on_progress=None,
+        )
+        _verify_sha256(archive_path, digest_path)
+
+        progress("extract", 70.0, "Распаковываем рантайм…")
+        extract = work / "extract"
+        extract.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.extractall(extract)
+        entries = list(extract.iterdir())
+        root = entries[0] if len(entries) == 1 and entries[0].is_dir() else extract
+        staged = root / "bin" / "nemo-speech.exe"
+        if not staged.is_file():
+            raise RuntimeError("в архиве нет bin\\nemo-speech.exe")
+
+        progress("activate", 88.0, "Подключаем установку…")
+        identity = f"{release_version} windows {arch} {selected}"
+        (root / ".nemo-speech-install").write_text(identity, encoding="utf-8")
+        target_root.parent.mkdir(parents=True, exist_ok=True)
+        next_dir = Path(str(target_root) + ".new")
+        old_dir = Path(str(target_root) + ".old")
+        shutil.rmtree(next_dir, ignore_errors=True)
+        shutil.rmtree(old_dir, ignore_errors=True)
+        shutil.move(str(root), str(next_dir))
+        if target_root.exists():
+            shutil.move(str(target_root), str(old_dir))
+        try:
+            shutil.move(str(next_dir), str(target_root))
+        except OSError:
+            if old_dir.exists():
+                shutil.move(str(old_dir), str(target_root))
+            raise
+        shutil.rmtree(old_dir, ignore_errors=True)
+
+        path = str(target_root / "bin" / "nemo-speech.exe")
+        if not Path(path).is_file():
+            raise RuntimeError("после установки не найден nemo-speech.exe")
+        progress("ready", 100.0, f"NeMo {release_version} · {selected}")
+        return {
+            "ok": True,
+            "path": path,
+            "installed": True,
+            "backend": selected,
+            "version": release_version,
+            "message": f"NeMo {release_version} установлен ({selected})",
+        }
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def write_wav(audio: np.ndarray, target: str | Path, sample_rate: int = SAMPLE_RATE) -> None:
     """Сохранить моно float32 как PCM16 WAV: этот формат CLI читает сам."""
 
@@ -336,13 +617,19 @@ def diarize_audio(
 
 __all__ = [
     "MAX_SPEAKERS",
+    "MODEL_DOWNLOAD_MB",
     "NemoUnavailable",
+    "RUNTIME_DOWNLOAD_MB",
     "Turn",
     "diarize_audio",
     "ensure_model",
     "executable",
     "install_command",
+    "install_prefix",
+    "install_runtime",
     "parse_turns",
+    "preferred_backend",
     "probe",
+    "resolve_release_version",
     "write_wav",
 ]
