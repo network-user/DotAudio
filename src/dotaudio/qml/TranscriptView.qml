@@ -284,6 +284,8 @@ Rectangle {
         spacing: Theme.gapSm
 
         Rectangle {
+            id: transcriptHead
+            objectName: "transcriptHead"
             Layout.fillWidth: true
             implicitHeight: headCol.implicitHeight + 2 * Theme.padCard
             radius: Theme.radiusLg
@@ -292,21 +294,23 @@ Rectangle {
             border.color: Theme.border
             ColumnLayout {
                 id: headCol
-                anchors.fill: parent
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
                 anchors.margins: Theme.padCard
                 spacing: Theme.gapSm
 
-                RowLayout {
+                Label {
+                    Layout.fillWidth: true
+                    text: view.shortName.length ? view.shortName : "Файл не выбран"
+                    color: Theme.text
+                    font.pixelSize: Theme.fsTitle
+                    font.weight: Font.DemiBold
+                    elide: Text.ElideMiddle
+                }
+                Flow {
                     Layout.fillWidth: true
                     spacing: Theme.gapSm
-                    Label {
-                        Layout.fillWidth: true
-                        text: view.shortName.length ? view.shortName : "Файл не выбран"
-                        color: Theme.text
-                        font.pixelSize: Theme.fsTitle
-                        font.weight: Font.DemiBold
-                        elide: Text.ElideMiddle
-                    }
                     PillButton {
                         text: "Открыть"
                         enabled: !view.busyPhase
@@ -405,6 +409,8 @@ Rectangle {
 
         Flow {
             Layout.fillWidth: true
+            Layout.maximumHeight: 76
+            clip: true
             visible: view.speakers.length > 0
             spacing: Theme.gapSm
             Repeater {
@@ -460,8 +466,11 @@ Rectangle {
         }
 
         Item {
+            id: phrasePane
+            objectName: "phrasePane"
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.minimumHeight: 160
             clip: true
 
             ColumnLayout {
@@ -492,14 +501,21 @@ Rectangle {
                 id: segList
                 objectName: "segmentList"
                 anchors.fill: parent
+                anchors.rightMargin: 2
                 model: view.rows
                 spacing: Theme.gapSm
                 clip: true
                 visible: view.segs.length > 0
                 boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.VerticalFlick
+                cacheBuffer: 800
                 ScrollBar.vertical: ScrollBar {
                     policy: ScrollBar.AsNeeded
-                    width: 8
+                    implicitWidth: 8
+                }
+                footer: Item {
+                    width: 1
+                    height: Theme.gapLg
                 }
                 header: Item {
                     width: segList.width
@@ -532,6 +548,7 @@ Rectangle {
                         || (view.focusKey === 0 && (view.markedIndex === index || view.playIndex === index))
                     width: ListView.view.width
                     implicitHeight: segBody.implicitHeight + 22
+                    height: implicitHeight
                     radius: Theme.radiusMd
                     color: segCard.playingNow
                            ? Theme.liveSurface
@@ -614,7 +631,9 @@ Rectangle {
 
                     RowLayout {
                         id: segBody
-                        anchors.fill: parent
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
                         anchors.margins: 11
                         spacing: 10
                         Rectangle {
@@ -762,16 +781,16 @@ Rectangle {
 
     Popup {
         id: exportMenu
-        parent: Overlay.overlay
+        parent: view
         x: {
-            var pos = saveBtn.mapToItem(Overlay.overlay, 0, 0)
-            return Math.max(8, Math.min(pos.x, Overlay.overlay.width - implicitWidth - 8))
+            var pos = saveBtn.mapToItem(view, 0, 0)
+            return Math.max(8, Math.min(pos.x, view.width - implicitWidth - 8))
         }
         y: {
-            var below = saveBtn.mapToItem(Overlay.overlay, 0, saveBtn.height).y + 6
-            if (below + implicitHeight <= Overlay.overlay.height - 8)
+            var below = saveBtn.mapToItem(view, 0, saveBtn.height).y + 6
+            if (below + implicitHeight <= view.height - 8)
                 return below
-            return Math.max(8, saveBtn.mapToItem(Overlay.overlay, 0, 0).y - implicitHeight - 6)
+            return Math.max(8, saveBtn.mapToItem(view, 0, 0).y - implicitHeight - 6)
         }
         padding: 6
         modal: false
