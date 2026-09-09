@@ -359,6 +359,46 @@ class RuntimeUnavailable(RuntimeError):
     """Рантайм не установлен или модель не загружена."""
 
 
+CONTEXT_OVERFLOW = (
+    "Текст не влез в окно модели. Задайте более узкий вопрос по записи "
+    "или дождитесь карты - тогда модель читает части, а не весь выпуск сразу."
+)
+
+# Совпадает с оценкой в assistant.py: лучше завысить, чем поймать ValueError.
+_PROMPT_CHARS_PER_TOKEN = 1.6
+
+
+def is_context_overflow(error: BaseException) -> bool:
+    text = str(error).lower()
+    return (
+        "context window" in text
+        or "exceed context" in text
+        or "n_ctx" in text
+        or CONTEXT_OVERFLOW.casefold() in str(error).casefold()
+    )
+
+
+def estimate_message_tokens(messages: Sequence[dict]) -> int:
+    """Грубая оценка длины промпта вместе с запасом на chat-шаблон."""
+
+    total = sum(len(str(item.get("content") or "")) for item in messages)
+    return max(1, int(total / _PROMPT_CHARS_PER_TOKEN) + 80)
+
+
+def fit_max_tokens(
+    messages: Sequence[dict],
+    options: GenerationOptions,
+    context_tokens: int,
+) -> int:
+    """Урезать длину ответа, чтобы prompt + generate влезли в n_ctx."""
+
+    used = estimate_message_tokens(messages)
+    room = int(context_tokens) - used - 8
+    if room < 24:
+        raise RuntimeUnavailable(CONTEXT_OVERFLOW)
+    return max(24, min(int(options.max_tokens), room))
+
+
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 # Мягкий переключатель Qwen3: модель понимает его прямо в тексте запроса и не
@@ -635,6 +675,13 @@ class LlamaCppRuntime:
         with self._lock:
             return self._loaded is not None
 
+    def loaded_context(self) -> int | None:
+        with self._lock:
+            key = self._loaded_key
+        if key is None:
+            return None
+        return int(key[1])
+
     def stream(
         self,
         messages: Sequence[dict],
@@ -645,14 +692,21 @@ class LlamaCppRuntime:
     ) -> Iterator[str]:
         instance = self.load(model, profile)
         payload = shape_messages(messages, model, options)
+        context = self.loaded_context() or plan_context(model, profile)
+        max_tokens = fit_max_tokens(payload, options, context)
         with self._lock:
-            stream = instance.create_chat_completion(
-                messages=payload,
-                temperature=options.temperature,
-                top_p=options.top_p,
-                max_tokens=options.max_tokens,
-                stream=True,
-            )
+            try:
+                stream = instance.create_chat_completion(
+                    messages=payload,
+                    temperature=options.temperature,
+                    top_p=options.top_p,
+                    max_tokens=max_tokens,
+                    stream=True,
+                )
+            except ValueError as error:
+                if is_context_overflow(error):
+                    raise RuntimeUnavailable(CONTEXT_OVERFLOW) from error
+                raise
             think = _ThinkFilter()
             for chunk in stream:
                 if cancel is not None and cancel.is_set():
@@ -867,6 +921,13 @@ class SubprocessLlamaRuntime:
         with self._lock:
             return self._loaded_key is not None
 
+    def loaded_context(self) -> int | None:
+        with self._lock:
+            key = self._loaded_key
+        if key is None:
+            return None
+        return int(key[1])
+
     def stream(
         self,
         messages: Sequence[dict],
@@ -877,13 +938,15 @@ class SubprocessLlamaRuntime:
     ) -> Iterator[str]:
         self.load(model, profile)
         payload = shape_messages(messages, model, options or GenerationOptions())
+        context = self.loaded_context() or plan_context(model, profile)
+        max_tokens = fit_max_tokens(payload, options or GenerationOptions(), context)
         request = {
             "cmd": "chat",
             "messages": payload,
             "options": {
                 "temperature": (options or GenerationOptions()).temperature,
                 "top_p": (options or GenerationOptions()).top_p,
-                "max_tokens": (options or GenerationOptions()).max_tokens,
+                "max_tokens": max_tokens,
             },
         }
         with self._io_lock:
@@ -1002,6 +1065,7 @@ class OllamaRuntime:
                 "temperature": options.temperature,
                 "top_p": options.top_p,
                 "num_predict": options.max_tokens,
+                "num_ctx": plan_context(model, profile),
             },
         }
         think = _ThinkFilter()
@@ -1143,6 +1207,18 @@ class ChatEngine:
 
     def loaded(self) -> bool:
         return self._llama.loaded() or self._subprocess.loaded()
+
+    def loaded_context(self) -> int | None:
+        """Фактический n_ctx загруженной модели, если она уже в памяти."""
+
+        for runtime in (self._subprocess, self._llama):
+            getter = getattr(runtime, "loaded_context", None)
+            if getter is None:
+                continue
+            value = getter()
+            if value:
+                return int(value)
+        return None
 
 
 def catalog_cards(

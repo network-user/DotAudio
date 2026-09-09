@@ -19,10 +19,15 @@
    (feature hashing стемов, не нейросеть). Затем модель читает карту и сама
    говорит, какие части нужно открыть.
 5. Выбранные части раскрываются полным текстом (вместе с соседними, если
-   помещаются) и только они идут в контекст ответа.
+   помещаются) и только они идут в контекст ответа. На окне 4096 это
+   обычно одна-две части: шесть сразу снова не влезают.
 6. Если модель отвечает, что в открытых частях ответа нет, идёт второй заход
    по следующим кандидатам. Больше двух заходов не делается: пользователь
    ждёт ответ, а не полный перечёт записи.
+7. Обзорные вопросы («о чём подкаст», «изложи») читают сложенную карту,
+   а не сырой текст. Большое текстовое вложение режется так же, как запись.
+   Промпт никогда не оценивается выше окна: иначе llama.cpp отвечает
+   ``Requested tokens exceed context window``.
 
 Короткая запись обходит всё это: если расшифровка целиком влезает в бюджет,
 она отдаётся моделью как есть.
@@ -35,15 +40,16 @@ import math
 import re
 import threading
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from dotaudio.llm import GenerationOptions
 from dotaudio.speaker_labels import default_speaker_label
 
-# Сколько символов русского текста приходится на токен. Оценка снизу: лучше
-# недобрать контекст, чем упереться в окно на середине ответа.
-CHARS_PER_TOKEN = 2.4
+# Сколько символов русского текста приходится на токен. Qwen на кириллице
+# часто даёт ~1.5-2 символа на токен; 2.4 было слишком оптимистично и
+# пропускало в окно 4096 целый получасовой подкаст.
+CHARS_PER_TOKEN = 1.6
 
 # Часть записи. Две с половиной минуты - это связный кусок разговора, который
 # ещё дёшево пересказать, и достаточно мелкий, чтобы точно указать таймкод.
@@ -51,13 +57,23 @@ CHUNK_TARGET_SECONDS = 150.0
 CHUNK_MAX_CHARS = 3200
 
 # Доля окна контекста под сам материал. Остальное - инструкции, переписка и
-# место под ответ.
+# место под ответ. Для обратной совместимости budget_chars(); реальный бюджет
+# считает material_budget с запасом на шаблон и генерацию.
 CONTEXT_SHARE = 0.5
 
-# Сколько частей открывать на один вопрос. Больше - дольше ответ и выше шанс,
-# что модель потеряет вопрос среди текста.
+# Сколько частей открывать на один вопрос. Фактический потолок ещё режет
+# budget: на окне 4096 влезает одна-две части, не шесть.
 MAX_OPENED_CHUNKS = 6
 MAX_ROUNDS = 2
+
+# Обзорные вопросы читают карту целиком, а не две случайные части.
+_OVERVIEW_RE = re.compile(
+    r"(?ix)"
+    r"о\s*ч[её]м\s+(это|запись|подкаст|разговор|выпуск|эпизод|эфир)|"
+    r"(кратко\s+)?(изложи|перескажи)\b|"
+    r"\b(саммари|выжимк\w+|содержание|краткое\s+изложение)\b|"
+    r"сделай\s+(краткое\s+)?(изложение|описание|саммари|выжимку)"
+)
 
 # Слово считается редким, если встречается не более чем в такой доле частей.
 # На записи из трёх частей это одна часть, на записи из тридцати - десять.
@@ -250,10 +266,159 @@ def _stems(text: str) -> list[str]:
     return out
 
 
+def estimate_tokens(text: str) -> int:
+    """Грубая оценка токенов. Лучше завысить, чем поймать отказ llama.cpp."""
+
+    return max(1, math.ceil(len(text or "") / CHARS_PER_TOKEN))
+
+
+def reserved_tokens(context_tokens: int, max_tokens: int) -> int:
+    """Токены, которые нельзя отдать расшифровке: шаблон чата и ответ."""
+
+    window = max(256, int(context_tokens))
+    template = min(280, max(80, window // 8))
+    generation = min(max(24, int(max_tokens)), max(64, window // 4))
+    return template + generation
+
+
+def material_budget(context_tokens: int, max_tokens: int = 400) -> int:
+    """Сколько символов выдержек реально влезает в это окно."""
+
+    usable = max(160, int(context_tokens) - reserved_tokens(context_tokens, max_tokens))
+    return max(400, int(usable * CHARS_PER_TOKEN))
+
+
 def budget_chars(context_tokens: int, share: float = CONTEXT_SHARE) -> int:
     """Сколько символов материала помещается в это окно контекста."""
 
-    return max(600, int(context_tokens * share * CHARS_PER_TOKEN))
+    del share
+    return material_budget(context_tokens)
+
+
+def max_open_chunks(context_tokens: int, max_tokens: int = 400) -> int:
+    """Сколько частей открыть, чтобы они вместе влезли в бюджет."""
+
+    typical = 1600
+    return max(1, min(MAX_OPENED_CHUNKS, material_budget(context_tokens, max_tokens) // typical))
+
+
+def clip_text(text: str, limit: int) -> str:
+    """Обрезать по границе строки или предложения, не посередине слова."""
+
+    body = str(text or "")
+    if limit <= 0:
+        return ""
+    if len(body) <= limit:
+        return body
+    if limit <= 4:
+        return body[:limit]
+    cut = body[: limit - 1]
+    # Рвём только во второй половине окна: иначе заголовок «Часть N» съедает
+    # весь текст, и модель получает пустую выдержку.
+    min_pos = max(12, int(len(cut) * 0.5))
+    for sep in ("\n", ". ", "! ", "? ", "; ", ", ", " "):
+        pos = cut.rfind(sep)
+        if pos >= min_pos:
+            cut = cut[:pos].rstrip()
+            break
+    return cut.rstrip() + "…"
+
+
+def looks_like_overview(question: str) -> bool:
+    """Вопрос про всю запись, а не про одно место в ней."""
+
+    return bool(_OVERVIEW_RE.search(str(question or "")))
+
+
+def chunks_from_text(text: str, max_chars: int = CHUNK_MAX_CHARS) -> list[Chunk]:
+    """Разрезать обычный текст (вложение) на части того же формата, что запись."""
+
+    body = str(text or "").strip()
+    if not body:
+        return []
+    pieces: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", body):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        if len(paragraph) <= max_chars:
+            if pieces and len(pieces[-1]) + len(paragraph) + 2 <= max_chars:
+                pieces[-1] = f"{pieces[-1]}\n\n{paragraph}"
+            else:
+                pieces.append(paragraph)
+            continue
+        start = 0
+        while start < len(paragraph):
+            pieces.append(paragraph[start : start + max_chars].strip())
+            start += max_chars
+    return [
+        Chunk(index=index, start=float(index), end=float(index + 1), lines=((float(index), piece, ""),))
+        for index, piece in enumerate(piece for piece in pieces if piece)
+    ]
+
+
+def pack_chunk_indices(
+    preferred: Sequence[int],
+    by_index: dict[int, Chunk],
+    used: Sequence[int],
+    budget: int,
+    *,
+    neighbors: bool = True,
+) -> list[int]:
+    """Взять части по убыванию пользы, пока хватает бюджета. Потом соседей."""
+
+    def size_of(index: int) -> int:
+        chunk = by_index[index]
+        header = len(f"Часть {chunk.index + 1} ({chunk.span}):\n")
+        return header + len(chunk.stamped) + 2
+
+    chosen: list[int] = []
+    spent = 0
+    for index in dict.fromkeys(preferred):
+        if index not in by_index or index in used or index in chosen:
+            continue
+        size = size_of(index)
+        if chosen and spent + size > budget:
+            continue
+        chosen.append(index)
+        spent += size
+    if neighbors:
+        for index in list(chosen):
+            for neighbour in (index - 1, index + 1):
+                if neighbour not in by_index or neighbour in chosen or neighbour in used:
+                    continue
+                size = size_of(neighbour)
+                if spent + size > budget:
+                    continue
+                chosen.append(neighbour)
+                spent += size
+    return sorted(chosen)
+
+
+def render_opened(
+    opened: Sequence[int],
+    by_index: dict[int, Chunk],
+    budget: int,
+) -> str:
+    """Собрать выдержки и обрезать, если одна часть всё ещё длиннее окна."""
+
+    parts: list[str] = []
+    spent = 0
+    for index in opened:
+        chunk = by_index.get(index)
+        if chunk is None:
+            continue
+        header = f"Часть {chunk.index + 1} ({chunk.span}):\n"
+        room = budget - spent - len(header)
+        if parts and room < 80:
+            break
+        body = chunk.stamped
+        if len(body) > max(80, room):
+            body = clip_text(body, max(80, room))
+        block = header + body
+        parts.append(block)
+        spent += len(block) + 2
+    return "\n\n".join(parts)
 
 
 @dataclass(frozen=True)
@@ -715,16 +880,38 @@ class TranscriptAssistant:
     def _stopped(self) -> bool:
         return self.cancel is not None and self.cancel.is_set()
 
+    def _capped_options(self, options: GenerationOptions) -> GenerationOptions:
+        cap = max(64, int(self.context_tokens) // 4)
+        if options.max_tokens <= cap:
+            return options
+        return replace(options, max_tokens=cap)
+
+    def _budget(self, max_tokens: int = 400) -> int:
+        return material_budget(self.context_tokens, max_tokens)
+
+    def _fits(self, text: str, max_tokens: int) -> bool:
+        return len(text) <= self._budget(max_tokens)
+
+    def _open_limit(self, max_tokens: int = 400) -> int:
+        return max_open_chunks(self.context_tokens, max_tokens)
+
     def _ask(self, system: str, user: str, options: GenerationOptions, on_token=None) -> str:
+        options = self._capped_options(options)
+        # Запас на system и ответ уже сидит в reserved_tokens. Здесь режем
+        # только user: иначе длинная инструкция съедает выдержку целиком.
+        user_text = str(user or "")
+        limit_chars = self._budget(options.max_tokens)
+        if len(user_text) > limit_chars:
+            user_text = clip_text(user_text, limit_chars)
         messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "system", "content": str(system or "")},
+            {"role": "user", "content": user_text},
         ]
         return self.respond(messages, options, on_token)
 
     @property
     def material_chars(self) -> int:
-        return budget_chars(self.context_tokens)
+        return self._budget(400)
 
     # -- карта записи ------------------------------------------------------
 
@@ -806,9 +993,9 @@ class TranscriptAssistant:
         """Готовое действие по всей записи: изложение, тезисы, задачи, темы."""
 
         task = ACTION_PROMPTS.get(kind, ACTION_PROMPTS["summary"])
-        options = GenerationOptions(temperature=0.3, max_tokens=1100)
+        options = self._capped_options(GenerationOptions(temperature=0.3, max_tokens=1100))
         whole = transcript_text(chunks)
-        if len(whole) <= self.material_chars:
+        if self._fits(whole, options.max_tokens):
             self._stage("answer_start", mode="full", opened=len(chunks))
             text = self._ask(
                 SYSTEM_RECORD,
@@ -845,7 +1032,7 @@ class TranscriptAssistant:
         """
 
         level = list(digests)
-        budget = self.material_chars
+        budget = self._budget(options.max_tokens)
         guard = 0
         while len("\n".join(f"Часть {d.index + 1} ({d.span}): {d.summary}" for d in level)) > budget:
             guard += 1
@@ -902,9 +1089,9 @@ class TranscriptAssistant:
         """Ответ на вопрос по записи с раскрытием нужных частей."""
 
         # Ответ по записи - коротко: длинная генерация на CPU съедает минуты.
-        options = GenerationOptions(temperature=0.3, max_tokens=400)
+        options = self._capped_options(GenerationOptions(temperature=0.3, max_tokens=400))
         whole = transcript_text(chunks)
-        if len(whole) <= self.material_chars:
+        if self._fits(whole, options.max_tokens):
             self._stage("answer_start", mode="full", opened=len(chunks))
             text = self._ask(
                 SYSTEM_RECORD,
@@ -920,13 +1107,33 @@ class TranscriptAssistant:
                 not_found=missing,
             )
 
+        if looks_like_overview(question):
+            digests = self.ensure_digests(session_id, chunks)
+            if self._stopped():
+                return Answer(text="", mode="cancelled")
+            material = self._fold_digests(digests, options)
+            self._stage("answer_start", mode="outline", opened=len(digests))
+            text = self._ask(
+                SYSTEM_RECORD,
+                self._question_prompt(question, material, history),
+                options,
+                on_token,
+            )
+            clean, missing = self._clean(text)
+            return Answer(
+                text=clean,
+                mode="outline",
+                opened=tuple(digest.index for digest in digests),
+                not_found=missing,
+            )
+
         by_index = {chunk.index: chunk for chunk in chunks}
         # Первый заход - поиск по словам, без модели и без карты. Вопрос про
         # смету или про имя почти всегда содержит слово, которое звучало в
         # записи, и открыть три части по нему стоит миллисекунды. Карта частей
         # на записи в час стоит десятки запросов к модели, и платить за неё
         # ради «что решили по смете» незачем.
-        strong = selective_hits(question, chunks)[:MAX_OPENED_CHUNKS]
+        strong = selective_hits(question, chunks)[: self._open_limit(options.max_tokens)]
         # Очередь заходов. Первый - найденное по словам; если ответа там нет,
         # следующие идут по карте: сначала выбранное моделью, потом остальная
         # запись. Тиры разделены, иначе один заход открыл бы всю запись сразу
@@ -973,16 +1180,16 @@ class TranscriptAssistant:
                 mapped = True
             batch: list[int] = []
             while pending and not batch:
-                batch = [index for index in pending.pop(0) if index not in used][:MAX_OPENED_CHUNKS]
+                batch = [
+                    index
+                    for index in pending.pop(0)
+                    if index not in used
+                ][: self._open_limit(options.max_tokens)]
             if not batch:
                 break
             opened = self._expand(batch, by_index, used)
             used.extend(index for index in opened if index not in used)
-            material = "\n\n".join(
-                f"Часть {by_index[index].index + 1} ({by_index[index].span}):\n"
-                f"{by_index[index].stamped}"
-                for index in opened
-            )
+            material = render_opened(opened, by_index, self._budget(options.max_tokens))
             self._stage("answer_start", mode=mode, opened=len(opened), round=rounds)
             # Промежуточный заход без стрима: иначе в пузыре мелькнет
             # служебное «нет в записи». Если ответ нашёлся на этом заходе -
@@ -1020,7 +1227,7 @@ class TranscriptAssistant:
             f"{outline_text(digests)}\n\n"
             f"Вопрос: {question}\n\n"
             f"Назови номера частей, которые нужно прочитать целиком, чтобы ответить. "
-            f"Не больше {MAX_OPENED_CHUNKS}, только цифры через запятую, в порядке важности."
+            f"Не больше {self._open_limit()}, только цифры через запятую, в порядке важности."
         )
         reply = self._ask(SYSTEM_CHAT, prompt, GenerationOptions(temperature=0.1, max_tokens=80))
         return parse_part_numbers(reply, len(digests))
@@ -1038,29 +1245,31 @@ class TranscriptAssistant:
         или итог сказанного.
         """
 
-        chosen = list(dict.fromkeys(batch))
-        room = self.material_chars - sum(len(by_index[index].stamped) for index in chosen)
-        for index in list(chosen):
-            for neighbour in (index - 1, index + 1):
-                if neighbour not in by_index or neighbour in chosen or neighbour in used:
-                    continue
-                size = len(by_index[neighbour].stamped)
-                if size > room:
-                    continue
-                chosen.append(neighbour)
-                room -= size
-        return sorted(chosen)
+        return pack_chunk_indices(
+            batch,
+            by_index,
+            used,
+            self._budget(400),
+            neighbors=True,
+        )
 
     def _question_prompt(self, question: str, material: str, history: Sequence[dict]) -> str:
-        parts: list[str] = []
-        talk = _recent_history(history)
-        if talk:
-            parts.append("Предыдущий разговор:\n" + talk)
-        parts.append("Выдержки из записи:\n" + material)
-        parts.append(
+        budget = self._budget(400)
+        talk = _recent_history(history, limit=4, chars=min(400, max(120, budget // 6)))
+        question_tail = (
             f"Вопрос: {question}\n"
             "Ответь кратко, одним-тремя предложениями, своими словами."
         )
+        reserved = len(talk) + len(question_tail) + 80
+        body = material
+        room = max(200, budget - reserved)
+        if len(body) > room:
+            body = clip_text(body, room)
+        parts: list[str] = []
+        if talk:
+            parts.append("Предыдущий разговор:\n" + talk)
+        parts.append("Выдержки из записи:\n" + body)
+        parts.append(question_tail)
         return "\n\n".join(parts)
 
     def _clean(self, text: str) -> tuple[str, bool]:
@@ -1096,28 +1305,63 @@ class TranscriptAssistant:
 
         body = (material or "").strip()
         name = (material_name or "файл").strip() or "файл"
+        options = self._capped_options(GenerationOptions(temperature=0.5, max_tokens=900))
+        if body and not self._fits(body, options.max_tokens):
+            file_id = "file:" + hashlib.sha1(body.encode("utf-8")).hexdigest()[:12]
+            return self.answer(
+                question,
+                file_id,
+                chunks_from_text(body),
+                history,
+                on_token=on_token,
+            )
         if body:
+            clipped = body if self._fits(body, options.max_tokens) else clip_text(
+                body, self._budget(options.max_tokens)
+            )
             messages: list[dict] = [{"role": "system", "content": SYSTEM_MATERIAL}]
-            messages.extend(_history_messages(history))
+            messages.extend(_history_messages(history, max_chars=self._budget(options.max_tokens) // 3))
             messages.append(
                 {
                     "role": "user",
                     "content": (
-                        f"Прикреплённый файл «{name}»:\n\n{body}\n\n"
+                        f"Прикреплённый файл «{name}»:\n\n{clipped}\n\n"
                         f"Вопрос: {question}"
                     ),
                 }
             )
         else:
             messages = [{"role": "system", "content": SYSTEM_CHAT}]
-            messages.extend(_history_messages(history))
+            messages.extend(_history_messages(history, max_chars=self._budget(options.max_tokens)))
             messages.append({"role": "user", "content": question})
-        options = GenerationOptions(temperature=0.5, max_tokens=900)
-        text = self.respond(messages, options, on_token)
+        packed = self._fit_chat_messages(messages, options.max_tokens)
+        text = self.respond(packed, options, on_token)
         return Answer(text=text.strip(), mode="chat")
 
+    def _fit_chat_messages(self, messages: list[dict], max_tokens: int) -> list[dict]:
+        """Укоротить историю и вложение, если свободный чат всё ещё не влезает."""
 
-def _history_messages(history: Sequence[dict], limit: int = 8) -> list[dict]:
+        overhead = reserved_tokens(self.context_tokens, max_tokens)
+        limit = max(400, int((self.context_tokens - overhead) * CHARS_PER_TOKEN))
+        packed = [dict(item) for item in messages]
+        while packed and sum(len(str(item.get("content") or "")) for item in packed) > limit:
+            if len(packed) > 2:
+                # Сначала выкидываем самые старые ходы, системный оставляем.
+                drop = 1 if packed[0].get("role") == "system" else 0
+                if drop < len(packed) - 1:
+                    packed.pop(drop)
+                    continue
+            last = packed[-1]
+            last["content"] = clip_text(str(last.get("content") or ""), max(200, limit // 2))
+            break
+        return packed
+
+
+def _history_messages(
+    history: Sequence[dict],
+    limit: int = 8,
+    max_chars: int = 2400,
+) -> list[dict]:
     """Последние реплики в виде сообщений для модели.
 
     Текст вложения хранится в ``meta.attachment`` и подмешивается здесь, чтобы
@@ -1130,10 +1374,16 @@ def _history_messages(history: Sequence[dict], limit: int = 8) -> list[dict]:
         content = _message_content_for_model(item)
         if role in ("user", "assistant") and content:
             out.append({"role": role, "content": content})
+    total = sum(len(str(item.get("content") or "")) for item in out)
+    while out and total > max_chars and len(out) > 1:
+        dropped = out.pop(0)
+        total -= len(str(dropped.get("content") or ""))
+    if out and total > max_chars:
+        out[-1]["content"] = clip_text(str(out[-1].get("content") or ""), max_chars)
     return out
 
 
-def _message_content_for_model(item: dict) -> str:
+def _message_content_for_model(item: dict, attachment_limit: int = 2000) -> str:
     content = str(item.get("content") or "").strip()
     meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
     attachment = meta.get("attachment") if isinstance(meta, dict) else None
@@ -1142,6 +1392,8 @@ def _message_content_for_model(item: dict) -> str:
     body = str(attachment.get("text") or "").strip()
     if not body:
         return content
+    if len(body) > attachment_limit:
+        body = clip_text(body, attachment_limit)
     name = str(attachment.get("name") or "файл").strip() or "файл"
     prefix = f"Прикреплённый файл «{name}»:\n\n{body}"
     return f"{prefix}\n\n{content}" if content else prefix

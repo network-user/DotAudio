@@ -26,9 +26,10 @@ from dotaudio.assistant import (
     TranscriptAssistant,
     build_chunk_embeddings,
     build_chunks,
+    clip_text,
     outline_text,
 )
-from dotaudio.llm import GenerationOptions
+from dotaudio.llm import CONTEXT_OVERFLOW, GenerationOptions, is_context_overflow
 from dotaudio.storage import GENERAL_CHAT_ID
 
 # Модель занимает единицы гигабайт: держать её загруженной после того, как
@@ -573,6 +574,14 @@ class AssistantController(QObject):
     def _current_model(self) -> llm.ChatModel | None:
         return llm.get_model(self._active_model_id())
 
+    def _context_tokens(self, model: llm.ChatModel) -> int:
+        """Окно, с которым модель реально загружена, иначе план под железо."""
+
+        loaded = self.engine.loaded_context()
+        if loaded:
+            return int(loaded)
+        return llm.plan_context(model)
+
     @Slot(str)
     def selectModel(self, model_id):
         if llm.get_model(str(model_id)) is None:
@@ -881,7 +890,7 @@ class AssistantController(QObject):
 
         helper = TranscriptAssistant(
             respond=respond,
-            context_tokens=llm.plan_context(model),
+            context_tokens=self._context_tokens(model),
             digests=self._digests,
             on_stage=lambda name, payload: self.stageArrived.emit(name, dict(payload)),
             cancel=cancel,
@@ -1501,9 +1510,12 @@ class AssistantController(QObject):
             except llm.GenerationCancelled:
                 error = "cancelled"
             except llm.RuntimeUnavailable as failure:
-                error = str(failure)
+                error = CONTEXT_OVERFLOW if is_context_overflow(failure) else str(failure)
             except Exception as failure:
-                error = str(failure) or failure.__class__.__name__
+                if is_context_overflow(failure):
+                    error = CONTEXT_OVERFLOW
+                else:
+                    error = str(failure) or failure.__class__.__name__
             self.replyFinished.emit(error, action)
 
         self._worker = threading.Thread(
@@ -1541,7 +1553,7 @@ class AssistantController(QObject):
         )
         helper = TranscriptAssistant(
             respond=respond,
-            context_tokens=llm.plan_context(model),
+            context_tokens=self._context_tokens(model),
             digests=self._digests,
             on_stage=lambda name, payload: self.stageArrived.emit(name, dict(payload)),
             cancel=cancel,
@@ -1554,13 +1566,14 @@ class AssistantController(QObject):
         if action:
             helper.summarize(record_id, chunks, action, on_token=emit_token)
         elif record_id and chunks:
-            # Вложение к вопросу по записи добавляется в сам вопрос: карта
-            # записи и выдержки остаются главным источником.
+            # Вложение к вопросу по записи - только короткий фрагмент.
+            # Целый файл иначе вытесняет выдержки и рвёт окно 4K.
             prompt = question
             if material.strip():
+                excerpt = clip_text(material.strip(), 800)
                 prompt = (
-                    f"Дополнительно прикреплён файл «{material_name or 'файл'}»:\n"
-                    f"{material.strip()}\n\nВопрос: {question}"
+                    f"Дополнительно фрагмент файла «{material_name or 'файл'}»:\n"
+                    f"{excerpt}\n\nВопрос: {question}"
                 )
             helper.answer(
                 prompt,

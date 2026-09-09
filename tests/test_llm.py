@@ -223,6 +223,20 @@ def test_context_shrinks_without_gpu_offload() -> None:
     assert llm.plan_context(model, _profile(ram_gb=32, vram_gb=12, offload=True)) == model.context
 
 
+def test_fit_max_tokens_leaves_room_in_the_window() -> None:
+    messages = [{"role": "user", "content": "вопрос " * 800}]
+    options = llm.GenerationOptions(max_tokens=900)
+    fitted = llm.fit_max_tokens(messages, options, 4096)
+    assert 24 <= fitted < 900
+    with pytest.raises(llm.RuntimeUnavailable):
+        llm.fit_max_tokens(
+            [{"role": "user", "content": "ж" * 20000}],
+            options,
+            4096,
+        )
+    assert llm.is_context_overflow(ValueError("Requested tokens (16415) exceed context window of 4096"))
+
+
 def test_recommendation_ignores_a_card_from_another_vendor_without_offload() -> None:
     """Radeon и Intel без рабочей сборки не дают права советовать тяжёлую модель."""
 

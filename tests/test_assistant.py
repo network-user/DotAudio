@@ -660,3 +660,105 @@ def test_blended_search_uses_embeddings_when_given() -> None:
     assert lexical_only
     assert blended
     assert blended[0][0] == 1
+
+
+def test_clip_text_breaks_on_a_sentence() -> None:
+    text = (
+        "Первое предложение про смету и сроки. "
+        "Второе предложение ещё длиннее и уже не должно попасть в обрезку."
+    )
+    clipped = core.clip_text(text, 50)
+    assert clipped.endswith("…")
+    assert "Первое" in clipped
+    assert "Второе" not in clipped
+
+
+def test_overview_question_is_recognised() -> None:
+    assert core.looks_like_overview("о чём этот подкаст?")
+    assert core.looks_like_overview("Изложи кратко запись")
+    assert not core.looks_like_overview("что решили по смете?")
+    assert not core.looks_like_overview("о чём они договорились по срокам?")
+
+
+def test_half_hour_record_is_not_sent_whole_on_4k_window() -> None:
+    """Получасовой выпуск на окне 4096 раньше уходил целиком и падал в llama.cpp."""
+
+    segments = [
+        {
+            "id": index,
+            "start": float(index * 20),
+            "end": float(index * 20 + 19),
+            "text": f"фраза {index} про выпуск и гостей " + "слово " * 35,
+        }
+        for index in range(90)
+    ]
+    chunks = build_chunks(segments)
+    model = _Recorder(default="Кратко о выпуске")
+    helper = TranscriptAssistant(
+        respond=model,
+        context_tokens=4096,
+        digests=DigestCache(),
+    )
+
+    answer = helper.answer("о чём этот подкаст?", "rec", chunks)
+
+    assert answer.mode != "full"
+    assert chunks
+    for prompt in model.prompts:
+        assert (
+            core.estimate_tokens(prompt) + core.reserved_tokens(4096, 400)
+            <= 4096 + 40
+        )
+
+
+def test_many_hits_do_not_overflow_small_window() -> None:
+    """Редкое слово в каждой части не значит «открой все шесть»."""
+
+    segments = [
+        {
+            "id": index,
+            "start": float(index * 160),
+            "end": float(index * 160 + 140),
+            "text": (
+                "квантиль и подробный разбор темы " * 70
+                if index < 6
+                else "обычный разговор без этой метки " * 70
+            ),
+        }
+        for index in range(20)
+    ]
+    chunks = build_chunks(segments, target_seconds=1.0, max_chars=100000)
+    model = _Recorder(default="Про квантиль")
+    helper = TranscriptAssistant(respond=model, context_tokens=4096, digests=DigestCache())
+
+    answer = helper.answer("что сказали про квантиль?", "rec", chunks)
+
+    assert answer.mode == "search"
+    assert 0 < len(answer.opened) <= 3
+    prompt = model.prompts[-1]
+    assert prompt.count("Часть ") <= 3
+    assert core.estimate_tokens(prompt) + core.reserved_tokens(4096, 400) <= 4096 + 40
+
+
+def test_huge_attached_file_is_split_like_a_record() -> None:
+    body = ("Смета и сроки проекта. " * 250) + "\n\n" + ("Найм и отпуска команды. " * 250)
+    model = _Recorder(default="выжимка")
+    helper = TranscriptAssistant(
+        respond=model,
+        context_tokens=4096,
+        digests=DigestCache(),
+    )
+
+    helper.chat("что в файле про смету?", material=body, material_name="pod.txt")
+
+    assert all(
+        core.estimate_tokens(prompt) + core.reserved_tokens(4096, 400) <= 4096 + 40
+        for prompt in model.prompts
+    )
+    assert any("смет" in prompt.casefold() for prompt in model.prompts)
+
+
+def test_plain_text_chunks_keep_order() -> None:
+    chunks = core.chunks_from_text("Первый абзац.\n\n" + ("Второй длинный. " * 400))
+    assert len(chunks) >= 2
+    assert chunks[0].text.startswith("Первый")

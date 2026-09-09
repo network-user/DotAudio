@@ -10,7 +10,7 @@ import json
 import sys
 from typing import Any
 
-from dotaudio.llm import RuntimeUnavailable, _ThinkFilter
+from dotaudio.llm import CONTEXT_OVERFLOW, RuntimeUnavailable, _ThinkFilter, is_context_overflow
 
 
 def _write(payload: dict) -> None:
@@ -72,13 +72,18 @@ def _chat(payload: dict) -> None:
         raise RuntimeUnavailable("Модель не загружена")
     messages = payload["messages"]
     options = payload.get("options") or {}
-    stream = model.create_chat_completion(
-        messages=messages,
-        temperature=float(options.get("temperature", 0.3)),
-        top_p=float(options.get("top_p", 0.9)),
-        max_tokens=int(options.get("max_tokens", 900)),
-        stream=True,
-    )
+    try:
+        stream = model.create_chat_completion(
+            messages=messages,
+            temperature=float(options.get("temperature", 0.3)),
+            top_p=float(options.get("top_p", 0.9)),
+            max_tokens=int(options.get("max_tokens", 900)),
+            stream=True,
+        )
+    except ValueError as error:
+        if is_context_overflow(error):
+            raise RuntimeUnavailable(CONTEXT_OVERFLOW) from error
+        raise
     think = _ThinkFilter()
     pieces: list[str] = []
     for chunk in stream:
