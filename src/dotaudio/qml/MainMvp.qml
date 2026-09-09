@@ -367,6 +367,8 @@ ApplicationWindow {
     Connections {
         target: bridge
         function onIslandRequested() {
+            dictationOut.stop()
+            dictationIsland.appear = 0
             dictationIsland.visible = false
             root.collapse()
             root.show()
@@ -381,8 +383,7 @@ ApplicationWindow {
             root.showDictationIsland()
         }
         function onDictationIslandDismiss() {
-            dictationIsland.visible = false
-            dictationIsland.dragging = false
+            root.dismissDictationIsland()
         }
         function onCaptureStarted(_sid, _when) {
             if (Boolean(bridge.settings.live_auto_window)
@@ -404,19 +405,52 @@ ApplicationWindow {
         }
     }
 
+    // Размер фазы «caption»: HWND не морфим между listen/caption/result —
+    // скачки SetWindowPos и были главным дёрганьем.
+    readonly property int dictationIslandW: 552
+    readonly property int dictationIslandH: 108
+    readonly property int dictationIslandR: 32
+
     function showDictationIsland() {
+        dictationOut.stop()
         if (!dictationIsland.userPlaced) {
             if (root.islandCenterX >= 0) {
-                dictationIsland.x = Math.round(root.islandCenterX - root.islandW / 2)
+                dictationIsland.x = Math.round(root.islandCenterX - root.dictationIslandW / 2)
                 dictationIsland.y = Math.round(root.islandTopY)
             } else {
-                dictationIsland.x = Math.round((Screen.width - root.islandW) / 2)
+                dictationIsland.x = Math.round((Screen.width - root.dictationIslandW) / 2)
                 dictationIsland.y = 32
             }
         }
+        var reduce = Boolean(bridge.settings.reduce_motion)
         dictationIsland.visible = true
         dictationIsland.show()
         dictationIsland.raise()
+        if (reduce) {
+            dictationIsland.appear = 1
+            dictationChrome.shellRise = 0
+            return
+        }
+        if (dictationIsland.appear < 0.05) {
+            dictationIsland.appear = 0
+            dictationChrome.shellRise = 12
+        }
+        dictationIn.restart()
+    }
+
+    function dismissDictationIsland() {
+        dictationIn.stop()
+        dictationIsland.dragging = false
+        if (!dictationIsland.visible) {
+            dictationIsland.appear = 0
+            return
+        }
+        if (Boolean(bridge.settings.reduce_motion) || dictationIsland.appear < 0.05) {
+            dictationIsland.appear = 0
+            dictationIsland.visible = false
+            return
+        }
+        dictationOut.restart()
     }
 
     function saveDictationIslandPos() {
@@ -432,25 +466,32 @@ ApplicationWindow {
         id: dictationIsland
         title: "DotAudio · диктовка"
         visible: false
-        width: root.islandW
-        height: root.islandH
-        color: Theme.surface
+        width: root.dictationIslandW
+        height: root.dictationIslandH
+        color: "transparent"
         flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
         property bool userPlaced: false
         property bool dragging: false
+        property real appear: 0
+        opacity: appear
 
         MiniIsland {
             id: dictationChrome
             anchors.fill: parent
             phase: root.islandPhase
-            radius: root.islandR
+            radius: root.dictationIslandR
             clickThrough: false
             shellRise: 0
+            opacity: Math.max(0.9, Number(bridge.settings.island_opacity))
             onRequestApp: {
+                dictationOut.stop()
+                dictationIsland.appear = 0
                 dictationIsland.visible = false
                 root.openApp(page)
             }
             onRequestTheater: {
+                dictationOut.stop()
+                dictationIsland.appear = 0
                 dictationIsland.visible = false
                 root.openTheater()
             }
@@ -477,13 +518,51 @@ ApplicationWindow {
                 root.saveDictationIslandPos()
             }
         }
+    }
 
-        onWidthChanged: {
-            // Пока пользователь не двигал остров - держим по центру при морфе.
-            if (!visible || dragging || userPlaced)
-                return
-            var cx = root.islandCenterX >= 0 ? root.islandCenterX : Screen.width / 2
-            x = Math.round(cx - width / 2)
+    ParallelAnimation {
+        id: dictationIn
+        NumberAnimation {
+            target: dictationIsland
+            property: "appear"
+            to: 1
+            duration: Theme.islandInMs
+            easing.type: Easing.Bezier
+            easing.bezierCurve: Theme.easeOut
+        }
+        NumberAnimation {
+            target: dictationChrome
+            property: "shellRise"
+            to: 0
+            duration: Theme.islandInMs
+            easing.type: Easing.Bezier
+            easing.bezierCurve: Theme.easeOut
+        }
+    }
+
+    ParallelAnimation {
+        id: dictationOut
+        NumberAnimation {
+            target: dictationIsland
+            property: "appear"
+            to: 0
+            duration: Theme.islandOutMs
+            easing.type: Easing.Bezier
+            easing.bezierCurve: Theme.easeExit
+        }
+        NumberAnimation {
+            target: dictationChrome
+            property: "shellRise"
+            to: 8
+            duration: Theme.islandOutMs
+            easing.type: Easing.Bezier
+            easing.bezierCurve: Theme.easeExit
+        }
+        onStopped: {
+            if (dictationIsland.appear < 0.05) {
+                dictationIsland.visible = false
+                dictationChrome.shellRise = 0
+            }
         }
     }
 

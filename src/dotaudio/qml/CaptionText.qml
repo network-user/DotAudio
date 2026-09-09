@@ -76,7 +76,7 @@ Item {
     Behavior on opacity {
         enabled: !root.reduceMotion
         NumberAnimation {
-            duration: Theme.contentMs
+            duration: Theme.baseMs
             easing.type: Easing.Bezier
             easing.bezierCurve: Theme.easeOut
         }
@@ -100,9 +100,28 @@ Item {
         wrapMode: Text.Wrap
         horizontalAlignment: root.align
         visible: !root.empty
+        // Хвост черновика чуть мягче вспыхивает, когда дописываются слова.
+        opacity: block.inkFade
         transform: Translate { y: block.rise }
         property real rise: 0
+        property real inkFade: 1
         property string settledKey: ""
+        property string lastMarkup: ""
+    }
+
+    onDisplayMarkupChanged: {
+        if (root.reduceMotion || root.empty)
+            return
+        // Не анимируем каждый тик: только когда текст реально вырос или сменился.
+        if (displayMarkup === block.lastMarkup)
+            return
+        var grew = displayMarkup.length > block.lastMarkup.length
+                && displayMarkup.indexOf(block.lastMarkup) === 0
+        block.lastMarkup = displayMarkup
+        if (!grew && !root.splitDraft)
+            return
+        block.inkFade = 0.72
+        inkIn.restart()
     }
 
     onPhraseKeyChanged: {
@@ -110,7 +129,7 @@ Item {
             return
         if (phraseKey.length && phraseKey !== block.settledKey) {
             block.settledKey = phraseKey
-            block.rise = 6
+            block.rise = 5
             riseIn.restart()
         } else if (!phraseKey.length) {
             block.settledKey = ""
@@ -122,7 +141,17 @@ Item {
         target: block
         property: "rise"
         to: 0
-        duration: root.reduceMotion ? 0 : Theme.fastMs
+        duration: root.reduceMotion ? 0 : Theme.baseMs
+        easing.type: Easing.Bezier
+        easing.bezierCurve: Theme.easeOut
+    }
+
+    NumberAnimation {
+        id: inkIn
+        target: block
+        property: "inkFade"
+        to: 1
+        duration: root.reduceMotion ? 0 : Theme.contentMs
         easing.type: Easing.Bezier
         easing.bezierCurve: Theme.easeOut
     }

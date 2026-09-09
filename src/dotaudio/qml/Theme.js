@@ -91,6 +91,10 @@ var morphMs = 260
 var reflowMs = 300
 var promoteMs = 420
 var contentMs = 170
+// Появление/уход Tool-острова диктовки и смена фазы внутри него.
+var islandInMs = 280
+var islandOutMs = 220
+var phaseMs = 260
 
 // Кривые. easeOut - мягкое торможение без отката, для появления текста.
 // easeSpring - лёгкий перелёт для морфа острова и нажатий.

@@ -457,21 +457,21 @@ Rectangle {
         onShownChanged: yShift = shown ? 3 : 0
         Behavior on opacity {
             NumberAnimation {
-                duration: shown ? Theme.baseMs : Theme.fastMs
+                duration: shown ? Theme.phaseMs : Theme.fastMs
                 easing.type: Easing.Bezier
-                easing.bezierCurve: Theme.easeOut
+                easing.bezierCurve: shown ? Theme.easeOut : Theme.easeExit
             }
         }
         Behavior on scale {
             NumberAnimation {
-                duration: Theme.baseMs
+                duration: Theme.phaseMs
                 easing.type: Easing.Bezier
                 easing.bezierCurve: Theme.easeOut
             }
         }
         Behavior on yShift {
             NumberAnimation {
-                duration: Theme.baseMs
+                duration: Theme.phaseMs
                 easing.type: Easing.Bezier
                 easing.bezierCurve: Theme.easeOut
             }
