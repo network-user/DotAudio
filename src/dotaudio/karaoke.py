@@ -11,6 +11,8 @@ import subprocess
 from collections.abc import Iterable
 from typing import Any
 
+from dotaudio.tools_ffmpeg import resolve_ffmpeg
+
 
 def _ass_time(seconds: float) -> str:
     total = max(0, int(round(float(seconds) * 100)))
@@ -99,24 +101,30 @@ def render_video(
     source = str(media_path)
     ass_filter_path = str(ass_path).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
     subtitle_filter = f"ass=filename='{ass_filter_path}'"
-    if source.lower().endswith(tuple(VIDEO_EXTENSIONS)):
+    is_video = source.lower().endswith(tuple(VIDEO_EXTENSIONS))
+    if not is_video and not cover_path:
+        raise ValueError("для аудио выберите обложку перед экспортом видео")
+    ffmpeg = resolve_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError(
+            "FFmpeg не найден. Запустите автонастройку или установите FFmpeg в PATH."
+        )
+    if is_video:
         command = [
-            "ffmpeg", "-y", "-i", source, "-vf", subtitle_filter,
+            ffmpeg, "-y", "-i", source, "-vf", subtitle_filter,
             "-c:v", "libx264", "-crf", "20", "-preset", "medium",
             "-c:a", "copy", output_path,
         ]
-    elif cover_path:
+    else:
         command = [
-            "ffmpeg", "-y", "-loop", "1", "-i", str(cover_path), "-i", source,
+            ffmpeg, "-y", "-loop", "1", "-i", str(cover_path), "-i", source,
             "-vf", subtitle_filter, "-c:v", "libx264", "-crf", "20",
             "-preset", "medium", "-c:a", "aac", "-shortest", output_path,
         ]
-    else:
-        raise ValueError("для аудио выберите обложку перед экспортом видео")
     try:
         subprocess.run(command, check=True, stdin=subprocess.DEVNULL, capture_output=True)
     except FileNotFoundError as error:
-        raise RuntimeError("FFmpeg не найден в PATH. Установите FFmpeg и повторите экспорт.") from error
+        raise RuntimeError("FFmpeg не найден. Запустите автонастройку или установите FFmpeg в PATH.") from error
     except subprocess.CalledProcessError as error:
         detail = error.stderr.decode("utf-8", errors="replace").strip().splitlines()
         message = detail[-1] if detail else "FFmpeg завершился с ошибкой"

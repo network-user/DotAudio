@@ -1192,14 +1192,15 @@ Binding держал центр острова и одновременно пе�
 Проверки: `tests/test_setup.py`, полный `pytest -q` (337 passed, 11 skipped),
 `ruff check`, QML smoke-test offscreen.
 
-### Дополнение: NeMo и инструменты в автонастройке
+### Дополнение: умный пропуск, FFmpeg и докачка NeMo
 
-- Шаг `nemo`: скачивает zip NeMo-Speech.cpp с GitHub Releases (CUDA при
-  NVIDIA, иначе CPU), проверяет SHA-256, ставит в `%LOCALAPPDATA%\Programs\NeMoSpeech`,
-  затем `nemo-speech pull sortformer` (~140 МБ).
-- В брифинге переключатель «NVIDIA NeMo · голоса»; после успеха
-  `diarize_engine=nemo` и `refreshDiarizeStatus`.
-- FFmpeg: только статус в брифинге (в PATH / нет), автоустановки нет.
+- Если Whisper/LLM/NeMo/FFmpeg уже на диске и CUDA runtime не нужен,
+  мастер при обычном старте не показывается (`can_skip_setup`); из Настроек
+  «Запустить снова» всегда открывает брифинг (`beginForced`).
+- Портативный FFmpeg: `tools_ffmpeg.py` → `data_dir/tools/ffmpeg`; PATH
+  предпочтительнее. Караоке и HTTP-эфиры ищут через `resolve_ffmpeg`.
+- Zip NeMo качается в `%LOCALAPPDATA%/DotAudio/cache/nemo` с Range-докачкой;
+  отмена оставляет `*.part`, tempfile только для распаковки.
 
 ## Итерация холста острова, 2026-09-09
 
@@ -1236,3 +1237,15 @@ Binding держал центр острова и одновременно пе�
 (`ReleaseCapture` + `WM_NCLBUTTONDOWN`/`HTCAPTION`) после порога 4 px.
 Behavior по width/height убран (ломал layout); вместо него лёгкий scale-pulse.
 Маска на время drag снимается.
+
+## Итерация визуального drag острова, 2026-09-09
+
+Предыдущие попытки (screenX→win.x, HTCAPTION) не дали плавности: на Qt Quick
+`WM_NCLBUTTONDOWN/HTCAPTION` сразу отпускает захват, Binding якоря снова
+включается; покадровый SetWindowPos всегда ступенчатый у DWM.
+
+Новый путь для острова: на время жеста HWND растягивается на виртуальный
+стол, хром едет через `x/y` Item + `FrameAnimation`/`QCursor` (Scene Graph),
+а реальное положение окна фиксируется одним SetWindowPos при отпускании.
+Live-сцена и зал — только `startSystemMove` с удержанием `dragging` до
+отпускания кнопки.

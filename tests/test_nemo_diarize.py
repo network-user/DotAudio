@@ -168,6 +168,55 @@ def test_install_runtime_refuses_non_windows(monkeypatch):
         nemo_diarize.install_runtime()
 
 
+def test_download_keeps_part_on_cancel(tmp_path, monkeypatch):
+    """Отмена оставляет .part в кеше, а не в tempfile."""
+
+    from threading import Event
+
+    calls = {"n": 0}
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"Content-Length": "20"}
+
+        def raise_for_status(self):
+            return None
+
+        def iter_bytes(self, size):
+            yield b"1234567890"
+            calls["n"] += 1
+            if calls["n"] >= 1:
+                cancel.set()
+            yield b"abcdefghij"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def stream(self, *a, **k):
+            return FakeResponse()
+
+    cancel = Event()
+    monkeypatch.setattr(nemo_diarize.httpx, "Client", FakeClient)
+    monkeypatch.setattr(nemo_diarize, "download_cache_dir", lambda: tmp_path)
+    target = tmp_path / "nemo.zip"
+    with pytest.raises(nemo_diarize.InstallCancelled):
+        nemo_diarize._download_file("https://example.test/nemo.zip", target, cancel=cancel)
+    assert target.with_suffix(".zip.part").exists() or (tmp_path / "nemo.zip.part").exists()
+
+
 @pytest.mark.parametrize(
     "device, expected",
     [("", False), ("auto", False), ("cpu", True), ("cuda", True)],

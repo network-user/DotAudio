@@ -423,12 +423,52 @@ Item {
                     }
 
                     Label {
-                        visible: !Boolean(setup.briefing.ffmpegReady)
+                        visible: !Boolean(setup.briefing.ffmpegReady) && !Boolean(setup.briefing.downloadFfmpeg)
                         Layout.fillWidth: true
-                        text: "FFmpeg не найден в PATH. Караоке-экспорт и разбор эфиров попросят поставить его отдельно."
+                        text: "FFmpeg отключён: караоке-экспорт и разбор эфиров будут недоступны, пока не поставите его."
                         color: Theme.faint
                         font.pixelSize: Theme.fsSmall
                         wrapMode: Text.Wrap
+                    }
+
+                    // FFmpeg
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: ffmpegRow.implicitHeight + 24
+                        radius: Theme.radiusMd
+                        color: Theme.surface2
+                        border.width: 1
+                        border.color: Theme.hairline
+                        RowLayout {
+                            id: ffmpegRow
+                            anchors.fill: parent
+                            anchors.margins: 12
+                            spacing: Theme.gapMd
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+                                Label {
+                                    text: "FFmpeg"
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fsTitle
+                                    font.weight: Font.DemiBold
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: setup.briefing.ffmpegReady
+                                          ? "Найден в PATH или в папке tools"
+                                          : ("Портативная сборка · ~" + (setup.briefing.ffmpegMb || 0) + " МБ · караоке и эфиры")
+                                    color: Theme.muted
+                                    font.pixelSize: Theme.fsSmall
+                                    wrapMode: Text.Wrap
+                                }
+                            }
+                            ToggleSwitch {
+                                checked: Boolean(setup.briefing.downloadFfmpeg) || Boolean(setup.briefing.ffmpegReady)
+                                enabled: !Boolean(setup.briefing.ffmpegReady)
+                                onToggled: setup.updateBriefing({ downloadFfmpeg: checked })
+                            }
+                        }
                     }
 
                     Label {

@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import shutil
 from typing import Any
 
 from dotaudio.adapt import (
@@ -18,6 +17,8 @@ from dotaudio.adapt import (
 )
 from dotaudio.llm import MODELS_BY_ID, get_model, recommend_model
 from dotaudio.nemo_diarize import MODEL_DOWNLOAD_MB, RUNTIME_DOWNLOAD_MB
+from dotaudio.tools_ffmpeg import FFMPEG_DOWNLOAD_MB
+from dotaudio.tools_ffmpeg import ffmpeg_available as _ffmpeg_available
 
 # Оценки размера кеша faster-whisper. Должны совпадать с MODEL_CATALOG
 # в controller.py; здесь дублируются, чтобы модуль оставался Qt-free.
@@ -47,10 +48,33 @@ def _mb(value: float | int | None) -> int:
         return 0
 
 
-def ffmpeg_available() -> bool:
-    """FFmpeg в PATH: нужен для караоке-экспорта и HTTP-потоков."""
+def ffmpeg_available(data_dir=None) -> bool:
+    """FFmpeg в PATH или портативная копия в data_dir."""
 
-    return shutil.which("ffmpeg") is not None
+    return _ffmpeg_available(data_dir)
+
+
+def can_skip_setup(briefing: dict[str, Any]) -> bool:
+    """Всё нужное уже на диске: мастер можно не показывать.
+
+    CUDA runtime, если ещё нужен, блокирует пропуск. Whisper, LLM, NeMo и
+    FFmpeg должны быть готовы (или явно отключены в брифинге).
+    """
+
+    if briefing.get("useGpu") and briefing.get("cudaNeeded"):
+        return False
+    if briefing.get("downloadWhisper"):
+        return False
+    if briefing.get("downloadLlm"):
+        return False
+    if briefing.get("downloadNemo"):
+        return False
+    if briefing.get("downloadFfmpeg"):
+        return False
+    # Рекомендованный Whisper хотя бы в кеше.
+    if not briefing.get("whisperReady"):
+        return False
+    return True
 
 
 def recommend_llm_id(hardware: dict) -> str:
@@ -188,8 +212,12 @@ def technology_cards(
         {
             "id": "ffmpeg",
             "title": "FFmpeg",
-            "detail": "в PATH" if ffmpeg_ready else "не найден · караоке и эфиры",
-            "state": "ready" if ffmpeg_ready else "info",
+            "detail": (
+                "в PATH или портативный"
+                if ffmpeg_ready
+                else "нужен для караоке и эфиров"
+            ),
+            "state": "ready" if ffmpeg_ready else "needed",
         }
     )
     cards.append(
@@ -227,6 +255,7 @@ def build_briefing(
     nemo_mb = 0 if nemo_ready else (RUNTIME_DOWNLOAD_MB + MODEL_DOWNLOAD_MB)
     if ffmpeg_ready is None:
         ffmpeg_ready = ffmpeg_available()
+    ffmpeg_mb = 0 if ffmpeg_ready else FFMPEG_DOWNLOAD_MB
     total_mb = 0
     if cuda_needed:
         total_mb += cuda_mb
@@ -236,6 +265,8 @@ def build_briefing(
         total_mb += llm_mb
     if not nemo_ready:
         total_mb += nemo_mb
+    if not ffmpeg_ready:
+        total_mb += ffmpeg_mb
     hint = str(hardware.get("computeHint") or "") or integrated_whisper_hint(hardware) or plan.note
     return {
         "whisperModel": model,
@@ -263,6 +294,8 @@ def build_briefing(
         "nemoMb": nemo_mb if not nemo_ready else 0,
         "nemoPreferCuda": prefer_cuda,
         "ffmpegReady": bool(ffmpeg_ready),
+        "downloadFfmpeg": not bool(ffmpeg_ready),
+        "ffmpegMb": ffmpeg_mb,
         "totalMb": total_mb,
         "computeHint": hint,
         "gpuLabel": str(hardware.get("gpuLabel") or hardware.get("gpuName") or ""),
@@ -345,6 +378,15 @@ def build_steps(briefing: dict[str, Any]) -> list[dict[str, Any]]:
                 "weight": 20,
             }
         )
+    if briefing.get("downloadFfmpeg"):
+        steps.append(
+            {
+                "id": "ffmpeg",
+                "title": "FFmpeg",
+                "detail": f"Портативная сборка · ~{int(briefing.get('ffmpegMb') or 0)} МБ",
+                "weight": 12,
+            }
+        )
     return steps
 
 
@@ -372,6 +414,8 @@ def merge_briefing(base: dict[str, Any], overrides: dict[str, Any] | None) -> di
         result["downloadWhisper"] = bool(data["downloadWhisper"])
     if "downloadNemo" in data:
         result["downloadNemo"] = bool(data["downloadNemo"])
+    if "downloadFfmpeg" in data:
+        result["downloadFfmpeg"] = bool(data["downloadFfmpeg"])
 
     llm_id = str(data.get("llmId") or result.get("llmId") or "")
     if llm_id in MODELS_BY_ID:
@@ -398,6 +442,11 @@ def merge_briefing(base: dict[str, Any], overrides: dict[str, Any] | None) -> di
     else:
         result["nemoMb"] = 0
 
+    if result.get("downloadFfmpeg") and not result.get("ffmpegReady"):
+        result["ffmpegMb"] = FFMPEG_DOWNLOAD_MB
+    else:
+        result["ffmpegMb"] = 0
+
     total = 0
     if result.get("useGpu") and result.get("cudaNeeded"):
         total += int(result.get("cudaMb") or 0)
@@ -407,6 +456,8 @@ def merge_briefing(base: dict[str, Any], overrides: dict[str, Any] | None) -> di
         total += int(result.get("nemoMb") or 0)
     if result.get("downloadLlm"):
         total += int(result.get("llmMb") or 0)
+    if result.get("downloadFfmpeg"):
+        total += int(result.get("ffmpegMb") or 0)
     result["totalMb"] = total
     return result
 
@@ -417,6 +468,7 @@ __all__ = [
     "WHISPER_LABELS",
     "build_briefing",
     "build_steps",
+    "can_skip_setup",
     "ffmpeg_available",
     "merge_briefing",
     "plan_whisper",

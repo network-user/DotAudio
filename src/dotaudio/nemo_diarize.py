@@ -81,6 +81,10 @@ class NemoUnavailable(RuntimeError):
     """Рантайм NeMo не установлен или собран без диаризации."""
 
 
+class InstallCancelled(RuntimeError):
+    """Установка прервана; частичный zip остаётся в кеше для докачки."""
+
+
 @dataclass(slots=True, frozen=True)
 class Turn:
     """Отрезок речи одного голоса: секунды от начала записи."""
@@ -265,11 +269,23 @@ def install_prefix() -> Path:
     return Path.home() / ".local" / "nemo-speech"
 
 
+def download_cache_dir() -> Path:
+    """Устойчивый кеш zip: не в tempfile, чтобы отмена сохраняла докачку."""
+
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        root = Path(local) / "DotAudio" / "cache" / "nemo"
+    else:
+        root = Path.home() / ".cache" / "dotaudio" / "nemo"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def resolve_release_version(cancel: Event | None = None) -> str:
     """Версия из upstream VERSION; при сбое - пустая строка."""
 
     if cancel is not None and cancel.is_set():
-        raise RuntimeError("установка NeMo отменена")
+        raise InstallCancelled("установка NeMo отменена")
     try:
         with httpx.Client(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT) as client:
             response = client.get(VERSION_URL)
@@ -358,7 +374,7 @@ def _download_file(
                 for chunk in response.iter_bytes(CHUNK_BYTES):
                     if cancel is not None and cancel.is_set():
                         handle.flush()
-                        raise RuntimeError("установка NeMo отменена")
+                        raise InstallCancelled("установка NeMo отменена")
                     handle.write(chunk)
                     done += len(chunk)
                     if done >= next_report:
@@ -419,7 +435,7 @@ def install_runtime(
     if not version:
         raise RuntimeError("не удалось узнать версию NeMo-Speech.cpp")
     if cancel is not None and cancel.is_set():
-        raise RuntimeError("установка NeMo отменена")
+        raise InstallCancelled("установка NeMo отменена")
 
     selected = preferred_backend(prefer_cuda=prefer_cuda) if backend == "auto" else backend
     if selected not in {"cpu", "cuda"}:
@@ -431,9 +447,10 @@ def install_runtime(
     url = f"{RELEASE_BASE}/download/{tag}/{archive_name}"
 
     target_root = Path(prefix) if prefix is not None else install_prefix()
+    cache = download_cache_dir()
+    archive_path = cache / archive_name
+    digest_path = cache / f"{archive_name}.sha256"
     work = Path(tempfile.mkdtemp(prefix="dotaudio-nemo-setup-"))
-    archive_path = work / archive_name
-    digest_path = work / f"{archive_name}.sha256"
     try:
         progress("download", 5.0, f"Скачиваем {archive_name}…")
         try:
@@ -445,14 +462,16 @@ def install_runtime(
                 progress_start=5.0,
                 progress_span=55.0,
             )
+        except InstallCancelled:
+            raise
         except Exception:
             if selected == "cuda":
                 # Нет CUDA-сборки - берём CPU, диаризация всё равно работает.
                 selected = "cpu"
                 archive_name = f"nemo-speech-{release_version}-windows-{arch}-{selected}.zip"
                 url = f"{RELEASE_BASE}/download/{tag}/{archive_name}"
-                archive_path = work / archive_name
-                digest_path = work / f"{archive_name}.sha256"
+                archive_path = cache / archive_name
+                digest_path = cache / f"{archive_name}.sha256"
                 _download_file(
                     url,
                     archive_path,
@@ -463,6 +482,9 @@ def install_runtime(
                 )
             else:
                 raise
+
+        if cancel is not None and cancel.is_set():
+            raise InstallCancelled("установка NeMo отменена")
 
         progress("checksum", 62.0, "Проверяем контрольную сумму…")
         _download_file(
@@ -506,6 +528,9 @@ def install_runtime(
         path = str(target_root / "bin" / "nemo-speech.exe")
         if not Path(path).is_file():
             raise RuntimeError("после установки не найден nemo-speech.exe")
+        # Zip больше не нужен: место на диске важнее повторной распаковки.
+        archive_path.unlink(missing_ok=True)
+        digest_path.unlink(missing_ok=True)
         progress("ready", 100.0, f"NeMo {release_version} · {selected}")
         return {
             "ok": True,
@@ -619,9 +644,11 @@ __all__ = [
     "MAX_SPEAKERS",
     "MODEL_DOWNLOAD_MB",
     "NemoUnavailable",
+    "InstallCancelled",
     "RUNTIME_DOWNLOAD_MB",
     "Turn",
     "diarize_audio",
+    "download_cache_dir",
     "ensure_model",
     "executable",
     "install_command",

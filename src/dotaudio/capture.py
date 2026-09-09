@@ -894,8 +894,16 @@ class StreamCapture(_CallbackDispatcher):
         return url
 
     def _read_loop(self) -> None:
+        from dotaudio.tools_ffmpeg import resolve_ffmpeg
+
+        ffmpeg = resolve_ffmpeg()
+        if not ffmpeg:
+            self._error(
+                "FFmpeg не найден. Запустите автонастройку или установите FFmpeg в PATH."
+            )
+            return
         command = [
-            "ffmpeg",
+            ffmpeg,
             "-nostdin",
             "-hide_banner",
             "-loglevel",

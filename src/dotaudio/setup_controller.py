@@ -44,6 +44,8 @@ def _empty_briefing() -> dict:
         "nemoMb": 0,
         "nemoPreferCuda": False,
         "ffmpegReady": False,
+        "downloadFfmpeg": True,
+        "ffmpegMb": 0,
         "totalMb": 0,
         "computeHint": "",
         "gpuLabel": "",
@@ -66,10 +68,12 @@ class SetupController(QObject):
         super().__init__()
         self.controller = controller
         self.assistant = assistant
-        self.models_dir = modelhub.models_root(Path(data_dir), "llm")
+        self.data_dir = Path(data_dir)
+        self.models_dir = modelhub.models_root(self.data_dir, "llm")
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
         self._needed = not bool(controller.setting("setup_completed", False))
+        self._force = False
         self._phase = "idle"
         self._hardware: dict = {}
         self._briefing = _empty_briefing()
@@ -140,8 +144,15 @@ class SetupController(QObject):
     def begin(self) -> None:
         """Старт опроса. Вызывать только если needed и не smoke-тест."""
 
+        self.beginForced(False)
+
+    @Slot(bool)
+    def beginForced(self, force) -> None:
+        """``force`` - всегда показать мастер (повтор из настроек)."""
+
         if self._busy and self._phase == "run":
             return
+        self._force = bool(force)
         if not self._needed and self._phase == "idle":
             self._needed = True
         self._phase = "scan"
@@ -152,6 +163,8 @@ class SetupController(QObject):
         self._steps = []
         self.changed.emit()
         self.progressChanged.emit()
+
+        data_dir = self.data_dir
 
         def work():
             try:
@@ -167,6 +180,7 @@ class SetupController(QObject):
                 }
             from dotaudio import nemo_diarize
             from dotaudio.setup import recommended_whisper
+            from dotaudio.tools_ffmpeg import ffmpeg_available
 
             model_name = recommended_whisper(summary)
             whisper_ready = bool(Engine.disk_status(model_name).get("ready"))
@@ -184,7 +198,7 @@ class SetupController(QObject):
                 "whisperReady": whisper_ready,
                 "llmReady": llm_ready,
                 "nemoReady": nemo_ready,
-                "ffmpegReady": plan.ffmpeg_available(),
+                "ffmpegReady": ffmpeg_available(data_dir),
             }
             self.scanFinished.emit(summary, readiness)
 
@@ -204,6 +218,22 @@ class SetupController(QObject):
             nemo_ready=bool(ready.get("nemoReady")),
             ffmpeg_ready=bool(ready.get("ffmpegReady")),
         )
+        # Всё уже на диске и это не ручной повтор - тихо закрываем мастер.
+        if not self._force and plan.can_skip_setup(self._briefing):
+            self._apply_settings(self._briefing)
+            self._mark_completed()
+            self._phase = "idle"
+            self._busy = False
+            self._message = ""
+            self._error = ""
+            self.changed.emit()
+            self.progressChanged.emit()
+            try:
+                self.controller.enableModelWarmup()
+                QTimer.singleShot(0, self.controller.prepareSelectedModel)
+            except Exception:
+                pass
+            return
         self._phase = "brief"
         self._busy = False
         self._message = "Краткий план под это устройство"
@@ -269,6 +299,8 @@ class SetupController(QObject):
                         self._run_nemo(briefing, cancel)
                     elif step_id == "llm":
                         self._run_llm(briefing, cancel)
+                    elif step_id == "ffmpeg":
+                        self._run_ffmpeg(cancel)
                     else:
                         continue
                 except Exception as exc:
@@ -430,6 +462,22 @@ class SetupController(QObject):
             raise RuntimeError("Загрузка языковой модели отменена")
         self.stepProgress.emit("llm", 100.0, "Файл на диске")
 
+    def _run_ffmpeg(self, cancel: threading.Event) -> None:
+        from dotaudio.tools_ffmpeg import FfmpegCancelled, ensure_ffmpeg
+
+        def progress(info):
+            raw = float((info or {}).get("percent") or 0.0)
+            message = str((info or {}).get("message") or "FFmpeg…")
+            self.stepProgress.emit("ffmpeg", raw, message)
+
+        try:
+            path = ensure_ffmpeg(self.data_dir, cancel=cancel, on_progress=progress)
+        except FfmpegCancelled as exc:
+            raise RuntimeError(str(exc) or "Загрузка FFmpeg остановлена") from exc
+        if cancel.is_set():
+            raise RuntimeError("Загрузка FFmpeg остановлена")
+        self.stepProgress.emit("ffmpeg", 100.0, path)
+
     # -- прогресс UI -------------------------------------------------------
 
     def _on_step_progress(self, step_id: str, percent: float, message: str) -> None:
@@ -572,4 +620,4 @@ class SetupController(QObject):
         self._needed = True
         self.controller.setSetting("setup_completed", False)
         self._phase = "idle"
-        self.begin()
+        self.beginForced(True)
