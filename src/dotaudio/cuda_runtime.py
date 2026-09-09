@@ -184,6 +184,7 @@ def compute_advice(profile: HardwareProfile) -> dict:
     other_dedicated = any(
         (not gpu.integrated) and gpu.vendor != VENDOR_NVIDIA for gpu in profile.gpus
     )
+    integrated_only = bool(profile.gpus) and all(gpu.integrated for gpu in profile.gpus)
     cuda_ready = profile.cuda_runtime_devices > 0
     packages = packages_present()
     missing = [name for name, ready in packages.items() if not ready]
@@ -202,6 +203,15 @@ def compute_advice(profile: HardwareProfile) -> dict:
     elif other_dedicated:
         state = "other_gpu"
         hint = "Найдена видеокарта без CUDA. Whisper останется на процессоре."
+        action = ""
+    elif integrated_only:
+        igpu = next((gpu for gpu in profile.gpus if gpu.integrated), None)
+        name = igpu.name if igpu is not None else "встроенная графика"
+        state = "integrated"
+        hint = (
+            f"{name} не ускоряет Whisper (CTranslate2 умеет только CUDA NVIDIA). "
+            "Распознавание идёт на процессоре; для Live лучше профиль «Быстро»."
+        )
         action = ""
     else:
         state = "cpu_only"

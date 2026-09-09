@@ -58,6 +58,7 @@ src/dotaudio/
   storage.py, transcripts.py        история и текстовый экспорт
   karaoke.py                        ASS и MP4-экспорт караоке
   hardware.py, cuda_runtime.py      железо, GPU любого вендора, сборки ускорения
+  adapt.py                          план Whisper/Live под класс машины
   modelhub.py                      скачивание файлов моделей с докачкой
   llm.py                           каталог языковых моделей, llama.cpp и Ollama
   assistant.py                     части записи, выжимки, поиск, действия

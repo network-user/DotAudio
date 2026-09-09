@@ -16,6 +16,7 @@ Lint: `.venv\Scripts\python.exe -m ruff check src tests`.
 не задавать свои цвета и длительности.
 
 Локальный ассистент по расшифровкам: `hardware.py` (железо и сборки ускорения),
+`adapt.py` (план Whisper/Live под класс машины: CUDA / Iris / слабый CPU),
 `modelhub.py` (загрузка файлов моделей), `llm.py` (каталог, llama.cpp и Ollama),
 `assistant.py` (части записи, выжимки, поиск), `assistant_controller.py` (мост).
 Нативная сборка `llama-cpp-python` необязательна и ставится extra `llm`.

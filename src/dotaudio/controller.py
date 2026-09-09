@@ -312,8 +312,6 @@ def model_fit(model: str, hardware: dict) -> dict:
     # Surface-класс: 4 потока целиком под small уже тесны для Live.
     if threads and threads <= 4 and cuda == 0 and spec["load"] >= 3:
         return {"state": "slow", "note": "Мало потоков CPU: берите «Быстро» (base)"}
-    if threads and threads < 4 and spec["load"] >= 3:
-        return {"state": "slow", "note": "Мало потоков CPU: берите «Быстро»"}
     return {"state": "ok", "note": "Подходит этому устройству"}
 
 

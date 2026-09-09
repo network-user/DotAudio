@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import mimetypes
-import os
 import time
 import wave
 from collections import OrderedDict, deque
@@ -177,14 +176,17 @@ def progress_tqdm_class(tracker: DownloadTracker) -> type:
 # synchronisation than it saves in arithmetic.  Measured on a 16-thread CPU with
 # the small model on a 7.2 s phrase: 1012 ms on two threads, 958 ms on four and
 # 1063 ms on sixteen.  Four is also what leaves the rest of the machine usable
-# while the user is in a call.
+# while the user is in a call.  On a 4-thread CPU the same cap would take every
+# core - adapt.live_cpu_threads leaves one for the UI.
 LIVE_MAX_CPU_THREADS = 4
 
 
 def live_cpu_threads() -> int:
     """Threads for local inference, bounded by what actually helps."""
 
-    return max(1, min(LIVE_MAX_CPU_THREADS, os.cpu_count() or 1))
+    from dotaudio.adapt import live_cpu_threads as _adapt_threads
+
+    return _adapt_threads()
 
 
 def stem(word: str) -> str:

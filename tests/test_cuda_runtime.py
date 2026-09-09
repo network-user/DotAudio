@@ -54,6 +54,24 @@ def test_compute_advice_other_gpu() -> None:
     assert advice["nvidiaPresent"] is False
 
 
+def test_compute_advice_integrated_iris() -> None:
+    from dotaudio.hardware import VENDOR_INTEL
+
+    gpu = GpuDevice(
+        index=0,
+        name="Intel(R) Iris(R) Xe Graphics",
+        vendor=VENDOR_INTEL,
+        vram_mb=2048,
+        integrated=True,
+    )
+    profile = HardwareProfile(threads=4, ram_gb=16.0, gpus=(gpu,), cuda_runtime_devices=0)
+    advice = compute_advice(profile)
+    assert advice["computeAdvice"] == "integrated"
+    assert "Iris" in advice["computeHint"]
+    assert advice["computeAction"] == ""
+    assert recommended_model({"threads": 4, "ram_gb": 16.0, "cuda_devices": 0, "gpus": [gpu.as_dict()]}) == "base"
+
+
 def test_recommended_model_prefers_medium_on_roomy_gpu() -> None:
     assert recommended_model({"threads": 8, "ram_gb": 32.0, "cuda_devices": 1, "gpuVramGb": 8.0}) == "medium"
     assert recommended_model({"threads": 8, "ram_gb": 16.0, "cuda_devices": 1, "gpuVramGb": 4.0}) == "small"
