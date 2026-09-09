@@ -5,7 +5,7 @@ import QtMultimedia
 import "Theme.js" as Theme
 
 // Транспорт аудио для страницы транскрибации: play/pause, seek,
-// воспроизведение одной фразы до её конца.
+// скорость, воспроизведение одной фразы и повтор последней.
 RowLayout {
     id: root
 
@@ -16,9 +16,14 @@ RowLayout {
     property bool playing: media.playbackState === MediaPlayer.PlayingState
     property real position: media.position
     property real duration: media.duration
+    readonly property real playbackRate: media.playbackRate
+    readonly property bool canRepeatPhrase: root._phraseEndSec >= 0
 
-    // Конец текущей фразы в мс; < 0 — без автопаузы.
+    // Конец текущей фразы в мс; < 0 - без автопаузы.
     property real _phraseEndMs: -1
+    // Последний диапазон фразы (секунды) для repeatPhrase.
+    property real _phraseStartSec: -1
+    property real _phraseEndSec: -1
 
     function clock(milliseconds) {
         var total = Math.max(0, Math.round(Number(milliseconds) / 1000))
@@ -26,6 +31,27 @@ RowLayout {
         var seconds = total % 60
         return (minutes < 10 ? "0" : "") + minutes
             + ":" + (seconds < 10 ? "0" : "") + seconds
+    }
+
+    readonly property string rateLabel: {
+        var r = root.playbackRate
+        if (Math.abs(r - 1.0) < 0.01)
+            return "1×"
+        if (Math.abs(r - 0.75) < 0.01)
+            return "0.75×"
+        if (Math.abs(r - 1.25) < 0.01)
+            return "1.25×"
+        return Number(r).toFixed(2).replace(/\.?0+$/, "") + "×"
+    }
+
+    function cyclePlaybackRate() {
+        var r = media.playbackRate
+        if (Math.abs(r - 0.75) < 0.01)
+            media.playbackRate = 1.0
+        else if (Math.abs(r - 1.0) < 0.01)
+            media.playbackRate = 1.25
+        else
+            media.playbackRate = 0.75
     }
 
     function play() {
@@ -50,9 +76,16 @@ RowLayout {
     }
 
     function playPhrase(startSec, endSec) {
+        root._phraseStartSec = Number(startSec)
+        root._phraseEndSec = Number(endSec)
         root._phraseEndMs = Number(endSec) * 1000
         root.seekSeconds(startSec)
         media.play()
+    }
+
+    function repeatPhrase() {
+        if (root._phraseStartSec >= 0 && root._phraseEndSec >= 0)
+            root.playPhrase(root._phraseStartSec, root._phraseEndSec)
     }
 
     function clearPhraseRange() {
@@ -78,6 +111,22 @@ RowLayout {
         onClicked: root.toggle()
         ToolTip.visible: hovered
         ToolTip.text: root.playing ? "Пауза" : "Воспроизвести"
+    }
+
+    IconButton {
+        iconName: "redo"
+        enabled: root.canRepeatPhrase
+        onClicked: root.repeatPhrase()
+        ToolTip.visible: hovered
+        ToolTip.text: "Ещё раз"
+    }
+
+    PillButton {
+        text: root.rateLabel
+        compact: true
+        onClicked: root.cyclePlaybackRate()
+        ToolTip.visible: hovered
+        ToolTip.text: "Скорость воспроизведения"
     }
 
     Label {
