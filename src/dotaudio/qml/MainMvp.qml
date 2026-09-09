@@ -107,7 +107,12 @@ ApplicationWindow {
     minimumWidth: shellMode === "app" ? 960 : 180
     minimumHeight: shellMode === "app" ? 640 : 40
     visible: true
-    color: shellMode === "app" ? Theme.bg : "transparent"
+    // Остров: непрозрачный холст того же тона, что хром. «transparent» на
+    // Windows часто даёт чёрный прямоугольник без текста, пока маска/fade
+    // не догонят HWND после recreate флагов.
+    color: shellMode === "app" ? Theme.bg
+           : shellMode === "island" ? Theme.surface
+           : "transparent"
     // Прозрачность острова — на хроме, не на HWND: иначе DWM дёргает при drag.
     opacity: 1
     font.family: Theme.fontFamily
@@ -269,6 +274,7 @@ ApplicationWindow {
         var wantTop = mode !== "app"
         var wantFramed = mode === "app"
         var wasFramed = root.shellMode === "app"
+        var sameShell = root.shellMode === mode
         var needFlags = root.stayOnTop !== wantTop || wantFramed !== wasFramed
         var wasVisible = root.visible
         if (needFlags && wasVisible)
@@ -279,13 +285,24 @@ ApplicationWindow {
             root.show()
         if (mode === "app")
             Qt.callLater(function () { bridge.refreshWindowChrome() })
-        if (mode === "island")
+        if (mode === "island") {
+            // После hide/show анимация shellFade часто обрывается: хром остаётся
+            // с opacity 0, а HWND - тёмный прямоугольник без подписей и кнопок.
+            root.shellFade = 1
+            root.shellRise = 0
+            root.refreshIslandMask()
             Qt.callLater(root.refreshIslandMask)
-        else
+        } else {
             bridge.clearWindowMask()
-        root.shellFade = 0
-        root.shellRise = mode === "island" ? 6 : 14
-        shellIn.restart()
+            if (!sameShell) {
+                root.shellFade = 0
+                root.shellRise = 14
+                shellIn.restart()
+            } else {
+                root.shellFade = 1
+                root.shellRise = 0
+            }
+        }
     }
 
     function openApp(page) {
@@ -327,7 +344,11 @@ ApplicationWindow {
         if (root.visibility === Window.Maximized)
             root.showNormal()
         root.enterShell("island", false)
-        bridge.applyIslandClickThrough(Boolean(bridge.settings.island_click_through))
+        // Во время диктовки остров обязан принимать клики (стоп / отмена).
+        if (bridge.page === "dictation" && (bridge.recording || bridge.busy))
+            bridge.applyIslandClickThrough(false)
+        else
+            bridge.applyIslandClickThrough(Boolean(bridge.settings.island_click_through))
     }
 
     Component.onCompleted: {
@@ -364,7 +385,14 @@ ApplicationWindow {
             root.collapse()
             root.show()
             root.raise()
-            root.requestActivate()
+            // Сразу видимый хром: иначе после recreate остаётся тёмный холст.
+            root.shellFade = 1
+            root.shellRise = 0
+            bridge.applyIslandClickThrough(false)
+            root.refreshIslandMask()
+            Qt.callLater(root.refreshIslandMask)
+            // Не забирать фокус у поля ввода - иначе диктовка «глушит» цель,
+            // а вставка потом ищет уже не то окно.
         }
         function onCaptureStarted(_sid, _when) {
             // Старт Live на «динамическом острове» по умолчанию разворачивает
@@ -382,6 +410,10 @@ ApplicationWindow {
                 quietTimer.stop()
                 root.quietHeld = false
             }
+            // Пока идёт диктовка, остров всегда кликабелен (стоп / крестик).
+            if (root.shellMode === "island" && bridge.page === "dictation"
+                    && (bridge.recording || bridge.busy))
+                bridge.applyIslandClickThrough(false)
         }
     }
 
@@ -516,12 +548,14 @@ ApplicationWindow {
         height: root.islandH
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.verticalCenter: parent.verticalCenter
-        opacity: root.shellFade * Math.max(0.9, Number(bridge.settings.island_opacity))
+        opacity: Math.max(0.92, root.shellFade) * Math.max(0.9, Number(bridge.settings.island_opacity))
         shellRise: root.shellRise
         phase: root.islandPhase
         radius: root.islandR
+        // Диктовка всегда принимает клики: иначе «чёрный блок» без кнопок.
         clickThrough: Boolean(bridge.settings.island_click_through) && root.shellMode === "island"
                        && !root.dragging
+                       && !(bridge.page === "dictation" && (bridge.recording || bridge.busy))
         onRequestTheater: root.openTheater()
         onRequestApp: root.openApp(page)
         onRequestModePick: root.islandModesOpen = true
