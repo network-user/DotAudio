@@ -246,6 +246,24 @@ Item {
                 line(ctx, 8.5, 10, 8.5, 14)
                 line(ctx, 11.5, 10, 11.5, 14)
                 break
+            case "pin":
+                // Канцелярская кнопка: закрепить запись сверху списка.
+                ctx.beginPath()
+                ctx.moveTo(10, 3.5)
+                ctx.lineTo(13.2, 6.7)
+                ctx.lineTo(11.4, 8.5)
+                ctx.lineTo(14.5, 11.6)
+                ctx.lineTo(12.8, 13.3)
+                ctx.lineTo(9.7, 10.2)
+                ctx.lineTo(7.9, 12)
+                ctx.closePath()
+                ctx.stroke()
+                line(ctx, 9.2, 11.5, 5.5, 16.2)
+                break
+            case "plus":
+                line(ctx, 10, 5, 10, 15)
+                line(ctx, 5, 10, 15, 10)
+                break
             case "sizer":
                 ctx.strokeStyle = root.ink; ctx.fillStyle = root.ink
                 line(ctx, 16, 12, 16, 16); line(ctx, 16, 16, 12, 16)

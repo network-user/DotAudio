@@ -9,6 +9,7 @@ Item {
     id: root
 
     property bool catalogOpen: false
+    property bool confirmDeleteOpen: false
 
     component Field: TextField {
         color: Theme.text
@@ -91,6 +92,13 @@ Item {
                         SegmentPill { key: "records"; label: "Записи" }
                         SegmentPill { key: "chats"; label: "Чаты" }
                         Item { Layout.fillWidth: true }
+                        IconButton {
+                            visible: assistant.listMode === "chats"
+                            iconName: "plus"
+                            onClicked: assistant.createChat()
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Новый чат"
+                        }
                         IconButton {
                             iconName: "undo"
                             onClicked: assistant.refreshRecords(search.text)
@@ -426,6 +434,23 @@ Item {
                     ToolTip.visible: hovered
                     ToolTip.text: titleEditor.visible ? "Сохранить название" : "Переименовать запись"
                 }
+                IconButton {
+                    visible: assistant.recordDeletable
+                    iconName: "pin"
+                    enabled: !assistant.busy
+                    opacity: assistant.recordPinned ? 1 : 0.7
+                    onClicked: assistant.togglePinRecord()
+                    ToolTip.visible: hovered
+                    ToolTip.text: assistant.recordPinned ? "Открепить" : "Закрепить сверху"
+                }
+                PillButton {
+                    compact: true
+                    text: "Новый чат"
+                    enabled: !assistant.busy
+                    onClicked: assistant.createChat()
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Отдельный разговор без расшифровки"
+                }
                 PillButton {
                     compact: true
                     visible: assistant.recordId !== ""
@@ -437,7 +462,7 @@ Item {
                 }
                 PillButton {
                     compact: true
-                    visible: assistant.recordId !== ""
+                    visible: assistant.recordId !== "" && Number(assistant.record.segments || 0) > 0
                     text: "Карта"
                     enabled: !assistant.busy
                     onClicked: assistant.rebuildIndex()
@@ -451,6 +476,15 @@ Item {
                     onClicked: assistant.deleteChat()
                     ToolTip.visible: hovered
                     ToolTip.text: "Стереть переписку. Расшифровка останется"
+                }
+                PillButton {
+                    compact: true
+                    visible: assistant.recordDeletable
+                    text: "Удалить запись"
+                    enabled: !assistant.busy
+                    onClicked: root.confirmDeleteOpen = true
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Удалить расшифровку и чат навсегда"
                 }
             }
 
@@ -787,6 +821,70 @@ Item {
             return
         assistant.ask(text)
         input.clear()
+    }
+
+    // Подтверждение удаления записи: нельзя вернуть расшифровку.
+    Rectangle {
+        anchors.fill: parent
+        visible: root.confirmDeleteOpen
+        z: 20
+        color: Theme.scrim
+        MouseArea { anchors.fill: parent; onClicked: root.confirmDeleteOpen = false }
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: Math.min(420, parent.width - 40)
+            implicitHeight: confirmCol.implicitHeight + 36
+            radius: Theme.radiusXl
+            color: Theme.surface
+            border.width: 1
+            border.color: Theme.borderHi
+            MouseArea { anchors.fill: parent }
+
+            ColumnLayout {
+                id: confirmCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 18
+                spacing: Theme.gapMd
+
+                Label {
+                    Layout.fillWidth: true
+                    text: "Удалить запись?"
+                    color: Theme.text
+                    font.pixelSize: Theme.fsSection
+                    font.weight: Font.DemiBold
+                }
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    text: Number(assistant.record.segments || 0) > 0
+                          ? ("«" + assistant.recordTitle + "» будет удалена вместе с расшифровкой, чатом и выжимками. Это нельзя отменить.")
+                          : ("Чат «" + assistant.recordTitle + "» будет удалён навсегда. Это нельзя отменить.")
+                    color: Theme.muted
+                    font.pixelSize: Theme.fsBody
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.gapSm
+                    Item { Layout.fillWidth: true }
+                    PillButton {
+                        text: "Отмена"
+                        onClicked: root.confirmDeleteOpen = false
+                    }
+                    PillButton {
+                        primary: true
+                        text: "Удалить навсегда"
+                        enabled: !assistant.busy && assistant.recordDeletable
+                        onClicked: {
+                            root.confirmDeleteOpen = false
+                            assistant.deleteRecord()
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Loader {

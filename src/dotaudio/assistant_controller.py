@@ -308,6 +308,16 @@ class AssistantController(QObject):
     def recordNeedsTitle(self):
         return bool(self._record_id) and bool(self._record.get("needsTitle"))
 
+    @Property(bool, notify=recordChanged)
+    def recordPinned(self):
+        return bool(self._record_id) and bool(self._record.get("pinned"))
+
+    @Property(bool, notify=recordChanged)
+    def recordDeletable(self):
+        """Можно удалить: выбранная запись или отдельный чат (не общий)."""
+
+        return bool(self._record_id)
+
     @Property("QVariant", notify=messagesChanged)
     def messages(self):
         return self._messages
@@ -436,14 +446,17 @@ class AssistantController(QObject):
             chats = []
             untitled = 0
             for row in rows:
-                if not int(row.get("segment_count") or 0):
-                    continue
+                segments = int(row.get("segment_count") or 0)
+                mode = str(row.get("mode") or "")
                 item = core.list_item_from_row(row)
-                records.append(item)
-                if item.get("needsTitle"):
-                    untitled += 1
-                if int(item.get("chatCount") or 0) > 0:
-                    chats.append(item)
+                if segments > 0:
+                    records.append(item)
+                    if item.get("needsTitle"):
+                        untitled += 1
+                # Отдельные чаты и записи с перепиской - во вкладке «Чаты».
+                if mode == "chat" or int(item.get("chatCount") or 0) > 0:
+                    if mode == "chat" or segments > 0:
+                        chats.append(item)
             general_count = self.store.count_chat_messages(GENERAL_CHAT_ID)
             general = {
                 "id": "",
@@ -460,6 +473,7 @@ class AssistantController(QObject):
                 "preview": "",
                 "needsTitle": False,
                 "chatCount": general_count,
+                "pinned": False,
             }
             self.recordsArrived.emit(records, [general, *chats], untitled)
 
@@ -598,6 +612,105 @@ class AssistantController(QObject):
         self.messagesChanged.emit()
         self.streamChanged.emit()
         self.recordChanged.emit()
+
+    @Slot()
+    def createChat(self):
+        """Новый пустой чат без привязки к расшифровке."""
+
+        if self._busy or self._naming:
+            self._set_notice("Дождитесь ответа или остановите его.")
+            return
+        from datetime import datetime
+
+        title = f"Новый чат · {datetime.now().strftime('%d.%m %H:%M')}"
+        session_id = self.store.create_session(title, "chat", "", self._active_model_id())
+        self.setListMode("chats")
+        self.selectRecord(session_id)
+        self.refreshRecords("")
+        self._set_notice("Создан новый чат.")
+
+    @Slot()
+    def togglePinRecord(self):
+        """Закрепить или открепить выбранную запись."""
+
+        if not self._record_id:
+            self._set_notice("Свободный разговор нельзя закрепить.")
+            return
+        session = self.store.get_session(self._record_id)
+        if session is None:
+            self._set_notice("Запись не найдена.")
+            return
+        pinned = not bool(int(session.get("pinned") or 0))
+        self.store.set_pinned(self._record_id, pinned)
+        self._record = {**self._record, "pinned": pinned}
+        # Обновить displayTitle со звездой.
+        patched = core.list_item_from_row(
+            {
+                **session,
+                "pinned": int(pinned),
+                "segment_count": self._record.get("segments") or 0,
+                "chat_count": self._record.get("chatCount") or 0,
+                "text": self._record.get("preview") or "",
+            }
+        )
+        self._apply_list_patch(self._record_id, patched)
+        self.recordChanged.emit()
+        self.refreshRecords("")
+        self._set_notice("Запись закреплена." if pinned else "Запись откреплена.")
+        refresh = getattr(self.controller, "refreshHistory", None)
+        if callable(refresh):
+            refresh(getattr(self.controller, "_query", ""))
+
+    @Slot()
+    def deleteRecord(self):
+        """Удалить выбранную запись целиком после подтверждения в UI."""
+
+        if not self._record_id:
+            self._set_notice("Свободный разговор нельзя удалить как запись. Очистите чат.")
+            return
+        if self._busy or self._naming:
+            self._set_notice("Дождитесь ответа или остановите его.")
+            return
+        session_id = self._record_id
+        title = str(self._record.get("title") or self._record.get("displayTitle") or "запись")
+        if not self.store.delete_session(session_id):
+            self._set_notice("Запись уже удалена.")
+            return
+        self._digests.clear(session_id)
+        self._record_id = ""
+        self._record = {}
+        self._messages = self.store.list_chat_messages(GENERAL_CHAT_ID)
+        self._status = "Свободный разговор без записи"
+        self.recordChanged.emit()
+        self.messagesChanged.emit()
+        self.streamChanged.emit()
+        self.refreshRecords("")
+        refresh = getattr(self.controller, "refreshHistory", None)
+        if callable(refresh):
+            refresh(getattr(self.controller, "_query", ""))
+        if getattr(self.controller, "_session_id", "") == session_id:
+            self.controller._session_id = ""
+            if hasattr(self.controller, "_segments"):
+                self.controller._segments = []
+            segments_changed = getattr(self.controller, "segmentsChanged", None)
+            if segments_changed is not None and hasattr(segments_changed, "emit"):
+                segments_changed.emit()
+            changed = getattr(self.controller, "changed", None)
+            if changed is not None and hasattr(changed, "emit"):
+                changed.emit()
+        self._set_notice(f"Удалено: {title}")
+
+    def _apply_list_patch(self, session_id: str, patch: dict) -> None:
+        for index, row in enumerate(self._records):
+            if row.get("id") == session_id:
+                self._records[index] = {**row, **patch}
+                break
+        for index, row in enumerate(self._chats):
+            if row.get("id") == session_id:
+                self._chats[index] = {**row, **patch}
+                break
+        self.recordsChanged.emit()
+        self.chatsChanged.emit()
 
     @Slot(str)
     def openRecord(self, session_id):

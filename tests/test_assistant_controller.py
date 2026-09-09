@@ -86,6 +86,7 @@ def test_actions_are_offered_to_the_interface() -> None:
     for slot in (
         "ask", "runAction", "stop", "selectRecord", "downloadModel", "clearChat",
         "setListMode", "nameRecord", "nameUntitledRecords",
+        "createChat", "togglePinRecord", "deleteRecord",
     ):
         assert meta.indexOfMethod(f"{slot}()") >= 0 or any(
             bytes(meta.method(index).name()).decode() == slot
@@ -200,6 +201,37 @@ def test_delete_chat_clears_messages_but_keeps_the_record(tmp_path: Path) -> Non
     assert assistant.messages == []
     assert assistant.store.list_chat_messages(session_id) == []
     assert assistant.store.get_session(session_id) is not None
+
+
+def test_create_chat_opens_a_blank_thread(tmp_path: Path) -> None:
+    assistant = _controller(tmp_path)
+    assistant.createChat()
+
+    assert assistant.listMode == "chats"
+    # id выставляется асинхронно selectRecord; сессия уже в базе.
+    chats = [
+        row for row in assistant.store.list_sessions() if row.get("mode") == "chat"
+    ]
+    assert len(chats) == 1
+    assert chats[0]["title"].startswith("Новый чат")
+
+
+def test_pin_and_delete_record_from_assistant(tmp_path: Path) -> None:
+    assistant = _controller(tmp_path)
+    session_id = assistant.store.create_session("Смета", "live", "mic", "small")
+    assistant.store.append_segments(
+        session_id, [{"start": 0.0, "end": 1.0, "text": "текст"}]
+    )
+    assistant._record_id = session_id
+    assistant._record = {"id": session_id, "title": "Смета", "displayTitle": "Смета", "pinned": False}
+
+    assistant.togglePinRecord()
+    assert int(assistant.store.get_session(session_id)["pinned"] or 0) == 1
+    assert assistant.recordPinned is True
+
+    assistant.deleteRecord()
+    assert assistant.store.get_session(session_id) is None
+    assert assistant.recordId == ""
 
 
 def test_open_record_switches_to_records_list(tmp_path: Path) -> None:

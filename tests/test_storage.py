@@ -226,6 +226,27 @@ def test_rename_session_updates_title(tmp_path: Path) -> None:
         store.rename_session(session_id, "   ")
 
 
+def test_pin_and_delete_session(tmp_path: Path) -> None:
+    store = Store(tmp_path / "dotaudio.sqlite3")
+    first = store.create_session("Первая", "live", "mic", "small")
+    second = store.create_session("Вторая", "live", "mic", "small")
+    store.append_segments(first, [{"start": 0.0, "end": 1.0, "text": "а"}])
+    store.append_segments(second, [{"start": 0.0, "end": 1.0, "text": "б"}])
+    store.append_chat_message(first, "user", "вопрос")
+    store.save_digest(first, 0, "h", 0.0, 1.0, "выжимка", ["а"], "qwen")
+
+    assert store.set_pinned(first, True) is True
+    rows = store.list_sessions()
+    assert rows[0]["id"] == first
+    assert int(rows[0]["pinned"]) == 1
+
+    assert store.delete_session(first) is True
+    assert store.get_session(first) is None
+    assert store.list_chat_messages(first) == []
+    assert store.list_digests(first) == []
+    assert store.get_session(second) is not None
+
+
 def test_digests_are_replaced_per_part_and_keep_the_text_hash(tmp_path: Path) -> None:
     store = Store(tmp_path / "dotaudio.sqlite3")
 

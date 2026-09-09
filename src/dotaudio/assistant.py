@@ -951,6 +951,7 @@ MODE_LABELS_RU = {
     "media": "Медиа",
     "monitor": "Эфир",
     "transcript": "Транскрибация",
+    "chat": "Чат",
 }
 
 # Типовые имена источников и режимов: в списке они не различимы.
@@ -1026,18 +1027,24 @@ def list_item_from_row(row: dict) -> dict:
         preview = preview.split("]", 1)[1].strip()
     snippet = title_from_transcript(preview, max_words=8)
     generic = is_generic_title(title)
+    pinned = bool(int(row.get("pinned") or 0))
     if generic and snippet:
         display = snippet
     elif title:
         display = title
     else:
         display = f"{mode_label}" + (f" · {when}" if when else "")
+    if pinned and not display.startswith("★"):
+        display = f"★ {display}"
     subtitle_parts = [mode_label]
     if when:
         subtitle_parts.append(when)
     segments = int(row.get("segment_count") or 0)
     if segments:
         subtitle_parts.append(f"{segments} фраз")
+    chat_count = int(row.get("chat_count") or 0)
+    if mode == "chat" and chat_count:
+        subtitle_parts.append(f"{chat_count} сообщ.")
     return {
         "id": row.get("id", ""),
         "title": title,
@@ -1047,8 +1054,9 @@ def list_item_from_row(row: dict) -> dict:
         "createdAt": row.get("created_at", ""),
         "segments": segments,
         "preview": (snippet or preview)[:160],
-        "needsTitle": generic,
-        "chatCount": int(row.get("chat_count") or 0),
+        "needsTitle": generic and mode != "chat",
+        "chatCount": chat_count,
+        "pinned": pinned,
     }
 
 

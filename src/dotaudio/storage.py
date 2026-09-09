@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 RECOVERED_SESSION_STATUS = "interrupted"
 
 # Переписка вне записи (общий чат) хранится под этим ключом: NULL в
@@ -92,6 +92,7 @@ class Store:
                 self._add_word_timestamps,
                 self._add_history_indexes,
                 self._add_assistant_tables,
+                self._add_session_pin,
             )
             for target_version in range(version + 1, SCHEMA_VERSION + 1):
                 connection.execute("BEGIN IMMEDIATE")
@@ -224,6 +225,20 @@ class Store:
             """
         )
 
+    @staticmethod
+    def _add_session_pin(connection: sqlite3.Connection) -> None:
+        """Закреплённые записи поднимаются в списках ассистента и истории."""
+
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(sessions)")}
+        if "pinned" not in columns:
+            connection.execute(
+                "ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_sessions_pinned_order "
+            "ON sessions(pinned DESC, created_at DESC, id DESC)"
+        )
+
     def create_session(
         self,
         title: str,
@@ -345,6 +360,7 @@ class Store:
                     s.source,
                     s.model,
                     s.created_at,
+                    COALESCE(s.pinned, 0) AS pinned,
                     COALESCE((
                         SELECT GROUP_CONCAT(ordered.text, char(10))
                         FROM (
@@ -360,7 +376,7 @@ class Store:
                         AS chat_count
                 FROM sessions s
                 {where}
-                ORDER BY s.created_at DESC, s.id DESC
+                ORDER BY COALESCE(s.pinned, 0) DESC, s.created_at DESC, s.id DESC
                 {pagination}
                 """,
                 params,
@@ -471,6 +487,37 @@ class Store:
                 (cleaned, session_id),
             )
         return cleaned
+
+    def set_pinned(self, session_id: str, pinned: bool) -> bool:
+        """Закрепить или открепить сессию. Возвращает новое состояние."""
+
+        value = 1 if pinned else 0
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE sessions SET pinned = ? WHERE id = ?",
+                (value, session_id),
+            )
+        return bool(value)
+
+    def delete_session(self, session_id: str) -> bool:
+        """Удалить запись целиком: сегменты, чат, выжимки и саму сессию."""
+
+        sid = str(session_id or "")
+        if not sid:
+            return False
+        with self._connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM sessions WHERE id = ?", (sid,)
+            ).fetchone()
+            if exists is None:
+                return False
+            connection.execute("DELETE FROM segments WHERE session_id = ?", (sid,))
+            connection.execute("DELETE FROM chat_messages WHERE session_id = ?", (sid,))
+            connection.execute(
+                "DELETE FROM transcript_digests WHERE session_id = ?", (sid,)
+            )
+            connection.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+        return True
 
     def append_chat_message(
         self,
