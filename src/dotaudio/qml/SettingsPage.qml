@@ -437,77 +437,17 @@ Item {
                     Text {
                         Layout.fillWidth: true
                         text: bridge.hotkeysAvailable
-                              ? "Глобальные клавиши работают, даже когда окно свёрнуто."
+                              ? "Глобальные клавиши работают, даже когда окно свёрнуто. Диктовка по умолчанию: Ctrl+Alt+Space."
                               : "Глобальные клавиши недоступны на этой системе. Запускайте запись кнопкой."
                         color: Theme.muted
                         font.pixelSize: Theme.fsSmall
                         wrapMode: Text.Wrap
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Label { text: "Диктовка"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.preferredWidth: 90 }
-                        Repeater {
-                            model: ["Ctrl+Alt+Space", "Ctrl+Shift+Space", "Ctrl+Win+Space"]
-                            PillButton {
-                                required property string modelData
-                                text: modelData
-                                primary: bridge.settings.dictate_hotkey === modelData
-                                onClicked: bridge.setHotkeys(modelData, bridge.settings.island_hotkey)
-                            }
-                        }
-                    }
-                    TextField {
-                        Layout.fillWidth: true
-                        placeholderText: "Своя комбинация диктовки, например Ctrl+Alt+D"
-                        text: bridge.settings.dictate_hotkey
-                        color: Theme.text
-                        placeholderTextColor: Theme.muted
-                        onEditingFinished: bridge.setHotkeys(text.trim(), bridge.settings.island_hotkey)
-                        background: Rectangle { radius: 12; color: Theme.fill; border.width: 1; border.color: Theme.border }
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Label { text: "Остров"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.preferredWidth: 90 }
-                        Repeater {
-                            model: ["Ctrl+Alt+O", "Ctrl+Shift+O", "Ctrl+Win+O"]
-                            PillButton {
-                                required property string modelData
-                                text: modelData
-                                primary: bridge.settings.island_hotkey === modelData
-                                onClicked: bridge.setHotkeys(bridge.settings.dictate_hotkey, modelData)
-                            }
-                        }
-                    }
-                    TextField {
-                        Layout.fillWidth: true
-                        placeholderText: "Своя комбинация острова"
-                        text: bridge.settings.island_hotkey
-                        color: Theme.text
-                        placeholderTextColor: Theme.muted
-                        onEditingFinished: bridge.setHotkeys(bridge.settings.dictate_hotkey, text.trim())
-                        background: Rectangle { radius: 12; color: Theme.fill; border.width: 1; border.color: Theme.border }
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Label { text: "Вставка"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.preferredWidth: 90 }
-                        Repeater {
-                            model: ["Shift+Alt+Z", "Ctrl+Alt+V", "Ctrl+Shift+V"]
-                            PillButton {
-                                required property string modelData
-                                text: modelData
-                                primary: bridge.settings.paste_last_hotkey === modelData
-                                onClicked: bridge.setPasteHotkey(modelData)
-                            }
-                        }
                     }
                     ToggleSwitch {
                         text: "Удерживать клавишу, чтобы диктовать"
                         checked: Boolean(bridge.settings.dictate_hold)
                         onToggled: bridge.setSetting("dictate_hold", checked)
                     }
-                    // Автовставка была включена всегда и не
-                    // имела выключателя, хотя вставляет текст
-                    // в чужое окно.
                     ToggleSwitch {
                         text: "Вставлять текст в активное окно"
                         checked: Boolean(bridge.settings.auto_paste)
@@ -515,16 +455,9 @@ Item {
                     }
                     Label {
                         text: Boolean(bridge.settings.auto_paste)
-                            ? "После диктовки остров показывает текст, запись уточняется в два прохода, затем копируется и вставляется в то окно, где вы работали. Enter не нажимается."
-                            : "Текст только копируется в буфер обмена; вставить можно самому или клавишей " + bridge.settings.paste_last_hotkey + "."
+                            ? "После диктовки текст уточняется, копируется и вставляется в то окно, где вы работали. Enter не нажимается."
+                            : "Текст только копируется в буфер; вставить можно самому или клавишей вставки."
                         color: Theme.faint
-                        font.pixelSize: Theme.fsSmall
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
-                    }
-                    Label {
-                        text: "Горячая клавиша " + bridge.settings.dictate_hotkey + " поднимает остров и начинает запись. Повтор останавливает. Вставка последнего текста: " + bridge.settings.paste_last_hotkey + "."
-                        color: Theme.muted
                         font.pixelSize: Theme.fsSmall
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
@@ -579,13 +512,94 @@ Item {
                         Item { Layout.fillWidth: true }
                         ToggleSwitch { text: "Запоминать позицию"; checked: Boolean(bridge.settings.island_snap); onToggled: bridge.setSetting("island_snap", checked) }
                     }
-                    Label {
-                        visible: Boolean(bridge.settings.island_click_through)
-                        text: "Клики проходят сквозь остров. Запись: Ctrl+Alt+Space"
+                }
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: hotkeysBox.implicitHeight + 2 * Theme.padCard
+                radius: Theme.radiusLg
+                color: Theme.surface
+                border.width: 1
+                border.color: Theme.border
+                ColumnLayout {
+                    id: hotkeysBox
+                    anchors.fill: parent
+                    anchors.margins: Theme.padCard
+                    spacing: Theme.gapMd
+                    Label { text: "Горячие клавиши"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "Для каждого действия выберите пресет или введите свою комбинацию (например Ctrl+Alt+D). Комбинации не должны совпадать."
                         color: Theme.muted
                         font.pixelSize: Theme.fsSmall
                         wrapMode: Text.Wrap
-                        Layout.fillWidth: true
+                    }
+                    Repeater {
+                        model: bridge.hotkeyActions
+                        delegate: ColumnLayout {
+                            id: actionRow
+                            required property var modelData
+                            required property int index
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Label {
+                                text: String(actionRow.modelData.title || "")
+                                color: Theme.text
+                                font.pixelSize: Theme.fsBody
+                                font.weight: Font.DemiBold
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: String(actionRow.modelData.hint || "")
+                                color: Theme.faint
+                                font.pixelSize: Theme.fsSmall
+                                wrapMode: Text.Wrap
+                            }
+                            Flow {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                Repeater {
+                                    model: actionRow.modelData.presets || []
+                                    PillButton {
+                                        required property string modelData
+                                        text: modelData
+                                        primary: String(actionRow.modelData.current) === modelData
+                                        onClicked: bridge.setActionHotkey(String(actionRow.modelData.id), modelData)
+                                    }
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                TextField {
+                                    id: customCombo
+                                    Layout.fillWidth: true
+                                    text: String(actionRow.modelData.current || "")
+                                    placeholderText: "Своя комбинация"
+                                    color: Theme.text
+                                    placeholderTextColor: Theme.muted
+                                    selectByMouse: true
+                                    onEditingFinished: bridge.setActionHotkey(String(actionRow.modelData.id), text.trim())
+                                    background: Rectangle {
+                                        radius: 12
+                                        color: Theme.fill
+                                        border.width: 1
+                                        border.color: Theme.border
+                                    }
+                                }
+                                PillButton {
+                                    text: "Применить"
+                                    primary: true
+                                    onClicked: bridge.setActionHotkey(String(actionRow.modelData.id), customCombo.text.trim())
+                                }
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 1
+                                Layout.topMargin: 4
+                                color: Theme.hairline
+                                visible: actionRow.index < bridge.hotkeyActions.length - 1
+                            }
+                        }
                     }
                 }
             }
@@ -708,49 +722,11 @@ Item {
                         Layout.fillWidth: true
                     }
                     Label {
-                        text: "Комбинация выхода: закрывает программу целиком из консоли и по горячей клавише."
+                        text: "Комбинация выхода настраивается в блоке «Горячие клавиши» выше."
                         color: Theme.faint
                         font.pixelSize: Theme.fsMicro
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        TextField {
-                            id: quitInput
-                            Layout.fillWidth: true
-                            text: String(bridge.settings.quit_hotkey || "Ctrl+Alt+X")
-                            placeholderText: "Ctrl+Alt+A"
-                            selectByMouse: true
-                            color: Theme.text
-                            placeholderTextColor: Theme.faint
-                            font.family: Theme.fontFamily
-                            inputMethodHints: Qt.ImhNoPredictiveText
-                            background: Rectangle { radius: 10; color: Theme.fill; border.width: 1; border.color: Theme.hairline }
-                        }
-                        PillButton {
-                            compact: true
-                            text: "Применить"
-                            primary: true
-                            onClicked: {
-                                bridge.setQuitHotkey(quitInput.text)
-                                // После валидации показываем каноничный вид.
-                                quitInput.text = String(bridge.settings.quit_hotkey)
-                            }
-                        }
-                    }
-                    Row {
-                        Layout.fillWidth: true
-                        spacing: 6
-                        Repeater {
-                            model: ["Ctrl+Alt+X", "Ctrl+Alt+C", "Ctrl+Alt+Q"]
-                            PillButton {
-                                required property string modelData
-                                text: modelData
-                                primary: String(bridge.settings.quit_hotkey) === modelData
-                                onClicked: { bridge.setSetting("quit_hotkey", modelData); quitInput.text = modelData }
-                            }
-                        }
                     }
                 }
             }

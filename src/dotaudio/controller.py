@@ -6,6 +6,7 @@ import re
 import threading
 import time
 import wave
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -46,8 +47,22 @@ from dotaudio.speaker_labels import (
     speaker_label_for_kind,
 )
 from dotaudio.storage import Store
+from dotaudio.transcript_pro import (
+    apply_dictionary,
+    diff_transcripts,
+    export_with_preset,
+    find_replace,
+    mark_reviewed,
+    merge_segments,
+    preset_list,
+    quality_stats,
+    serialize_compare_report,
+    set_phrase_window,
+    split_segment,
+)
 from dotaudio.transcripts import (
     apply_keyword_cooldown,
+    blend_fragments,
     continues_sentence,
     export_transcript,
     join_fragments,
@@ -197,13 +212,56 @@ HOTKEY_OPTIONS = {
     "Ctrl+Alt+Space": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x20),
     "Ctrl+Shift+Space": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, 0x20),
     "Ctrl+Win+Space": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_WIN, 0x20),
+    "Ctrl+Alt+D": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x44),
     "Ctrl+Alt+O": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x4F),
     "Ctrl+Shift+O": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, 0x4F),
     "Ctrl+Win+O": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_WIN, 0x4F),
     "Shift+Alt+Z": Hotkey(MOD_NOREPEAT | MOD_SHIFT | MOD_ALT, 0x5A),
     "Ctrl+Alt+V": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x56),
     "Ctrl+Shift+V": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, 0x56),
+    "Escape": Hotkey(MOD_NOREPEAT, 0x1B),
+    "Ctrl+Escape": Hotkey(MOD_NOREPEAT | MOD_CONTROL, 0x1B),
+    "Shift+Escape": Hotkey(MOD_NOREPEAT | MOD_SHIFT, 0x1B),
 }
+
+# Каталог действий для страницы настроек: id → ключ в settings и пресеты.
+HOTKEY_ACTIONS = (
+    {
+        "id": "dictate",
+        "setting": "dictate_hotkey",
+        "title": "Диктовка",
+        "hint": "Старт и остановка записи. Повтор той же клавиши завершает take.",
+        "presets": ["Ctrl+Alt+Space", "Ctrl+Shift+Space", "Ctrl+Win+Space", "Ctrl+Alt+D"],
+    },
+    {
+        "id": "island",
+        "setting": "island_hotkey",
+        "title": "Остров",
+        "hint": "Показать компактный остров поверх других окон.",
+        "presets": ["Ctrl+Alt+O", "Ctrl+Shift+O", "Ctrl+Win+O"],
+    },
+    {
+        "id": "paste_last",
+        "setting": "paste_last_hotkey",
+        "title": "Вставить последний текст",
+        "hint": "Повторно вставить последнюю удачную диктовку в активное поле.",
+        "presets": ["Shift+Alt+Z", "Ctrl+Alt+V", "Ctrl+Shift+V"],
+    },
+    {
+        "id": "cancel",
+        "setting": "cancel_hotkey",
+        "title": "Отмена",
+        "hint": "Отменить текущую диктовку или Live без вставки и без смены буфера.",
+        "presets": ["Escape", "Ctrl+Escape", "Shift+Escape"],
+    },
+    {
+        "id": "quit",
+        "setting": "quit_hotkey",
+        "title": "Выход",
+        "hint": "Закрыть программу целиком, даже если модель занята.",
+        "presets": ["Ctrl+Alt+X", "Ctrl+Alt+C", "Ctrl+Alt+Q", "Ctrl+Shift+X"],
+    },
+)
 
 # Discord-style mic check: listen a few seconds, then play the sample back.
 MIC_CHECK_SECONDS = 2.5
@@ -314,12 +372,19 @@ def resolve_hotkey(value: str) -> Hotkey | None:
 def hotkey_id(value: str) -> str:
     """Нормализованный вид комбинации для хранения и отображения."""
 
-    parts = [p.casefold() for p in value.split("+") if p.strip()]
+    name = str(value or "").strip()
+    if not name:
+        return ""
+    if name.casefold() in {"escape", "esc"}:
+        return "Escape"
+    parts = [p.casefold() for p in name.replace(" ", "+").split("+") if p.strip()]
     parts.sort(key=lambda p: {"ctrl": 0, "alt": 1, "shift": 2, "win": 3}.get(p, 4))
-    caps = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Win"}
+    caps = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Win", "escape": "Escape", "esc": "Escape", "space": "Space"}
     out = [caps.get(p, p) for p in parts]
     if out and len(out[-1]) == 1 and out[-1].isalnum():
         out[-1] = out[-1].upper()
+    elif out and out[-1].casefold() not in caps and len(out[-1]) > 1:
+        out[-1] = out[-1][:1].upper() + out[-1][1:]
     return "+".join(out)
 
 
@@ -513,6 +578,14 @@ class Controller(QObject):
         self._trans_cancel = threading.Event()
         # sessionId с воркера до доставки QueuedConnection от transcribeTick.
         self._trans_result_session_id = ""
+        self._trans_edit_undo: list[list[dict]] = []
+        self._trans_edit_redo: list[list[dict]] = []
+        self._trans_compare: dict = {
+            "phase": "idle",
+            "progress": 0.0,
+            "message": "",
+            "report": {},
+        }
         # Опрос рантайма NeMo - запуск процесса, поэтому он делается один раз
         # в фоне и кешируется. Пустой словарь значит «ещё не проверяли».
         self._diarize_probe: dict = {}
@@ -1412,7 +1485,8 @@ class Controller(QObject):
             self._device_test = {"phase": "idle", "message": "", "level": 0.0}
         self.store.save_settings(self._settings)
         if name == "quit_hotkey":
-            self._apply_quit_hotkey()
+            self.setActionHotkey("quit", str(value))
+            return
         if name in ("watch_folder", "watch_folder_enabled"):
             self._sync_watch_folder()
         if name == "history_semantic":
@@ -1485,14 +1559,7 @@ class Controller(QObject):
             self._notice = "Введите комбинацию, например Ctrl+Alt+G."
             self.changed.emit()
             return
-        combo = parse_hotkey(raw)
-        if combo is None:
-            self._notice = f"Не понимаю «{raw}». Пример: Ctrl+Alt+G."
-            self.changed.emit()
-            return
-        self._settings["quit_hotkey"] = raw
-        self.store.save_settings(self._settings)
-        self._apply_quit_hotkey()
+        self.setActionHotkey("quit", raw)
 
     @Slot()
     def resetCaptionPosition(self):
@@ -1547,32 +1614,114 @@ class Controller(QObject):
             return live_engine_label("vosk", "", str(self._settings.get("vosk_size") or "small"))
         return live_engine_label("whisper", str(self._settings.get("model") or ""))
 
-    def _apply_hotkey_bindings(self, dictate: str, island: str, paste_last: str) -> bool:
+    def _apply_hotkey_bindings(
+        self,
+        dictate: str,
+        island: str,
+        paste_last: str,
+        cancel: str | None = None,
+        quit_name: str | None = None,
+    ) -> bool:
+        cancel_raw = str(
+            cancel if cancel is not None else self._settings.get("cancel_hotkey") or "Escape"
+        )
+        quit_raw = str(
+            quit_name if quit_name is not None else self._settings.get("quit_hotkey") or "Ctrl+Alt+X"
+        )
         bindings = {
             "dictate": resolve_hotkey(str(dictate)),
             "island": resolve_hotkey(str(island)),
             "paste_last": resolve_hotkey(str(paste_last)),
+            "cancel": resolve_hotkey(cancel_raw),
+            "quit": resolve_hotkey(quit_raw),
         }
-        cancel = resolve_hotkey(str(self._settings.get("cancel_hotkey") or "Escape"))
-        if cancel is not None:
-            bindings["cancel"] = cancel
-        if None in (bindings.get("dictate"), bindings.get("island"), bindings.get("paste_last")) or \
-                len({(item.modifiers, item.key) for item in bindings.values()}) != len(bindings):
-            self._notice = "Выберите разные понятные комбинации для диктовки, острова и вставки."
+        if None in bindings.values():
+            self._notice = (
+                "Не понимаю комбинацию. Пример: Ctrl+Alt+Space, Escape, Ctrl+Alt+X."
+            )
+            self.changed.emit()
+            return False
+        if len({(item.modifiers, item.key) for item in bindings.values()}) != len(bindings):
+            self._notice = "Комбинации действий не должны совпадать."
             self.changed.emit()
             return False
         if not self.desktop.set_hotkeys(bindings):
             self._notice = "Комбинация занята другой программой. Прежние hotkey сохранены."
             self.changed.emit()
             return False
-        self._settings["dictate_hotkey"] = str(dictate)
-        self._settings["island_hotkey"] = str(island)
-        self._settings["paste_last_hotkey"] = str(paste_last)
+
+        def _store(name: str) -> str:
+            raw = str(name or "").strip()
+            if raw in HOTKEY_OPTIONS or raw in QUIT_HOTKEY_OPTIONS:
+                return raw
+            return hotkey_id(raw) if parse_hotkey(raw) else raw
+
+        self._settings["dictate_hotkey"] = _store(dictate)
+        self._settings["island_hotkey"] = _store(island)
+        self._settings["paste_last_hotkey"] = _store(paste_last)
+        self._settings["cancel_hotkey"] = _store(cancel_raw)
+        self._settings["quit_hotkey"] = _store(quit_raw)
         self.store.save_settings(self._settings)
         self._notice = "Горячие клавиши обновлены."
         self._record_log("success", "Горячие клавиши переназначены.")
         self.changed.emit()
         return True
+
+    @Property("QVariantList", notify=changed)
+    def hotkeyActions(self):
+        """Список действий с текущими комбинациями для страницы настроек."""
+
+        rows = []
+        for item in HOTKEY_ACTIONS:
+            setting = str(item["setting"])
+            current = str(self._settings.get(setting) or "")
+            rows.append({
+                "id": item["id"],
+                "setting": setting,
+                "title": item["title"],
+                "hint": item["hint"],
+                "presets": list(item["presets"]),
+                "current": current,
+            })
+        return rows
+
+    @Slot(str, str)
+    def setActionHotkey(self, action, combo):
+        """Назначить комбинацию одному действию: dictate/island/paste_last/cancel/quit."""
+
+        if self._jobs:
+            return
+        action_id = str(action or "").strip()
+        raw = str(combo or "").strip()
+        meta = next((item for item in HOTKEY_ACTIONS if item["id"] == action_id), None)
+        if meta is None:
+            self._notice = "Неизвестное действие горячей клавиши."
+            self.changed.emit()
+            return
+        if not raw:
+            self._notice = "Введите комбинацию, например Ctrl+Alt+Space."
+            self.changed.emit()
+            return
+        if resolve_hotkey(raw) is None:
+            self._notice = f"Не понимаю «{raw}». Пример: Ctrl+Alt+Space или Escape."
+            self.changed.emit()
+            return
+        dictate = str(self._settings.get("dictate_hotkey") or "Ctrl+Alt+Space")
+        island = str(self._settings.get("island_hotkey") or "Ctrl+Alt+O")
+        paste_last = str(self._settings.get("paste_last_hotkey") or "Shift+Alt+Z")
+        cancel = str(self._settings.get("cancel_hotkey") or "Escape")
+        quit_name = str(self._settings.get("quit_hotkey") or "Ctrl+Alt+X")
+        if action_id == "dictate":
+            dictate = raw
+        elif action_id == "island":
+            island = raw
+        elif action_id == "paste_last":
+            paste_last = raw
+        elif action_id == "cancel":
+            cancel = raw
+        elif action_id == "quit":
+            quit_name = raw
+        self._apply_hotkey_bindings(dictate, island, paste_last, cancel, quit_name)
 
     @Slot(str, str)
     def setHotkeys(self, dictate, island):
@@ -4189,6 +4338,11 @@ class Controller(QObject):
                 "text": str(segment.get("text", "")).strip(),
                 "words": segment.get("words", []),
             }
+            if segment.get("confidence") is not None:
+                try:
+                    row["confidence"] = float(segment.get("confidence"))
+                except (TypeError, ValueError):
+                    row["confidence"] = -1.0
             if segment.get("source_text"):
                 row["source_text"] = segment.get("source_text")
             collected.append(row)
@@ -4273,6 +4427,10 @@ class Controller(QObject):
                 "text": text if use_speaker else (f"[{speaker}] {text}" if speaker else text),
                 "words": row.get("words") or [],
             }
+            try:
+                item["confidence"] = float(row.get("confidence", -1))
+            except (TypeError, ValueError):
+                item["confidence"] = -1.0
             if use_speaker:
                 item["speaker"] = speaker
             payload.append(item)
@@ -4456,8 +4614,12 @@ class Controller(QObject):
         if idx < 0 or idx >= len(segments):
             return
         cleaned = str(text or "").strip()
+        if cleaned == str(segments[idx].get("text") or ""):
+            return
+        self._trans_push_undo()
         row = segments[idx]
         row["text"] = cleaned
+        row["reviewed"] = True
         session_id = str(self._trans_state.get("sessionId") or "")
         seg_id = row.get("id")
         if session_id and seg_id is not None:
@@ -4468,6 +4630,323 @@ class Controller(QObject):
                 str(row.get("speaker") or ""),
             )
         self.transcribeChanged.emit()
+
+    def _trans_push_undo(self) -> None:
+        snap = deepcopy(list(self._trans_state.get("segments") or []))
+        self._trans_edit_undo.append(snap)
+        self._trans_edit_undo = self._trans_edit_undo[-40:]
+        self._trans_edit_redo.clear()
+
+    def _trans_apply_segments(self, rows: list[dict], *, persist: bool = True) -> None:
+        legend = self._speaker_legend(rows, previous=self._trans_state.get("speakers"))
+        self._trans_state["segments"] = rows
+        self._trans_state["speakers"] = legend
+        self._trans_state["diarization"] = bool(legend)
+        if persist:
+            self._trans_resync_store(rows)
+        self.transcribeChanged.emit()
+
+    def _trans_resync_store(self, rows: list[dict]) -> None:
+        session_id = str(self._trans_state.get("sessionId") or "")
+        if not session_id:
+            return
+        payload = []
+        for row in rows:
+            item = {
+                "start": float(row.get("start", 0.0)),
+                "end": float(row.get("end", 0.0)),
+                "text": str(row.get("text") or "").strip(),
+                "words": row.get("words") or [],
+                "speaker": str(row.get("speaker") or "").strip(),
+                "confidence": float(row.get("confidence", -1) or -1),
+            }
+            payload.append(item)
+        try:
+            ids = self.store.replace_segments(session_id, payload)
+        except Exception as exc:  # noqa: BLE001
+            self.transcribeStatus.emit(f"Не удалось сохранить правки: {exc}")
+            return
+        for row, seg_id in zip(rows, ids, strict=False):
+            row["id"] = int(seg_id)
+
+    @Property(bool, notify=transcribeChanged)
+    def transcriptCanUndo(self) -> bool:
+        return bool(self._trans_edit_undo)
+
+    @Property(bool, notify=transcribeChanged)
+    def transcriptCanRedo(self) -> bool:
+        return bool(self._trans_edit_redo)
+
+    @Property("QVariantMap", notify=transcribeChanged)
+    def transcriptQuality(self):
+        return quality_stats(list(self._trans_state.get("segments") or []))
+
+    @Property("QVariantList", notify=changed)
+    def transcriptExportPresets(self):
+        return preset_list()
+
+    @Property("QVariantMap", notify=transcribeChanged)
+    def transcriptCompare(self):
+        return dict(self._trans_compare)
+
+    @Slot()
+    def undoTranscriptEdit(self):
+        if not self._trans_edit_undo:
+            return
+        current = deepcopy(list(self._trans_state.get("segments") or []))
+        previous = self._trans_edit_undo.pop()
+        self._trans_edit_redo.append(current)
+        self._trans_apply_segments(previous)
+        self.transcribeStatus.emit("Отмена правки расшифровки")
+
+    @Slot()
+    def redoTranscriptEdit(self):
+        if not self._trans_edit_redo:
+            return
+        current = deepcopy(list(self._trans_state.get("segments") or []))
+        nxt = self._trans_edit_redo.pop()
+        self._trans_edit_undo.append(current)
+        self._trans_apply_segments(nxt)
+        self.transcribeStatus.emit("Повтор правки расшифровки")
+
+    @Slot(int)
+    def mergeTranscriptSegment(self, index: int):
+        try:
+            rows = merge_segments(list(self._trans_state.get("segments") or []), int(index))
+        except ValueError as exc:
+            self.transcribeStatus.emit(str(exc))
+            return
+        self._trans_push_undo()
+        self._trans_apply_segments(rows)
+        self.transcribeStatus.emit("Фразы склеены")
+
+    @Slot(int, float)
+    def splitTranscriptSegment(self, index: int, at_seconds: float):
+        try:
+            rows = split_segment(
+                list(self._trans_state.get("segments") or []), int(index), float(at_seconds)
+            )
+        except ValueError as exc:
+            self.transcribeStatus.emit(str(exc))
+            return
+        self._trans_push_undo()
+        self._trans_apply_segments(rows)
+        self.transcribeStatus.emit("Фраза разрезана")
+
+    @Slot(int, float, float)
+    def setTranscriptPhraseWindow(self, index: int, start: float, end: float):
+        try:
+            rows = set_phrase_window(
+                list(self._trans_state.get("segments") or []),
+                int(index),
+                float(start),
+                float(end),
+            )
+        except ValueError as exc:
+            self.transcribeStatus.emit(str(exc))
+            return
+        self._trans_push_undo()
+        self._trans_apply_segments(rows)
+
+    @Slot(str, str, bool)
+    def replaceInTranscript(self, find: str, replace: str, match_case: bool = False):
+        rows, count = find_replace(
+            list(self._trans_state.get("segments") or []),
+            str(find or ""),
+            str(replace or ""),
+            match_case=bool(match_case),
+        )
+        if count <= 0:
+            self.transcribeStatus.emit("Совпадений не найдено")
+            return
+        self._trans_push_undo()
+        self._trans_apply_segments(rows)
+        self.transcribeStatus.emit(f"Заменено вхождений: {count}")
+
+    @Slot()
+    def applyDictionaryToTranscript(self):
+        segments = list(self._trans_state.get("segments") or [])
+        if not segments:
+            return
+        changed = 0
+        rows = deepcopy(segments)
+        for row in rows:
+            before = str(row.get("text") or "")
+            after = apply_dictionary(before, self.dictionary)
+            if after != before:
+                row["text"] = after
+                row["reviewed"] = True
+                changed += 1
+        if not changed:
+            self.transcribeStatus.emit("Словарь ничего не изменил")
+            return
+        self._trans_push_undo()
+        self._trans_apply_segments(rows)
+        self.transcribeStatus.emit(f"Словарь применён к {changed} фразам")
+
+    @Slot(int, bool)
+    def markTranscriptReviewed(self, index: int, reviewed: bool = True):
+        rows = mark_reviewed(
+            list(self._trans_state.get("segments") or []), int(index), bool(reviewed)
+        )
+        self._trans_state["segments"] = rows
+        self.transcribeChanged.emit()
+
+    @Slot(str)
+    def transcriptExportPreset(self, preset_key: str):
+        segments = list(self._trans_state.get("segments") or [])
+        if not segments:
+            return
+        body, ext, stem = export_with_preset(
+            segments,
+            str(preset_key or "plain"),
+            title=str(self._trans_state.get("file") or ""),
+            source=str(self._trans_state.get("path") or ""),
+            model=str(self._settings.get("model") or ""),
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            None,
+            "Сохранить расшифровку",
+            f"{stem}.{ext}",
+            f"*.{ext}",
+        )
+        if not path:
+            return
+        if Path(path).suffix.lower() != f".{ext}":
+            path = str(Path(path).with_suffix(f".{ext}"))
+        try:
+            Path(path).write_text(body, encoding="utf-8")
+            self.transcribeStatus.emit(f"Сохранено: {Path(path).name}")
+        except OSError as exc:
+            self.transcribeStatus.emit(f"Не удалось сохранить: {exc}")
+        self.transcribeChanged.emit()
+
+    @Slot(str)
+    def openTranscriptPhraseInAssistant(self, hint: str = ""):
+        """Открыть ассистента с записью; hint - необязательная затравка вопроса."""
+
+        self.openTranscriptInAssistant()
+        text = str(hint or "").strip()
+        if text and hasattr(self, "assistant") and self.assistant is not None:
+            ask = getattr(self.assistant, "ask", None) or getattr(self.assistant, "sendPrompt", None)
+            if callable(ask):
+                try:
+                    ask(text)
+                except TypeError:
+                    pass
+
+    @Slot()
+    def runTranscriptModelCompare(self):
+        """Прогнать файл доступными Whisper-моделями и сравнить с текущим результатом."""
+
+        if self._jobs or self._trans_state.get("phase") == "working":
+            return
+        if self._trans_compare.get("phase") == "working":
+            return
+        path = str(self._trans_state.get("path") or "")
+        if not path or not Path(path).is_file():
+            self.transcribeStatus.emit("Сначала откройте файл для сравнения моделей")
+            return
+        baseline = deepcopy(list(self._trans_state.get("segments") or []))
+        if not baseline:
+            self.transcribeStatus.emit("Сначала выполните расшифровку - она станет базой сравнения")
+            return
+        ready = [
+            str(item.get("model") or "")
+            for item in (self._model_library or [])
+            if item.get("ready") and str(item.get("model") or "")
+        ]
+        current = str(self._settings.get("model") or "small")
+        challengers = [name for name in ready if name != current][:3]
+        if not challengers:
+            # Если в кеше только текущая - всё равно прогоняем tiny/base как тест,
+            # если они есть на диске после prepare; иначе сообщаем.
+            challengers = [name for name in ("tiny", "base", "small") if name != current][:2]
+        self._trans_compare = {
+            "phase": "working",
+            "progress": 0.0,
+            "message": "Сравниваем модели…",
+            "report": {},
+        }
+        self.transcribeChanged.emit()
+
+        def work():
+            reports = []
+            total = max(1, len(challengers))
+            for step, model_name in enumerate(challengers, start=1):
+                self.transcribeTick.emit({})  # keep UI alive
+                self._trans_compare = {
+                    "phase": "working",
+                    "progress": (step - 1) / total,
+                    "message": f"Прогон {model_name} ({step}/{total})…",
+                    "report": {},
+                }
+                # Direct emit via tick-like update
+                try:
+                    config = replace(
+                        self._config(media_mode=True),
+                        backend="local",
+                        model=model_name,
+                    )
+                    rows = self.engine.transcribe(path, config, self._trans_cancel, None, None)
+                    rows = [
+                        {
+                            "start": float(r.get("start", 0)),
+                            "end": float(r.get("end", 0)),
+                            "text": str(r.get("text") or "").strip(),
+                            "words": r.get("words") or [],
+                            "confidence": float(r.get("confidence", -1) or -1),
+                        }
+                        for r in rows
+                        if str(r.get("text") or "").strip()
+                    ]
+                    report = diff_transcripts(
+                        baseline,
+                        rows,
+                        baseline_model=current,
+                        challenger_model=model_name,
+                    )
+                    reports.append(report)
+                except Exception as exc:  # noqa: BLE001
+                    reports.append(
+                        {
+                            "baselineModel": current,
+                            "challengerModel": model_name,
+                            "error": str(exc),
+                            "winner": current,
+                            "reason": f"ошибка прогона: {exc}",
+                            "similarity": 0.0,
+                            "changeCount": 0,
+                            "changes": [],
+                        }
+                    )
+            # Pick overall winner: most wins, else highest similarity challenger.
+            wins: dict[str, int] = {}
+            for item in reports:
+                wins[str(item.get("winner") or current)] = wins.get(
+                    str(item.get("winner") or current), 0
+                ) + 1
+            overall = max(wins, key=wins.get) if wins else current
+            summary = {
+                "phase": "done",
+                "progress": 1.0,
+                "message": f"Лучше всего: {overall}",
+                "report": {
+                    "overallWinner": overall,
+                    "baselineModel": current,
+                    "runs": reports,
+                    "text": "\n\n".join(
+                        serialize_compare_report(item)
+                        for item in reports
+                        if "error" not in item
+                    ),
+                },
+            }
+            self._trans_compare = summary
+            self.transcribeTick.emit({"phase": self._trans_state.get("phase")})
+            self.transcribeStatus.emit(summary["message"])
+
+        threading.Thread(target=work, name="dotaudio-model-compare", daemon=True).start()
 
     @Slot(int, str)
     def setTranscriptSegmentSpeaker(self, index: int, label: str) -> None:

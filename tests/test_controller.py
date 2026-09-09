@@ -136,12 +136,46 @@ def test_hotkey_options_are_valid_and_actions_do_not_overlap() -> None:
     assert HOTKEY_OPTIONS["Ctrl+Alt+Space"] != HOTKEY_OPTIONS["Ctrl+Alt+O"]
     assert HOTKEY_OPTIONS["Shift+Alt+Z"] != HOTKEY_OPTIONS["Ctrl+Alt+Space"]
     assert HOTKEY_OPTIONS["Ctrl+Alt+V"] != HOTKEY_OPTIONS["Shift+Alt+Z"]
+    assert HOTKEY_OPTIONS["Escape"].key == 0x1B
     assert DEFAULTS["dictate_hold"] is False
     assert DEFAULTS["paste_last_hotkey"] == "Shift+Alt+Z"
+    assert DEFAULTS["dictate_hotkey"] == "Ctrl+Alt+Space"
+    assert DEFAULTS["cancel_hotkey"] == "Escape"
     assert DEFAULTS["caption_position"] == "bottom"
     assert DEFAULTS["caption_locked"] is True
     assert DEFAULTS["caption_autohide"] is False
     assert DEFAULTS["reduce_motion"] is False
+    from dotaudio.controller import HOTKEY_ACTIONS
+
+    ids = [item["id"] for item in HOTKEY_ACTIONS]
+    assert ids == ["dictate", "island", "paste_last", "cancel", "quit"]
+
+
+def test_set_action_hotkey_updates_cancel() -> None:
+    saved: list[dict] = []
+    registered: list[dict] = []
+    controller = Controller.__new__(Controller)
+    controller._jobs = {}
+    controller._settings = dict(DEFAULTS)
+    controller._notice = ""
+    controller.store = type(
+        "Store",
+        (),
+        {"save_settings": staticmethod(lambda settings: saved.append(dict(settings)))},
+    )()
+    controller.desktop = type(
+        "Desktop",
+        (),
+        {"set_hotkeys": staticmethod(lambda bindings: registered.append(bindings) or True)},
+    )()
+    controller._record_log = lambda *_args: None
+    controller.changed = _Signal()
+
+    Controller.setActionHotkey(controller, "cancel", "Ctrl+Escape")
+
+    assert controller._settings["cancel_hotkey"] == "Ctrl+Escape"
+    assert registered and "cancel" in registered[-1]
+    assert saved
 
 
 def test_paste_hotkey_can_be_rebound() -> None:
