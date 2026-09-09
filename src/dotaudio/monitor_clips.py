@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import wave
 from pathlib import Path
 
@@ -89,6 +90,54 @@ class PcmRing:
         offsets = np.arange(start_sample, end_sample, dtype=np.int64) - base
         indices = (self._write_pos + offsets) % self._capacity
         return self._buffer[indices].astype(np.float32, copy=True)
+
+
+class WavStream:
+    """Append float32 mono PCM to a PCM16 WAV as the stream arrives.
+
+    Live can last much longer than a dictation take, so the full recording
+    lives on disk instead of in a ring buffer. After the quality pass the
+    controller deletes this file.
+    """
+
+    def __init__(self, path: Path, sample_rate: int = SAMPLE_RATE) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._sample_rate = int(sample_rate)
+        self._lock = threading.Lock()
+        self._closed = False
+        self._frames = 0
+        self._wf = wave.open(str(self.path), "wb")
+        self._wf.setnchannels(1)
+        self._wf.setsampwidth(2)
+        self._wf.setframerate(self._sample_rate)
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    @property
+    def seconds(self) -> float:
+        with self._lock:
+            return self._frames / float(self._sample_rate) if self._sample_rate else 0.0
+
+    def write(self, audio: np.ndarray) -> None:
+        chunk = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if chunk.size == 0:
+            return
+        pcm = (np.clip(chunk, -1.0, 1.0) * 32767.0).astype("<i2", copy=False)
+        with self._lock:
+            if self._closed:
+                return
+            self._wf.writeframes(pcm.tobytes())
+            self._frames += int(chunk.size)
+
+    def close(self) -> Path:
+        with self._lock:
+            if not self._closed:
+                self._wf.close()
+                self._closed = True
+        return self.path
 
 
 def write_wav(path: Path, audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> Path:

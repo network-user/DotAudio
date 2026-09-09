@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dotaudio.monitor_clips import SAMPLE_RATE, PcmRing, extract_match_clip, write_wav
+from dotaudio.monitor_clips import SAMPLE_RATE, PcmRing, WavStream, extract_match_clip, write_wav
 
 
 def test_pcm_ring_dump_returns_oldest_first() -> None:
@@ -55,6 +55,23 @@ def test_pcm_ring_slice_returns_none_outside_window() -> None:
 
     assert ring.slice(0.0, 0.2, stream_end_sec=0.5) is not None
     assert ring.slice(2.0, 3.0, stream_end_sec=0.5) is None
+
+
+def test_wav_stream_appends_chunks_and_reports_seconds(tmp_path: Path) -> None:
+    path = tmp_path / "live.wav"
+    stream = WavStream(path, sample_rate=10)
+    stream.write(np.ones(5, dtype=np.float32))
+    stream.write(np.full(5, -0.5, dtype=np.float32))
+    assert stream.seconds == pytest.approx(1.0)
+    closed = stream.close()
+    assert closed == path
+    stream.write(np.ones(4, dtype=np.float32))
+
+    with wave.open(str(path), "rb") as wav:
+        assert wav.getnchannels() == 1
+        assert wav.getsampwidth() == 2
+        assert wav.getframerate() == 10
+        assert wav.getnframes() == 10
 
 
 def test_write_wav_creates_pcm16_mono_file(tmp_path: Path) -> None:

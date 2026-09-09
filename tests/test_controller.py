@@ -78,6 +78,7 @@ def test_engine_statuses_have_russian_labels() -> None:
     assert STATUS_LABELS["live_backlog"].startswith("Догоняем")
     assert STATUS_LABELS["dictation_refine_1"].startswith("Уточняем")
     assert STATUS_LABELS["dictation_refine_2"].startswith("Уточняем")
+    assert STATUS_LABELS["live_process"].startswith("Обрабатываем")
 
 
 def test_dictation_defaults_enable_auto_paste() -> None:

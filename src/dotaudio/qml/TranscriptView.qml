@@ -308,6 +308,14 @@ Rectangle {
                     font.weight: Font.DemiBold
                     elide: Text.ElideMiddle
                 }
+                Label {
+                    visible: String(bridge.transcribeState.origin || "") === "live"
+                             && !view.hasMedia && !view.busyPhase
+                    Layout.fillWidth: true
+                    text: "Запись Live · звук удалён после обработки"
+                    color: Theme.muted
+                    font.pixelSize: Theme.fsLabel
+                }
                 Flow {
                     Layout.fillWidth: true
                     spacing: Theme.gapSm
@@ -319,7 +327,7 @@ Rectangle {
                     PillButton {
                         text: view.busyPhase ? "Стоп" : "Расшифровать"
                         primary: !view.busyPhase
-                        enabled: view.file.length > 0
+                        enabled: view.busyPhase || view.hasMedia
                         onClicked: view.busyPhase ? bridge.stopTranscript() : bridge.runTranscript()
                     }
                     PillButton {

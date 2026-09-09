@@ -33,7 +33,7 @@ from dotaudio.engine import DownloadCancelled, Engine, RecognitionConfig
 from dotaudio.karaoke import export_ass, render_video
 from dotaudio.karaoke_align import align_words, compute_peaks, decode_file
 from dotaudio.karaoke_edit import apply_word, clamp_row, set_word_text, sync_words_to_text
-from dotaudio.monitor_clips import PcmRing, extract_match_clip
+from dotaudio.monitor_clips import PcmRing, WavStream, extract_match_clip
 from dotaudio.pipeline import (
     LIVE_SPEECH_THRESHOLD,
     SAMPLE_RATE,
@@ -301,12 +301,16 @@ STATUS_LABELS = {
     "live_unrecognized": "Звук есть, но речи не распознаём. Музыка или шум?",
     "dictation_refine_1": "Уточняем · проход 1/2…",
     "dictation_refine_2": "Уточняем · проход 2/2…",
+    "live_process": "Обрабатываем запись…",
 }
 
 # Диктовка держит весь take в памяти для постобработки после Stop.
 # После refine буфер сбрасывается; на диск WAV не пишется.
 DICTATION_PCM_SECONDS = 300.0
 DICTATION_REFINE_MIN_SECONDS = 0.35
+# Live пишет WAV на диск: сессия может быть длиннее кольца диктовки.
+# После полного прохода файл удаляется, в истории остаётся только текст.
+LIVE_PROCESS_MIN_SECONDS = 0.35
 
 
 MODEL_IDLE_RELEASE_MS = 10 * 60 * 1000
@@ -606,6 +610,7 @@ class Controller(QObject):
             "error": "", "speakers": [], "diarization": False,
             "engine": "", "engineNote": "", "duration": 0.0,
             "segments": [], "sessionId": "", "progress": 0.0,
+            "origin": "",
         }
         self._trans_cancel = threading.Event()
         # sessionId с воркера до доставки QueuedConnection от transcribeTick.
@@ -738,6 +743,7 @@ class Controller(QObject):
         self._data_dir = Path(data_dir)
         self._watch_queue: list[str] = []
         self._pcm_rings: dict[str, PcmRing] = {}
+        self._live_wavs: dict[str, WavStream] = {}
         self._watch = WatchFolder(None, self._on_watch_file, poll_seconds=2.0)
         self.refreshHistory("")
         self._hits = self.store.list_keyword_events(limit=200)
@@ -1363,7 +1369,7 @@ class Controller(QObject):
 
     @Property(bool, notify=liveStateChanged)
     def liveActive(self):
-        return any(job.get("mode") == "live" for job in self._jobs.values())
+        return any(job.get("mode") in ("live", "live_process") for job in self._jobs.values())
 
     @Property(str, notify=liveStateChanged)
     def livePhase(self): return self._live_phase
@@ -1377,6 +1383,8 @@ class Controller(QObject):
             return "Готовим модель…"
         if self._live_phase == "stopping":
             return "Завершаем последние фразы…"
+        if self._live_phase == "process":
+            return STATUS_LABELS["live_process"]
         if self._live_diagnostic:
             return STATUS_LABELS[self._live_diagnostic]
         if self._live_phase == "decoding":
@@ -2815,6 +2823,8 @@ class Controller(QObject):
             else:
                 model_tag = self._settings["model"]
             sid = self.store.create_session(name, mode, url or kind, model_tag)
+            if mode == "live":
+                self._open_live_wav(sid)
             self._session_id = sid
             if sid == self._session_id:
                 self._session_title = name
@@ -2862,6 +2872,10 @@ class Controller(QObject):
                             sid, PcmRing(seconds=DICTATION_PCM_SECONDS)
                         )
                         ring.write(audio)
+                    elif mode == "live":
+                        writer = self._live_wavs.get(sid)
+                        if writer is not None:
+                            writer.write(audio)
                     live.feed(audio)
 
                 def on_gap(dropped, sid=sid, live=live):
@@ -3359,6 +3373,127 @@ class Controller(QObject):
                           self.dictationIslandDismiss.emit)
         return False
 
+    def _live_wav_path(self, sid: str) -> Path:
+        return Path(self._data_dir) / "live" / f"{sid}.wav"
+
+    def _open_live_wav(self, sid: str) -> Path | None:
+        """Start streaming the Live take to disk for the quality pass."""
+
+        path = self._live_wav_path(sid)
+        try:
+            self._live_wavs[sid] = WavStream(path)
+        except Exception as exc:  # noqa: BLE001
+            self._record_log("warning", f"Не удалось открыть запись Live: {exc}")
+            return None
+        self.store.set_session_audio_path(sid, str(path))
+        return path
+
+    def _close_live_wav(self, sid: str) -> Path | None:
+        writer = self._live_wavs.pop(sid, None)
+        if writer is None:
+            return None
+        try:
+            return writer.close()
+        except Exception as exc:  # noqa: BLE001
+            self._record_log("warning", f"Не удалось закрыть запись Live: {exc}")
+            return Path(writer.path)
+
+    def _live_wav_ready(self, path: Path) -> bool:
+        if not path.is_file():
+            return False
+        return self._probe_wav_duration(str(path)) >= LIVE_PROCESS_MIN_SECONDS
+
+    def _discard_live_audio(self, sid: str) -> None:
+        """Drop the temporary Live WAV after processing or cancel.
+
+        The user asked to keep the transcript and delete the audio. This is
+        app-owned temp audio, not a user-imported file.
+        """
+
+        paths: list[Path] = []
+        writer = self._live_wavs.pop(sid, None)
+        if writer is not None:
+            try:
+                paths.append(writer.close())
+            except Exception:  # noqa: BLE001
+                raw = getattr(writer, "path", None)
+                if raw:
+                    paths.append(Path(raw))
+        session = self.store.get_session(sid)
+        stored = str((session or {}).get("audio_path") or "")
+        if stored:
+            paths.append(Path(stored))
+        seen: set[str] = set()
+        for path in paths:
+            key = str(path)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            if path.is_file():
+                try:
+                    path.unlink()
+                except OSError:
+                    self._record_log(
+                        "warning", f"Не удалось удалить временный звук Live: {path.name}"
+                    )
+        self.store.set_session_audio_path(sid, "")
+
+    def _start_live_process(self, sid: str, path: Path) -> None:
+        """Re-decode the whole Live take with word timestamps, then drop WAV."""
+
+        self._trans_cancel.clear()
+        self._jobs[sid] = {
+            "cancel": self._trans_cancel,
+            "mode": "live_process",
+            "name": "Live",
+            "audio_path": str(path),
+        }
+        self._state = "processing"
+        self._status = STATUS_LABELS["live_process"]
+        self._live_phase = "process"
+        self._partial_caption = ""
+        self._partial_source = ""
+        self._preview_stable = ""
+        session = self.store.get_session(sid) or {"id": sid, "mode": "live", "title": "Живые субтитры", "segments": []}
+        self._open_transcript_session(session, working=True, audio_path=str(path))
+        self.liveStateChanged.emit()
+        self.statusChanged.emit()
+        self.changed.emit()
+
+        def process(sid=sid, wav=str(path)):
+            error = ""
+            try:
+                rows, engine, note = self._recognize_file(wav)
+                if self._trans_cancel.is_set():
+                    pass
+                elif rows:
+                    payload = self._transcript_store_payload(rows)
+                    identifiers = self.store.replace_segments(sid, payload)
+                    for row, seg_id in zip(rows, identifiers, strict=False):
+                        row["id"] = int(seg_id)
+                    legend = self._speaker_legend(rows)
+                    duration = max(
+                        self._probe_wav_duration(wav),
+                        max((float(row.get("end", 0.0)) for row in rows), default=0.0),
+                    )
+                    self.transcribeTick.emit({
+                        "segments": rows,
+                        "speakers": legend,
+                        "diarization": bool(legend),
+                        "engine": engine,
+                        "engineNote": note or "",
+                        "duration": duration,
+                        "sessionId": sid,
+                        "progress": 1.0,
+                        "stage": "",
+                        "origin": "live",
+                    })
+            except Exception as exc:  # noqa: BLE001
+                error = str(exc)
+            self.jobFinished.emit(sid, error, self._trans_cancel.is_set())
+
+        threading.Thread(target=process, name="dotaudio-live-process", daemon=True).start()
+
     def _on_finished(self, sid, error, cancelled):
         job = self._jobs.pop(sid, None)
         if job is None:
@@ -3384,13 +3519,34 @@ class Controller(QObject):
             )
             return
 
+        if mode == "live" and not cancelled and not error:
+            wav_path = self._close_live_wav(sid)
+            if wav_path is not None and self._live_wav_ready(wav_path):
+                self._start_live_process(sid, wav_path)
+                return
+            self._discard_live_audio(sid)
+        elif mode == "live":
+            self._discard_live_audio(sid)
+        elif mode == "live_process":
+            self._discard_live_audio(sid)
+
         self._pcm_rings.pop(sid, None)
         finish_status = "error" if error else "cancelled" if cancelled else "completed"
+        if mode == "live_process" and cancelled:
+            session = self.store.get_session(sid)
+            if session and any(
+                str(item.get("text") or "").strip()
+                for item in session.get("segments") or []
+            ):
+                finish_status = "completed"
+                self._notice = "Обработка отменена. Сохранены фразы Live."
         self.store.finish_session(sid, finish_status)
         if not error and not cancelled and mode in (
-            "dictation", "dictation_refine", "live", "media", "monitor",
+            "dictation", "dictation_refine", "live", "live_process", "media", "monitor",
         ):
             self._maybe_autotitle_session(sid)
+        if mode == "live_process" and not cancelled and not error:
+            self.transcriptPersisted.emit(sid)
         if error:
             self._notice = error
             self._record_log("error", error)
@@ -3413,7 +3569,7 @@ class Controller(QObject):
             self._level = 0
             self._input_state = self.inputState
             self.levelChanged.emit()
-            if job.get("mode") == "live":
+            if job.get("mode") in ("live", "live_process"):
                 self._close_open_phrase()
                 self._confirmed_caption = ""
                 self._partial_caption = ""
@@ -3424,6 +3580,10 @@ class Controller(QObject):
                 self._caption_revision += 1
                 self.captionChanged.emit()
                 self.liveStateChanged.emit()
+                if job.get("mode") == "live_process":
+                    session = self.store.get_session(self._session_id)
+                    if session:
+                        self._open_transcript_session(session)
             if job.get("mode") in ("dictation", "dictation_refine"):
                 self._partial_caption = ""
                 self._partial_source = ""
@@ -3592,6 +3752,21 @@ class Controller(QObject):
                 self._clear_media_peaks()
             if is_media and source and not self._media_url:
                 self._notice = "Исходный медиафайл не найден. Расшифровку всё ещё можно редактировать и экспортировать."
+            if session["mode"] == "live":
+                leftover = str(session.get("audio_path") or "")
+                if (
+                    session.get("status") in ("interrupted", "active")
+                    and leftover
+                    and Path(leftover).is_file()
+                    and self._live_wav_ready(Path(leftover))
+                ):
+                    self._start_live_process(sid, Path(leftover))
+                    return
+                if session.get("status") == "completed":
+                    self._open_transcript_session(session)
+                    self._status = session["title"]
+                    self.changed.emit()
+                    return
             if session["mode"] == "transcript" or (
                 session["mode"] == "media" and not KARAOKE_PAGE_ENABLED
             ):
@@ -3639,10 +3814,16 @@ class Controller(QObject):
         self._pending_seek_ms = -1
         self.changed.emit()
 
-    def _open_transcript_session(self, session: dict) -> None:
+    def _open_transcript_session(
+        self,
+        session: dict,
+        *,
+        working: bool = False,
+        audio_path: str = "",
+    ) -> None:
         """Восстановить страницу «Транскрибация» из сохранённой сессии."""
 
-        source = str(session.get("source") or "")
+        source = str(audio_path or session.get("audio_path") or session.get("source") or "")
         rows = []
         for segment in session.get("segments") or []:
             text, speaker = self._split_stored_segment(
@@ -3660,21 +3841,30 @@ class Controller(QObject):
                     "words": segment.get("words") or [],
                 }
             )
+        live_origin = str(session.get("mode") or "") == "live"
+        media_path = source if source and Path(source).is_file() else ""
+        if working:
+            note = "Уточняем расшифровку Live…"
+        elif live_origin and not media_path:
+            note = "Live · звук удалён после обработки"
+        else:
+            note = "Открыто из истории"
         self._trans_state.update(
             {
-                "phase": "done",
-                "stage": "",
-                "path": source if Path(source).is_file() else "",
+                "phase": "working" if working else "done",
+                "stage": "asr" if working else "",
+                "path": media_path,
                 "file": session.get("title") or Path(source).name,
                 "error": "",
                 "speakers": [],
                 "segments": rows,
                 "diarization": any(row.get("speaker") for row in rows),
                 "engine": "",
-                "engineNote": "Открыто из истории",
+                "engineNote": note,
                 "duration": max((float(row.get("end", 0.0)) for row in rows), default=0.0),
                 "sessionId": session.get("id") or "",
-                "progress": 1.0,
+                "progress": -1.0 if working else 1.0,
+                "origin": "live" if live_origin else "",
             }
         )
         # Легенда говорящих из подписей в тексте, без ролей движка.
@@ -4271,7 +4461,7 @@ class Controller(QObject):
                                   "file": str(Path(path).name), "error": "", "speakers": [],
                                   "segments": [], "engine": "", "engineNote": "", "duration": 0.0,
                                   "sessionId": "", "progress": 0.0,
-                                  "diarization": False})
+                                  "diarization": False, "origin": ""})
         self._schedule_media_peaks(path)
         self.transcribeChanged.emit()
 
@@ -4291,7 +4481,7 @@ class Controller(QObject):
                                   "file": media.name, "error": "", "speakers": [],
                                   "segments": [], "engine": "", "engineNote": "", "duration": 0.0,
                                   "sessionId": "", "progress": 0.0,
-                                  "diarization": False})
+                                  "diarization": False, "origin": ""})
         self._schedule_media_peaks(str(media.resolve()))
         self.transcribeChanged.emit()
 
@@ -4393,7 +4583,9 @@ class Controller(QObject):
         stored = f"[{label}] {body}" if label else body
         self.store.update_segment(session_id, segment_id, stored)
 
-    def _transcribe_local(self, path: str) -> str:
+    def _recognize_file(self, path: str) -> tuple[list[dict], str, str]:
+        """Локальный ASR + необязательные голоса. В базу не пишет."""
+
         # Параметры движения как в караоке (слова), но backend принудительно
         # «local»: транскрибация никогда не отправляет аудио на сервер.
         config = replace(self._config(media_mode=True), backend="local")
@@ -4448,7 +4640,7 @@ class Controller(QObject):
             results = [self._translate_segment(item) for item in results]
         collected = [item for item in collected if item["text"]] or results
         if self._trans_cancel.is_set():
-            return ""
+            return [], "", ""
         if duration > 0 and collected:
             end = max(float(item.get("end", 0.0)) for item in collected)
             self.transcribeTick.emit({
@@ -4464,12 +4656,15 @@ class Controller(QObject):
                 "duration": duration,
                 "stage": "asr",
             })
-        rows, engine, note = self._identify_voices(path, collected, audio=audio)
+        return self._identify_voices(path, collected, audio=audio)
+
+    def _transcribe_local(self, path: str) -> str:
+        rows, engine, note = self._recognize_file(path)
         if self._trans_cancel.is_set():
             return ""
         legend = self._speaker_legend(rows)
         duration_final = max(
-            duration,
+            self._probe_wav_duration(path),
             max((float(row.get("end", 0.0)) for row in rows), default=0.0),
         )
         session_id = self._persist_transcript(path, rows)
@@ -4487,17 +4682,11 @@ class Controller(QObject):
         })
         return ""
 
-    def _persist_transcript(self, path: str, rows: list[dict]) -> str:
-        """Записать результат страницы «Транскрибация» в историю.
+    def _transcript_store_payload(self, rows: list[dict]) -> list[dict]:
+        """Сегменты страницы «Транскрибация» в формате Store."""
 
-        Текст хранится без префикса ``[Имя]``, если Store уже принимает
-        колонку speaker. Иначе - совместимый fallback в тексте сегмента.
-        """
-
-        media = Path(path)
         use_speaker = self._store_supports_speaker_column()
         payload: list[dict] = []
-        kept: list[dict] = []
         for row in rows:
             text = str(row.get("text") or "").strip()
             if not text:
@@ -4516,7 +4705,18 @@ class Controller(QObject):
             if use_speaker:
                 item["speaker"] = speaker
             payload.append(item)
-            kept.append(row)
+        return payload
+
+    def _persist_transcript(self, path: str, rows: list[dict]) -> str:
+        """Записать результат страницы «Транскрибация» в историю.
+
+        Текст хранится без префикса ``[Имя]``, если Store уже принимает
+        колонку speaker. Иначе - совместимый fallback в тексте сегмента.
+        """
+
+        media = Path(path)
+        payload = self._transcript_store_payload(rows)
+        kept = [row for row in rows if str(row.get("text") or "").strip()]
         if not payload:
             return ""
         session_id = self.store.create_session(
@@ -4683,7 +4883,8 @@ class Controller(QObject):
         self._trans_state.update({"phase": "idle", "stage": "", "file": "", "path": "",
                                   "error": "", "speakers": [], "segments": [],
                                   "diarization": False, "engine": "", "engineNote": "",
-                                  "duration": 0.0, "sessionId": "", "progress": 0.0})
+                                  "duration": 0.0, "sessionId": "", "progress": 0.0,
+                                  "origin": ""})
         self._clear_media_peaks()
         self.transcribeChanged.emit()
 

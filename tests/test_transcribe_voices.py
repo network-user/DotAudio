@@ -148,6 +148,7 @@ def test_persist_transcript_writes_history_session(tmp_path):
 
     class _PersistStub:
         _persist_transcript = Controller._persist_transcript
+        _transcript_store_payload = Controller._transcript_store_payload
         _maybe_autotitle_session = Controller._maybe_autotitle_session
         _store_supports_speaker_column = Controller._store_supports_speaker_column
 
@@ -273,6 +274,7 @@ def test_rename_transcript_speaker_rewrites_history(tmp_path):
         renameTranscriptSpeaker = Controller.renameTranscriptSpeaker
         _persist_transcript_speaker_labels = Controller._persist_transcript_speaker_labels
         _persist_transcript = Controller._persist_transcript
+        _transcript_store_payload = Controller._transcript_store_payload
         _maybe_autotitle_session = Controller._maybe_autotitle_session
         _store_supports_speaker_column = Controller._store_supports_speaker_column
         _write_segment_to_store = Controller._write_segment_to_store
@@ -324,9 +326,11 @@ def test_edit_transcript_segment_updates_text_and_store(tmp_path):
     class _Edit:
         editTranscriptSegment = Controller.editTranscriptSegment
         _persist_transcript = Controller._persist_transcript
+        _transcript_store_payload = Controller._transcript_store_payload
         _maybe_autotitle_session = Controller._maybe_autotitle_session
         _store_supports_speaker_column = Controller._store_supports_speaker_column
         _write_segment_to_store = Controller._write_segment_to_store
+        _trans_push_undo = Controller._trans_push_undo
 
         def __init__(self):
             self.store = Store(tmp_path / "history.db")
@@ -335,6 +339,8 @@ def test_edit_transcript_segment_updates_text_and_store(tmp_path):
             self._session_id = ""
             self._trans_state = {"speakers": [], "segments": [], "sessionId": ""}
             self.transcribeChanged = _Signal()
+            self._trans_edit_undo = []
+            self._trans_edit_redo = []
 
     stub = _Edit()
     path = Path(tmp_path) / "edit.wav"
@@ -366,6 +372,7 @@ def test_set_transcript_segment_speaker_assigns_role(tmp_path):
         setTranscriptSegmentSpeaker = Controller.setTranscriptSegmentSpeaker
         _speaker_legend = staticmethod(Controller._speaker_legend)
         _persist_transcript = Controller._persist_transcript
+        _transcript_store_payload = Controller._transcript_store_payload
         _maybe_autotitle_session = Controller._maybe_autotitle_session
         _store_supports_speaker_column = Controller._store_supports_speaker_column
         _write_segment_to_store = Controller._write_segment_to_store
@@ -450,11 +457,13 @@ def test_transcribe_local_emits_streaming_ticks(tmp_path):
 
     class _Stream:
         _transcribe_local = Controller._transcribe_local
+        _recognize_file = Controller._recognize_file
         _probe_wav_duration = staticmethod(Controller._probe_wav_duration)
         _identify_voices = Controller._identify_voices
         _label_speakers = staticmethod(Controller._label_speakers)
         _speaker_legend = staticmethod(Controller._speaker_legend)
         _persist_transcript = Controller._persist_transcript
+        _transcript_store_payload = Controller._transcript_store_payload
         _store_supports_speaker_column = Controller._store_supports_speaker_column
         _maybe_autotitle_session = Controller._maybe_autotitle_session
 
