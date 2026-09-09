@@ -245,6 +245,10 @@ class RecognitionConfig:
     # decode as a preview: faster at the cost of a little transcript quality.
     # It never applies outside Live.
     live_greedy_finals: bool = False
+    # Отдельная быстрая модель для черновиков Live. Финал считает ``model``,
+    # поэтому в историю попадает точный текст, а на экран - мгновенный.
+    # Пустая строка означает «одна модель на всё». Live only.
+    live_draft_model: str = ""
     # "speech" keeps the confidence gate: sound that the decoder does not
     # believe in (music, noise) is reported as nothing.  "everything" shows
     # whatever the decoder heard, which is the explicit "caption the song"
@@ -554,6 +558,11 @@ class Engine:
                     "end": float(getattr(raw, "end", 0.0)),
                     "text": text,
                 }
+                from dotaudio.transcript_pro import confidence_from_logprob
+
+                segment["confidence"] = confidence_from_logprob(
+                    float(getattr(raw, "avg_logprob", 0.0) or 0.0)
+                )
                 words = self._word_timings(raw)
                 if words:
                     segment["words"] = words

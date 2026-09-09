@@ -94,6 +94,10 @@ from dotaudio.watch_folder import WatchFolder
 KARAOKE_PAGE_ENABLED = False
 
 MODEL_BY_PROFILE = {"fast": "base", "balanced": "small", "quality": "large-v3"}
+# Модели, которые сами успевают за речью на живом окне: каскад им не нужен.
+LIVE_FAST_MODELS = ("tiny", "base", "small")
+# Чем считать черновики Live, когда финал идёт тяжёлой моделью.
+LIVE_DRAFT_FALLBACK = "small"
 
 # Справочные характеристики моделей Whisper из публичной документации
 # faster-whisper. Это параметры архитектуры и требования к памяти, а не
@@ -129,6 +133,11 @@ DEFAULTS = {
     # коротком окне, а на CPU/GPU добавляет задержку. Диктовка и медиа
     # этот флаг не читают (у них свой profile.beam).
     "live_greedy_finals": True,
+    # Модель черновиков Live. "auto" - лёгкая модель на черновик, когда
+    # финал считает тяжёлая: замер на этой машине показал, что medium сам
+    # отстаёт от речи на 125-328 мс, а с черновиком small отставание
+    # падает до 0-7 мс при том же тексте в истории. "off" - одна модель.
+    "live_draft_model": "auto",
     # Живой движок распознавания. Whisper по умолчанию: на замерах этого
     # проекта он даёт WER 8% против 52% у vosk на той же записи, а vosk -
     # необязательный пакет, которого на чистой установке может не быть.
@@ -388,6 +397,23 @@ def hotkey_id(value: str) -> str:
     return "+".join(out)
 
 
+def live_draft_model_for(model: str, setting: str) -> str:
+    """Модель черновиков Live; пустая строка - считать той же, что финал.
+
+    Черновик читают глазами по ходу речи, поэтому его цена важнее его
+    точности: финал всё равно перепишет строку своим текстом. Тяжёлой
+    модели на черновик не хватает времени, лёгкой хватает с запасом.
+    """
+
+    choice = str(setting or "auto").strip()
+    name = str(model or "").strip()
+    if choice == "off":
+        return ""
+    if choice in MODEL_CATALOG:
+        return "" if choice == name else choice
+    return "" if name in LIVE_FAST_MODELS else LIVE_DRAFT_FALLBACK
+
+
 def live_engine_label(method: str, model: str = "", vosk_size: str = "") -> str:
     """Человекочитаемая подпись активного движка/модели для Live.
 
@@ -505,6 +531,10 @@ class Controller(QObject):
         self.store = Store(data_dir / "history.db")
         self.desktop = desktop
         self.engine = Engine()
+        # Черновики Live считает отдельный движок: один движок держит в
+        # памяти одну модель, и на общем окна черновика и финала вытесняли
+        # бы модель друг у друга несколько раз в секунду.
+        self._draft_engine: Engine | None = None
         # vosk-движок для живых субтитров создаётся лениво при первом запуске
         # Live с выбранным размером и кешируется между сессиями.
         self._vosk_engine: VoskEngine | None = None
@@ -1420,6 +1450,7 @@ class Controller(QObject):
             "speech_mode": ("ru", "en", "en_ru"),
             "source": ("microphone", "system"), "live_source": ("microphone", "system", "mixed"),
             "live_sensitivity": ("speech", "everything"),
+            "live_draft_model": ("auto", "off", "tiny", "base", "small"),
             "live_engine": ("vosk", "whisper"),
             "vosk_size": ("small", "big"),
             "diarize_engine": tuple(DIARIZE_ENGINES),
@@ -1582,6 +1613,9 @@ class Controller(QObject):
             # добавляет задержку. Выключатель в настройках больше не тормозит
             # Live старым False из базы.
             values["live_greedy_finals"] = True
+            values["live_draft_model"] = live_draft_model_for(
+                str(values["model"]), self._settings.get("live_draft_model")
+            )
         if str(values.get("backend") or "local") == "remote":
             values["initial_prompt"] = ""
         else:
@@ -2403,6 +2437,34 @@ class Controller(QObject):
             self.captionChanged.emit()
             self.liveStateChanged.emit()
 
+    def _live_draft_engine(self, config: RecognitionConfig) -> Engine | None:
+        """Движок черновиков Live и фоновый прогрев его модели."""
+
+        draft = str(getattr(config, "live_draft_model", "") or "").strip()
+        if not draft or draft == config.model:
+            return None
+        if self._draft_engine is None:
+            self._draft_engine = Engine()
+        engine = self._draft_engine
+        if not engine.has_cached_model(draft, config.device):
+            # Прогрев в фоне: захват уже идёт, а первое окно черновика
+            # подождёт загрузку само, не блокируя интерфейс.
+            def warm() -> None:
+                try:
+                    engine.prepare(replace(config, model=draft))
+                except Exception as error:
+                    # Ускорение необязательное: Live продолжает работать на
+                    # выбранной модели, а причина уходит в журнал.
+                    self.logArrived.emit(
+                        "warning",
+                        f"Быстрый черновик {draft} не поднялся: {error}",
+                    )
+
+            threading.Thread(
+                target=warm, name="dotaudio-live-draft-prepare", daemon=True
+            ).start()
+        return engine
+
     def _acquire_asr_vram(self, config: RecognitionConfig | None = None) -> None:
         """Заранее вытеснить LLM, если Whisper пойдёт на CUDA."""
 
@@ -2422,6 +2484,8 @@ class Controller(QObject):
     def _release_idle_model(self):
         if self._jobs or self._model_preparing:
             return
+        if self._draft_engine is not None:
+            self._draft_engine.release_cached_model()
         if not self.engine.release_cached_model():
             return
         self._prepared_model = ""
@@ -2758,6 +2822,11 @@ class Controller(QObject):
                 lambda error, cancelled, sid=sid: self.jobFinished.emit(sid, error, cancelled),
                 on_partial=_emit_partial if mode in ("live", "dictation") else None,
                 catch_up=(mode == "live"),
+                draft_engine=(
+                    self._live_draft_engine(config)
+                    if mode == "live" and not use_vosk
+                    else None
+                ),
             )
             self._jobs[sid] = {"live": live, "mode": mode, "name": name, "hotkey": hotkey, "engine": engine_now, "vosk": use_vosk}
             try:

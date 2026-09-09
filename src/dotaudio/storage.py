@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 RECOVERED_SESSION_STATUS = "interrupted"
 
 # Переписка вне записи (общий чат) хранится под этим ключом: NULL в
@@ -59,7 +59,7 @@ def _split_speaker_prefix(text: str) -> tuple[str, str]:
     return label, rest.strip()
 
 
-def _validate_segment(segment: dict[str, Any]) -> tuple[float, float, str, str, str]:
+def _validate_segment(segment: dict[str, Any]) -> tuple[float, float, str, str, str, float]:
     try:
         start = float(segment["start"])
         end = float(segment["end"])
@@ -96,7 +96,18 @@ def _validate_segment(segment: dict[str, Any]) -> tuple[float, float, str, str, 
             text = plain
     else:
         speaker, text = _split_speaker_prefix(text)
-    return start, end, text, json.dumps(safe_words, ensure_ascii=False), speaker
+    confidence = -1.0
+    raw_conf = segment.get("confidence")
+    if raw_conf is not None:
+        try:
+            confidence = float(raw_conf)
+        except (TypeError, ValueError):
+            confidence = -1.0
+        if not math.isfinite(confidence):
+            confidence = -1.0
+        else:
+            confidence = max(-1.0, min(1.0, confidence))
+    return start, end, text, json.dumps(safe_words, ensure_ascii=False), speaker, confidence
 
 
 class Store:
@@ -133,6 +144,7 @@ class Store:
                 self._add_transcript_embeddings,
                 self._add_recovery_and_events,
                 self._add_segment_speaker,
+                self._add_segment_confidence,
             )
             for target_version in range(version + 1, SCHEMA_VERSION + 1):
                 connection.execute("BEGIN IMMEDIATE")
@@ -348,6 +360,16 @@ class Store:
                 (speaker, body, int(row["id"])),
             )
 
+    @staticmethod
+    def _add_segment_confidence(connection: sqlite3.Connection) -> None:
+        """Уверенность ASR (0..1) или -1, если модель её не отдала."""
+
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(segments)")}
+        if "confidence" not in columns:
+            connection.execute(
+                "ALTER TABLE segments ADD COLUMN confidence REAL NOT NULL DEFAULT -1"
+            )
+
     def create_session(
         self,
         title: str,
@@ -392,15 +414,16 @@ class Store:
             return []
         identifiers: list[int] = []
         with self._connect() as connection:
-            for start, end, text, words, speaker in rows:
+            for start, end, text, words, speaker, confidence in rows:
                 cursor = connection.execute(
                     """
                     INSERT INTO segments (
-                        session_id, start, end, text, original_text, words_json, speaker
+                        session_id, start, end, text, original_text, words_json,
+                        speaker, confidence
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (session_id, start, end, text, text, words, speaker),
+                    (session_id, start, end, text, text, words, speaker, confidence),
                 )
                 identifiers.append(int(cursor.lastrowid))
         return identifiers
@@ -423,15 +446,16 @@ class Store:
             connection.execute(
                 "DELETE FROM segments WHERE session_id = ?", (str(session_id),)
             )
-            for start, end, text, words, speaker in rows:
+            for start, end, text, words, speaker, confidence in rows:
                 cursor = connection.execute(
                     """
                     INSERT INTO segments (
-                        session_id, start, end, text, original_text, words_json, speaker
+                        session_id, start, end, text, original_text, words_json,
+                        speaker, confidence
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (str(session_id), start, end, text, text, words, speaker),
+                    (str(session_id), start, end, text, text, words, speaker, confidence),
                 )
                 identifiers.append(int(cursor.lastrowid))
         return identifiers
@@ -445,7 +469,7 @@ class Store:
                 return None
             segments = connection.execute(
                 """
-                SELECT id, start, end, text, words_json, speaker
+                SELECT id, start, end, text, words_json, speaker, confidence
                 FROM segments
                 WHERE session_id = ?
                 ORDER BY start ASC, id ASC
@@ -464,6 +488,10 @@ class Store:
             if isinstance(words, list) and words:
                 item["words"] = words
             item["speaker"] = str(item.get("speaker") or "")
+            try:
+                item["confidence"] = float(item.get("confidence", -1))
+            except (TypeError, ValueError):
+                item["confidence"] = -1.0
             result["segments"].append(item)
         return result
 
@@ -830,15 +858,16 @@ class Store:
         segment always consistent instead of applying partial updates that can
         break monotonicity in between calls.
         """
-        start, end, text, words, speaker = _validate_segment(segment)
+        start, end, text, words, speaker, confidence = _validate_segment(segment)
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE segments
-                SET start = ?, end = ?, text = ?, words_json = ?, speaker = ?
+                SET start = ?, end = ?, text = ?, words_json = ?, speaker = ?,
+                    confidence = ?
                 WHERE id = ? AND session_id = ?
                 """,
-                (start, end, text, words, speaker, segment_id, session_id),
+                (start, end, text, words, speaker, confidence, segment_id, session_id),
             )
 
     def finish_session(

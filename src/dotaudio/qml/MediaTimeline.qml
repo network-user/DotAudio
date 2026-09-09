@@ -1,8 +1,7 @@
 import QtQuick
 import "Theme.js" as Theme
 
-// Таймлайн медиа (не Live Waveform): peaks из bridge.mediaPeaks (воркер),
-// клик = seek, подсветка активного слова. Waveform.qml для Live не трогаем.
+// Таймлайн медиа: peaks, seek, подсветка активной фразы и ручки границ.
 Item {
     id: root
 
@@ -10,8 +9,11 @@ Item {
     property var segments: []
     property var peaks: []
     property real peaksDuration: 0
+    property int selectedIndex: -1
+    property bool editable: false
 
     signal seeked(real seconds)
+    signal edgeChanged(int index, real start, real end)
 
     readonly property real durationSec: {
         var fromPeaks = Number(root.peaksDuration)
@@ -43,9 +45,16 @@ Item {
         return null
     }
 
+    function selectedSeg() {
+        if (root.selectedIndex < 0 || root.selectedIndex >= root.segments.length)
+            return null
+        return root.segments[root.selectedIndex]
+    }
+
     implicitHeight: 56
 
     Rectangle {
+        id: frame
         anchors.fill: parent
         radius: Theme.radiusMd
         color: Theme.surface2
@@ -91,6 +100,16 @@ Item {
                     ctx.fillRect(x0, 0, Math.max(2, x1 - x0), h)
                 }
 
+                var sel = root.selectedSeg()
+                if (sel) {
+                    var sx0 = (Number(sel.start) / dur) * w
+                    var sx1 = (Number(sel.end) / dur) * w
+                    ctx.fillStyle = Theme.borderHi
+                    ctx.globalAlpha = 0.25
+                    ctx.fillRect(sx0, 0, Math.max(2, sx1 - sx0), h)
+                    ctx.globalAlpha = 1
+                }
+
                 var playX = (root.positionSec / dur) * w
                 ctx.strokeStyle = Theme.text
                 ctx.lineWidth = 1
@@ -113,6 +132,64 @@ Item {
                 root.seeked(sec)
             }
         }
+
+        // Ручки границ выбранной фразы.
+        Item {
+            id: handles
+            anchors.fill: parent
+            anchors.margins: 6
+            visible: root.editable && root.selectedSeg() !== null
+
+            readonly property var seg: root.selectedSeg()
+            readonly property real dur: Math.max(0.001, root.durationSec)
+            readonly property real x0: seg ? (Number(seg.start) / dur) * width : 0
+            readonly property real x1: seg ? (Number(seg.end) / dur) * width : 0
+
+            Rectangle {
+                x: handles.x0 - 3
+                width: 6
+                height: parent.height
+                radius: 2
+                color: Theme.text
+                MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -4
+                    cursorShape: Qt.SizeHorCursor
+                    drag.target: parent
+                    drag.axis: Drag.XAxis
+                    drag.minimumX: -3
+                    drag.maximumX: handles.x1 - 10
+                    onReleased: {
+                        if (!handles.seg)
+                            return
+                        var start = Math.max(0, (parent.x + 3) / Math.max(1, handles.width) * handles.dur)
+                        root.edgeChanged(root.selectedIndex, start, Number(handles.seg.end))
+                    }
+                }
+            }
+            Rectangle {
+                x: handles.x1 - 3
+                width: 6
+                height: parent.height
+                radius: 2
+                color: Theme.text
+                MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -4
+                    cursorShape: Qt.SizeHorCursor
+                    drag.target: parent
+                    drag.axis: Drag.XAxis
+                    drag.minimumX: handles.x0 + 4
+                    drag.maximumX: handles.width - 3
+                    onReleased: {
+                        if (!handles.seg)
+                            return
+                        var end = Math.min(handles.dur, (parent.x + 3) / Math.max(1, handles.width) * handles.dur)
+                        root.edgeChanged(root.selectedIndex, Number(handles.seg.start), end)
+                    }
+                }
+            }
+        }
     }
 
     Connections {
@@ -124,6 +201,7 @@ Item {
     onPeaksChanged: canvas.requestPaint()
     onPeaksDurationChanged: canvas.requestPaint()
     onSegmentsChanged: canvas.requestPaint()
+    onSelectedIndexChanged: canvas.requestPaint()
     onWidthChanged: canvas.requestPaint()
     onHeightChanged: canvas.requestPaint()
 }

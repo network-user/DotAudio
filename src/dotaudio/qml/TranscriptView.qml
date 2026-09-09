@@ -45,6 +45,9 @@ Rectangle {
     property bool exportTimestamps: false
     property bool exportSpeakers: true
     property bool exportFocusedOnly: false
+    property bool onlyFlagged: false
+    property var mutedKeys: ({})
+    property var soloKeys: ({})
 
     readonly property var exportFormats: [
         { key: "txt", label: "TXT - простой текст" },
@@ -58,12 +61,21 @@ Rectangle {
 
     readonly property var rows: {
         var list = view.segs || []
-        if (view.focusKey <= 0)
-            return list
         var out = []
         for (var i = 0; i < list.length; ++i) {
-            if (Number(list[i].role) === view.focusKey)
-                out.push(list[i])
+            var row = list[i]
+            if (view.focusKey > 0 && Number(row.role) !== view.focusKey)
+                continue
+            if (view.onlyFlagged) {
+                var conf = Number(row.confidence)
+                var reviewed = Boolean(row.reviewed)
+                var low = (conf >= 0 && conf < 0.55) || (conf < 0 && String(row.text || "").length < 2)
+                if (!(low && !reviewed))
+                    continue
+            }
+            if (view.speakerTrackHidden(row))
+                continue
+            out.push(row)
         }
         return out
     }
@@ -171,6 +183,54 @@ Rectangle {
         else if (fit && fit.note)
             parts.push(String(fit.note))
         return parts.join(" · ")
+    }
+
+    function speakerTrackHidden(row) {
+        var key = Number(row.role || 0)
+        if (key <= 0)
+            return false
+        var soloOn = false
+        for (var k in view.soloKeys) {
+            if (view.soloKeys[k]) {
+                soloOn = true
+                break
+            }
+        }
+        if (soloOn)
+            return !Boolean(view.soloKeys[String(key)])
+        return Boolean(view.mutedKeys[String(key)])
+    }
+
+    function toggleMuteKey(key) {
+        var next = Object.assign({}, view.mutedKeys)
+        var k = String(key)
+        next[k] = !Boolean(next[k])
+        view.mutedKeys = next
+    }
+
+    function toggleSoloKey(key) {
+        var next = Object.assign({}, view.soloKeys)
+        var k = String(key)
+        next[k] = !Boolean(next[k])
+        view.soloKeys = next
+    }
+
+    function confidenceLabel(row) {
+        var conf = Number(row.confidence)
+        if (!(conf >= 0))
+            return ""
+        return Math.round(conf * 100) + "%"
+    }
+
+    function confidenceTint(row) {
+        var conf = Number(row.confidence)
+        if (!(conf >= 0))
+            return Theme.faint
+        if (conf < 0.55)
+            return Theme.rec
+        if (conf < 0.72)
+            return Theme.muted
+        return Theme.text
     }
 
     function selectWhisperModel(index) {
@@ -313,6 +373,61 @@ Rectangle {
                 return
             player.toggle()
         }
+    }
+    Shortcut {
+        sequence: "Left"
+        context: Qt.WindowShortcut
+        enabled: view.visible && view.hasMedia && !view.focusIsTextEdit()
+        onActivated: player.skipBy(-1)
+    }
+    Shortcut {
+        sequence: "Right"
+        context: Qt.WindowShortcut
+        enabled: view.visible && view.hasMedia && !view.focusIsTextEdit()
+        onActivated: player.skipBy(1)
+    }
+    Shortcut {
+        sequence: "I"
+        context: Qt.WindowShortcut
+        enabled: view.visible && view.hasMedia && !view.focusIsTextEdit()
+        onActivated: player.markIn()
+    }
+    Shortcut {
+        sequence: "O"
+        context: Qt.WindowShortcut
+        enabled: view.visible && view.hasMedia && !view.focusIsTextEdit()
+        onActivated: player.markOut()
+    }
+    Shortcut {
+        sequence: "L"
+        context: Qt.WindowShortcut
+        enabled: view.visible && view.hasMedia && !view.focusIsTextEdit()
+        onActivated: {
+            if (player.loopRegion) {
+                player.loopRegion = false
+                player.clearPhraseRange()
+            } else {
+                player.playAbRegion()
+            }
+        }
+    }
+    Shortcut {
+        sequence: "R"
+        context: Qt.WindowShortcut
+        enabled: view.visible && view.hasMedia && !view.focusIsTextEdit()
+        onActivated: player.repeatPhrase()
+    }
+    Shortcut {
+        sequence: "Ctrl+Z"
+        context: Qt.WindowShortcut
+        enabled: view.visible && !view.busyPhase
+        onActivated: bridge.undoTranscriptEdit()
+    }
+    Shortcut {
+        sequence: "Ctrl+Y"
+        context: Qt.WindowShortcut
+        enabled: view.visible && !view.busyPhase
+        onActivated: bridge.redoTranscriptEdit()
     }
 
     DropArea {
@@ -651,9 +766,40 @@ Rectangle {
             segments: view.segs
             peaks: bridge.mediaPeaks
             peaksDuration: bridge.mediaPeaksDuration
+            selectedIndex: view.playIndex >= 0 ? view.playIndex : view.editingIndex
+            editableEdges: view.segs.length > 0 && !view.busyPhase
             onPlayingChanged: view.syncPlayIndex()
             onPositionChanged: view.syncPlayIndex()
             onDurationChanged: view.applyPendingSeek()
+            onEdgeChanged: function (index, start, end) {
+                bridge.setTranscriptPhraseWindow(index, start, end)
+            }
+        }
+
+        TranscriptTools {
+            Layout.fillWidth: true
+            visible: view.segs.length > 0
+            busy: view.busyPhase
+            quality: bridge.transcriptQuality
+            presets: bridge.transcriptExportPresets
+            compare: bridge.transcriptCompare
+            canUndo: bridge.transcriptCanUndo
+            canRedo: bridge.transcriptCanRedo
+            onlyFlagged: view.onlyFlagged
+            onUndoRequested: bridge.undoTranscriptEdit()
+            onRedoRequested: bridge.redoTranscriptEdit()
+            onReplaceRequested: function (find, replace) {
+                bridge.replaceInTranscript(find, replace, false)
+            }
+            onDictionaryRequested: bridge.applyDictionaryToTranscript()
+            onExportPresetRequested: function (key) {
+                bridge.transcriptExportPreset(key)
+            }
+            onCompareRequested: bridge.runTranscriptModelCompare()
+            onOnlyFlaggedToggled: function (value) {
+                view.onlyFlagged = value
+            }
+            onAssistantRequested: bridge.openTranscriptInAssistant()
         }
 
         // Текущая фраза синхронно со звуком - всегда над списком.
@@ -884,11 +1030,29 @@ Rectangle {
                 }
 
                 // Полоса голосов по всей записи: видно, кто и когда говорит.
+                SpeakerTracks {
+                    Layout.fillWidth: true
+                    visible: view.speakers.length > 0 && view.segs.length > 0
+                    speakers: view.speakers
+                    segments: view.segs
+                    duration: view.total
+                    focusKey: view.focusKey
+                    mutedKeys: view.mutedKeys
+                    soloKeys: view.soloKeys
+                    onFocusRequested: function (key) { view.focusKey = key }
+                    onMuteToggled: function (key) { view.toggleMuteKey(key) }
+                    onSoloToggled: function (key) { view.toggleSoloKey(key) }
+                    onSeekRequested: function (start, end, index) {
+                        view.revealPhrase(index)
+                        view.playPhraseAt(start, end, index)
+                    }
+                }
+
                 Item {
                     id: timeline
                     Layout.fillWidth: true
                     implicitHeight: 26
-                    visible: view.segs.length > 0
+                    visible: false
 
                     Rectangle {
                         anchors.fill: parent
@@ -1195,6 +1359,19 @@ Rectangle {
                                         font.pixelSize: Theme.fsSmall
                                         font.weight: Font.DemiBold
                                     }
+                                    Label {
+                                        visible: view.confidenceLabel(segCard.modelData).length > 0
+                                        text: view.confidenceLabel(segCard.modelData)
+                                        color: view.confidenceTint(segCard.modelData)
+                                        font.pixelSize: Theme.fsMicro
+                                        font.family: Theme.monoFamily
+                                    }
+                                    Label {
+                                        visible: Boolean(segCard.modelData.reviewed)
+                                        text: "проверено"
+                                        color: Theme.faint
+                                        font.pixelSize: Theme.fsMicro
+                                    }
                                 }
                                 Label {
                                     Layout.fillWidth: true
@@ -1322,6 +1499,53 @@ Rectangle {
                             onClicked: segCard.replay()
                             ToolTip.visible: hovered
                             ToolTip.text: "Воспроизвести фразу"
+                        }
+                        PillButton {
+                            text: "✂"
+                            compact: true
+                            Layout.alignment: Qt.AlignVCenter
+                            enabled: !view.busyPhase
+                            onClicked: {
+                                var mid = (segCard.startSec + segCard.endSec) / 2
+                                bridge.splitTranscriptSegment(segCard.globalIndex, mid)
+                            }
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Разрезать фразу пополам"
+                        }
+                        PillButton {
+                            text: "＋"
+                            compact: true
+                            Layout.alignment: Qt.AlignVCenter
+                            enabled: !view.busyPhase
+                                     && segCard.globalIndex >= 0
+                                     && segCard.globalIndex < view.segs.length - 1
+                            onClicked: bridge.mergeTranscriptSegment(segCard.globalIndex)
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Склеить со следующей"
+                        }
+                        PillButton {
+                            text: Boolean(segCard.modelData.reviewed) ? "✓" : "?"
+                            compact: true
+                            Layout.alignment: Qt.AlignVCenter
+                            enabled: !view.busyPhase
+                            onClicked: bridge.markTranscriptReviewed(
+                                segCard.globalIndex,
+                                !Boolean(segCard.modelData.reviewed)
+                            )
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Отметить как проверенную"
+                        }
+                        PillButton {
+                            text: "AI"
+                            compact: true
+                            Layout.alignment: Qt.AlignVCenter
+                            enabled: !view.busyPhase
+                            onClicked: bridge.openTranscriptPhraseInAssistant(
+                                "Разбери фразу на " + view.timecode(segCard.startSec)
+                                + ": " + String(segCard.modelData.text || "")
+                            )
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Открыть в ассистенте с этой фразой"
                         }
                     }
                 }

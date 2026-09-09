@@ -18,6 +18,8 @@ Rectangle {
     property alias position: media.position
     property alias duration: media.duration
     property bool compact: false
+    property int selectedIndex: -1
+    property bool editableEdges: false
     readonly property real playbackRate: media.playbackRate
     readonly property bool canRepeatPhrase: root._phraseEndSec >= 0
     readonly property bool muted: audio.muted || audio.volume <= 0.001
@@ -27,8 +29,11 @@ Rectangle {
     property real _phraseStartSec: -1
     property real _phraseEndSec: -1
     property real _volumeBeforeMute: 0.85
+    property real inPointSec: -1
+    property real outPointSec: -1
+    property bool loopRegion: false
 
-    visible: root.source.length > 0
+    signal edgeChanged(int index, real start, real end)
     implicitHeight: body.implicitHeight + 2 * Theme.padCard
     radius: Theme.radiusLg
     color: Theme.surface
@@ -130,16 +135,58 @@ Rectangle {
         }
     }
 
+    function skipBy(deltaSec) {
+        root.clearPhraseRange()
+        var next = Math.max(0, Number(root.position) / 1000 + Number(deltaSec))
+        if (root.duration > 0)
+            next = Math.min(root.duration / 1000, next)
+        root.seekSeconds(next)
+    }
+
+    function markIn() {
+        root.inPointSec = Number(root.position) / 1000
+        if (root.outPointSec >= 0 && root.outPointSec <= root.inPointSec)
+            root.outPointSec = -1
+    }
+
+    function markOut() {
+        root.outPointSec = Number(root.position) / 1000
+        if (root.inPointSec >= 0 && root.outPointSec <= root.inPointSec)
+            root.inPointSec = Math.max(0, root.outPointSec - 0.25)
+    }
+
+    function clearAbRegion() {
+        root.inPointSec = -1
+        root.outPointSec = -1
+        root.loopRegion = false
+    }
+
+    function playAbRegion() {
+        if (root.inPointSec < 0 || root.outPointSec <= root.inPointSec)
+            return
+        root.loopRegion = true
+        root.playPhrase(root.inPointSec, root.outPointSec)
+    }
+
     MediaPlayer {
         id: media
         source: root.source
         audioOutput: audio
         onPositionChanged: {
-            if (root._phraseEndMs < 0)
-                return
-            if (position >= root._phraseEndMs) {
+            if (root._phraseEndMs >= 0 && position >= root._phraseEndMs) {
                 root._phraseEndMs = -1
+                if (root.loopRegion && root.inPointSec >= 0 && root.outPointSec > root.inPointSec) {
+                    root.playPhrase(root.inPointSec, root.outPointSec)
+                    return
+                }
                 media.pause()
+                return
+            }
+            if (root.loopRegion && root.inPointSec >= 0 && root.outPointSec > root.inPointSec) {
+                if (position / 1000 >= root.outPointSec) {
+                    root.seekSeconds(root.inPointSec)
+                    media.play()
+                }
             }
         }
     }
@@ -183,8 +230,13 @@ Rectangle {
             segments: root.segments
             peaks: root.peaks
             peaksDuration: root.peaksDuration
+            selectedIndex: root.selectedIndex
+            editable: root.editableEdges && root.selectedIndex >= 0
             visible: root.peaks.length > 0 || root.duration > 0
             onSeeked: root.clearPhraseRange()
+            onEdgeChanged: function (index, start, end) {
+                root.edgeChanged(index, start, end)
+            }
         }
 
         RowLayout {
@@ -207,6 +259,46 @@ Rectangle {
                 onClicked: root.repeatPhrase()
                 ToolTip.visible: hovered
                 ToolTip.text: "Повторить последнюю фразу"
+            }
+
+            PillButton {
+                text: "I"
+                compact: true
+                onClicked: root.markIn()
+                ToolTip.visible: hovered
+                ToolTip.text: "In-точка (I)"
+            }
+            PillButton {
+                text: "O"
+                compact: true
+                onClicked: root.markOut()
+                ToolTip.visible: hovered
+                ToolTip.text: "Out-точка (O)"
+            }
+            PillButton {
+                text: root.loopRegion ? "Loop●" : "Loop"
+                compact: true
+                enabled: root.inPointSec >= 0 && root.outPointSec > root.inPointSec
+                onClicked: {
+                    if (root.loopRegion) {
+                        root.loopRegion = false
+                        root.clearPhraseRange()
+                    } else {
+                        root.playAbRegion()
+                    }
+                }
+                ToolTip.visible: hovered
+                ToolTip.text: "Цикл In–Out"
+            }
+            PillButton {
+                text: "−1с"
+                compact: true
+                onClicked: root.skipBy(-1)
+            }
+            PillButton {
+                text: "+1с"
+                compact: true
+                onClicked: root.skipBy(1)
             }
 
             PillButton {
