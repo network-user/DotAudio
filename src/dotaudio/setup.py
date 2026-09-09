@@ -402,7 +402,8 @@ def merge_briefing(base: dict[str, Any], overrides: dict[str, Any] | None) -> di
     result["whisperLabel"] = WHISPER_LABELS.get(model, model)
     result["whisperMb"] = _mb(WHISPER_DOWNLOAD_MB.get(model))
     result["profile"] = PROFILE_FOR_MODEL.get(model, "balanced")
-    result["liveGreedyFinals"] = result["profile"] == "fast"
+    # Live всегда предпочитает greedy; профиль модели больше не отключает его.
+    result["liveGreedyFinals"] = bool(result.get("liveGreedyFinals", True))
     if "liveGreedyFinals" in data:
         result["liveGreedyFinals"] = bool(data["liveGreedyFinals"])
 

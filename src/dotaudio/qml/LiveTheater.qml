@@ -111,6 +111,15 @@ Rectangle {
                 ToolTip.text: "«Речь» показывает только речь, «Всё» - любой звук, включая песни"
             }
 
+            PillButton {
+                compact: true
+                text: bridge.speechModeLabel
+                enabled: !bridge.recording && !bridge.busy
+                onClicked: bridge.cycleSpeechMode()
+                ToolTip.visible: hovered
+                ToolTip.text: bridge.speechModeHint
+            }
+
             IconButton {
                 iconName: "overlay"
                 ink: root.overlayOn ? Theme.text : Theme.muted

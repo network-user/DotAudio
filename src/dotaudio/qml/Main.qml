@@ -101,10 +101,9 @@ ApplicationWindow {
                     model: [
                         {key:"model", title:"Модель", choices:["tiny","base","small","medium","large-v3","turbo"]},
                         {key:"device", title:"Устройство", choices:["auto","cpu","cuda"]},
-                        {key:"language", title:"Язык", choices:["auto","ru","en","de","es","fr","zh"]},
+                        {key:"speech_mode", title:"Язык/перевод", choices:["ru","en","ru_en","en_ru"]},
                         {key:"live_source", title:"Источник Live", choices:["microphone","system","mixed"]},
-                        {key:"backend", title:"Обработка", choices:["local","remote"]},
-                        {key:"task", title:"Задача", choices:["transcribe","translate"]}
+                        {key:"backend", title:"Обработка", choices:["local","remote"]}
                     ]
                     RowLayout {
                         required property var modelData
@@ -125,7 +124,7 @@ ApplicationWindow {
                     enabled: !bridge.busy
                     onEditingFinished: bridge.setSetting("server_url", text)
                 }
-                Label { text: "translate переводит речь на английский. Модель скачивается при первом распознавании."; wrapMode: Text.Wrap; Layout.fillWidth: true; color: "#81838a" }
+                Label { text: "RU→EN - Whisper Translate; EN→RU - ASR + тестовый сетевой перевод. Модель скачивается при первом распознавании."; wrapMode: Text.Wrap; Layout.fillWidth: true; color: "#81838a" }
             }
             ColumnLayout {
                 visible: bridge.page === "monitor"

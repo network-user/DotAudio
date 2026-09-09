@@ -80,21 +80,28 @@ Rectangle {
 
     readonly property bool livePage: bridge.page === "live"
     readonly property bool liveMode: Boolean(bridge.liveActive)
+    readonly property bool dictationMode: bridge.page === "dictation" && !liveMode
     // Пока новая речь не началась, остров держит последнее законченное
     // предложение: истории на нём нет, а пустая строка сразу после фразы
     // читалась бы как потеря текста.
-    readonly property string capConfirmed: liveMode
-        ? (bridge.displayCaption.length ? bridge.confirmedCaption : bridge.settledCaption)
-        : bridge.caption
-    readonly property string capPending: liveMode ? bridge.partialCaption : ""
+    readonly property string capConfirmed: {
+        if (liveMode)
+            return bridge.displayCaption.length ? bridge.confirmedCaption : bridge.settledCaption
+        if (root.phase === "result")
+            return bridge.lastTranscript.length ? bridge.lastTranscript : bridge.text
+        return bridge.text.length ? bridge.text : bridge.caption
+    }
+    readonly property string capPending: liveMode
+        ? bridge.partialCaption
+        : (bridge.recording || bridge.busy ? bridge.partialCaption : "")
     readonly property int recSize: phase === "ready" ? 28 : 32
     readonly property string phaseLabel: {
         if (root.liveMode)
             return bridge.liveStatusText
+        if (bridge.busy && !bridge.recording)
+            return bridge.status.length ? bridge.status : "Распознаю"
         if (bridge.recording)
             return bridge.inputState === "Нет входного сигнала" ? "Не слышу источник" : "Слушаю"
-        if (bridge.busy)
-            return "Распознаю"
         return ""
     }
 
@@ -200,6 +207,17 @@ Rectangle {
                 }
             }
 
+            Label {
+                text: bridge.speechModeLabel
+                color: Theme.muted
+                font.pixelSize: Theme.fsSmall
+                font.family: Theme.fontFamily
+                TapHandler {
+                    enabled: !bridge.recording && !bridge.busy
+                    onTapped: bridge.cycleSpeechMode()
+                }
+            }
+
             Item { Layout.fillWidth: true }
 
             IconButton {
@@ -242,9 +260,7 @@ Rectangle {
                     StatusDot { active: bridge.recording }
                     Label {
                         Layout.fillWidth: true
-                        text: root.phase === "process" && !root.liveMode
-                              ? (bridge.recording ? "Распознаю" : "Завершаем")
-                              : root.phaseLabel
+                        text: root.phaseLabel
                         color: Theme.muted
                         font.pixelSize: Theme.fsSmall
                         font.family: Theme.fontFamily
@@ -302,17 +318,19 @@ Rectangle {
                 spacing: 5
 
                 RowLayout {
-                    visible: root.phase === "result"
+                    visible: root.phase === "result" || (root.dictationMode && bridge.busy && !bridge.recording)
                     spacing: 8
                     Label {
-                        text: "В буфере"
+                        text: root.phase === "result"
+                              ? (Boolean(bridge.settings.auto_paste) ? "В буфере и вставлено" : "В буфере")
+                              : (bridge.status.length ? bridge.status : "Уточняем…")
                         color: Theme.muted
                         font.pixelSize: Theme.fsSmall
                         font.family: Theme.fontFamily
                     }
                     Label {
-                        visible: bridge.lastTranscript.length > 0
-                        text: "Вставить"
+                        visible: root.phase === "result" && bridge.lastTranscript.length > 0
+                        text: "Вставить ещё раз"
                         color: Theme.text
                         font.pixelSize: Theme.fsSmall
                         font.weight: Font.DemiBold
@@ -333,7 +351,7 @@ Rectangle {
                 }
 
                 Waveform {
-                    visible: bridge.recording
+                    visible: bridge.recording || (bridge.busy && root.dictationMode)
                     Layout.fillWidth: true
                     Layout.preferredHeight: 10
                     bars: 24

@@ -13,6 +13,7 @@ from dotaudio.controller import (
     sensitivity_label,
 )
 from dotaudio.engine import Engine
+from dotaudio.translate import language_task_for
 
 
 class _Signal:
@@ -418,6 +419,53 @@ def test_sensitivity_label_and_toggle_round_trip() -> None:
     assert sensitivity_label(controller._settings["live_sensitivity"]) == "Всё"
     Controller.toggleLiveSensitivity(controller)
     assert controller._settings["live_sensitivity"] == "speech"
+
+
+def test_speech_mode_sets_language_task_and_config() -> None:
+    controller = Controller.__new__(Controller)
+    controller._jobs = {}
+    controller._settings = dict(DEFAULTS)
+    controller._translator = type(
+        "T",
+        (),
+        {"clear": staticmethod(lambda: None), "last_error": ""},
+    )()
+    controller._translate_notice_shown = False
+    controller._warmup_enabled = False
+    controller._prepared_model = "small"
+    controller.store = type("Store", (), {"save_settings": staticmethod(lambda _s: None)})()
+    controller._record_log = lambda *_args: None
+    controller.changed = _Signal()
+
+    assert DEFAULTS["speech_mode"] == "ru"
+    Controller.setSetting(controller, "speech_mode", "ru_en")
+    assert controller._settings["language"] == "ru"
+    assert controller._settings["task"] == "translate"
+    language, task = language_task_for(controller._settings["speech_mode"])
+    assert (language, task) == ("ru", "translate")
+
+    Controller.cycleSpeechMode(controller)
+    assert controller._settings["speech_mode"] == "en_ru"
+    assert controller._settings["language"] == "en"
+    assert controller._settings["task"] == "transcribe"
+    assert Controller.speechModeLabel.fget(controller) == "EN → RU"
+
+    from dotaudio.translate import Translator
+
+    controller._translator = Translator(
+        fetch=lambda _t: {
+            "responseData": {"translatedText": "Привет"},
+            "responseStatus": 200,
+        }
+    )
+    controller.logArrived = _Signal()
+    translated = Controller._translate_segment(
+        controller,
+        {"text": "Hello", "words": [{"text": "Hello"}]},
+    )
+    assert translated["text"] == "Привет"
+    assert translated["source_text"] == "Hello"
+    assert translated["words"] == []
 
 
 def test_reset_caption_position_clears_only_saved_floating_coordinates() -> None:

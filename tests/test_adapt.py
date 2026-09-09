@@ -83,7 +83,7 @@ def test_rtx_laptop_prefers_dedicated_gpu_and_medium() -> None:
     assert plan.model == "medium"
     assert plan.profile == "balanced"
     assert plan.device == "cuda"
-    assert plan.live_greedy_finals is False
+    assert plan.live_greedy_finals is True
     assert recommended_whisper(hardware) == "medium"
 
 
@@ -96,7 +96,7 @@ def test_rtx_laptop_without_runtime_still_plans_medium() -> None:
     assert plan.device == "auto"
     briefing = build_briefing(hardware)
     assert briefing["whisperModel"] == "medium"
-    assert briefing["liveGreedyFinals"] is False
+    assert briefing["liveGreedyFinals"] is True
     assert briefing["cudaNeeded"] is True
 
 

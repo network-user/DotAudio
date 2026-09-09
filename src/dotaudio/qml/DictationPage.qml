@@ -122,6 +122,13 @@ Item {
                         ToolTip.visible: hovered
                         ToolTip.text: "Как в Discord: говорите, затем услышите себя"
                     }
+                    PillButton {
+                        text: bridge.speechModeLabel
+                        enabled: !bridge.recording && !bridge.busy
+                        onClicked: bridge.cycleSpeechMode()
+                        ToolTip.visible: hovered
+                        ToolTip.text: bridge.speechModeHint
+                    }
                     PillButton { text: bridge.recording ? "Стоп" : bridge.busy ? "Остановить" : "Диктовать"; primary: true; onClicked: bridge.toggleRecording() }
                     PillButton { text: "Копировать"; enabled: bridge.text.length > 0; onClicked: bridge.copyText() }
                     PillButton { text: "Вставить последний"; enabled: bridge.lastTranscript.length > 0 && !bridge.recording; onClicked: bridge.pasteLastTranscript() }

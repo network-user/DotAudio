@@ -31,13 +31,16 @@ LIVE_SPEECH_THRESHOLD = 0.0015
 # укладывается примерно в 600 мс на этой машине, а сказанное чаще уходит
 # готовой фразой в поток речи, где его и читают.
 LIVE_PHRASE_SECONDS = 4.0
-LIVE_SILENCE_SECONDS = 0.42
-# A rolling caption that respects the confidence gate needs at least this much
-# real speech before it has words worth showing.  Below it Whisper mostly
-# guesses, so an earlier preview would flash wrong words at the user.  The
-# gate itself still decides whether what the decoder wrote is speech.
-LIVE_PREVIEW_MIN_SECONDS = 0.9
-LIVE_PREVIEW_INTERVAL_SECONDS = 0.45
+# Конец реплики: короче - быстрее финал после паузы. 0.32 с ещё ловит
+# естественную паузу между словами, но не держит субтитр лишние ~100 мс.
+LIVE_SILENCE_SECONDS = 0.32
+# Первый черновик. На CUDA small окно считается ~50-90 мс, поэтому ждать
+# почти секунду до первого текста - искусственная задержка, а не цена
+# декода. 0.5 с даёт модели достаточно звука для русского слова; порог
+# уверенности в режиме «Речь» по-прежнему отсекает шум. Раньше 0.9 с
+# подстраивались под CPU, где окно само стоило сотни миллисекунд.
+LIVE_PREVIEW_MIN_SECONDS = 0.5
+LIVE_PREVIEW_INTERVAL_SECONDS = 0.28
 # Окно черновика равно длине фразы: пока фраза целиком попадает в окно,
 # показанный текст всегда полный. Окно короче фразы пробовали - оно держит
 # задержку ровной, но на окне, начавшемся посреди фразы, декодер иногда

@@ -463,7 +463,12 @@ def test_transcribe_local_emits_streaming_ticks(tmp_path):
 
             self.store = Store(root / "history.db")
             self.engine = _Engine()
-            self._settings = {"model": "tiny", "diarize_engine": "off", "device": "cpu"}
+            self._settings = {
+                "model": "tiny",
+                "diarize_engine": "off",
+                "device": "cpu",
+                "speech_mode": "ru",
+            }
             self._trans_cancel = Event()
             self._trans_result_session_id = ""
             self._trans_state = {
@@ -473,6 +478,9 @@ def test_transcribe_local_emits_streaming_ticks(tmp_path):
             self.transcribeTick = _Signal()
             self.transcribeStatus = _Signal()
             self.transcribeChanged = _Signal()
+
+        def _translate_segment(self, segment):
+            return segment
 
         def _config(self, media_mode=False):
             from dotaudio.engine import RecognitionConfig
@@ -545,6 +553,9 @@ def test_clear_transcript_resets_path_and_progress():
                 "duration": 3.0, "sessionId": "s1", "progress": 1.0,
             }
             self.transcribeChanged = _Signal()
+
+        def _clear_media_peaks(self):
+            return None
 
     stub = _Clear()
     stub.clearTranscript()

@@ -209,12 +209,50 @@ Item {
                     anchors.fill: parent
                     anchors.margins: Theme.padCard
                     spacing: Theme.gapSm
-                    Label { text: "Язык и вывод"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
+                    Label { text: "Язык и перевод"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "Один режим для Live, диктовки и транскрибации. RU→EN - Whisper Translate. EN→RU - распознавание английского и тестовый сетевой перевод в русский."
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsLabel
+                        wrapMode: Text.Wrap
+                    }
                     RowLayout {
                         Layout.fillWidth: true
-                        Text { Layout.fillWidth: true; text: "Распознавание ориентировано на русский язык."; color: Theme.muted; font.pixelSize: Theme.fsLabel; wrapMode: Text.Wrap }
-                        PillButton { text: "Русский"; primary: bridge.settings.language === "ru" && bridge.settings.task === "transcribe"; onClicked: { bridge.setSetting("language", "ru"); bridge.setSetting("task", "transcribe") } }
-                        PillButton { text: "English subtitles"; primary: bridge.settings.task === "translate"; onClicked: bridge.setSetting("task", "translate") }
+                        spacing: Theme.gapSm
+                        PillButton {
+                            text: "Русский"
+                            primary: String(bridge.settings.speech_mode) === "ru"
+                            onClicked: bridge.setSetting("speech_mode", "ru")
+                        }
+                        PillButton {
+                            text: "English"
+                            primary: String(bridge.settings.speech_mode) === "en"
+                            onClicked: bridge.setSetting("speech_mode", "en")
+                        }
+                        PillButton {
+                            text: "RU → EN"
+                            primary: String(bridge.settings.speech_mode) === "ru_en"
+                            onClicked: bridge.setSetting("speech_mode", "ru_en")
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Русская речь → английский текст"
+                        }
+                        PillButton {
+                            text: "EN → RU"
+                            primary: String(bridge.settings.speech_mode) === "en_ru"
+                            onClicked: bridge.setSetting("speech_mode", "en_ru")
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Английская речь → русский текст (нужен интернет)"
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        visible: String(bridge.settings.speech_mode) === "en_ru"
+                        text: "EN→RU пока тестовый: после Whisper текст уходит в онлайн-переводчик. Без сети останется английский."
+                        color: Theme.faint
+                        font.pixelSize: Theme.fsSmall
+                        wrapMode: Text.Wrap
                     }
                 }
             }
@@ -645,20 +683,12 @@ Item {
                         ToggleSwitch { text: "Таймкод у каждой фразы"; checked: Boolean(bridge.settings.live_show_times); onToggled: bridge.setSetting("live_show_times", checked) }
                         Item { Layout.fillWidth: true }
                     }
-                    RowLayout {
+                    Label {
+                        text: "Live всегда финалит greedy (луч 1): от звука к тексту быстрее, без потери русского на коротком окне. Профиль «Сбалансированный»/beam остаётся для файлов и диктовки."
+                        color: Theme.faint
+                        font.pixelSize: Theme.fsMicro
+                        wrapMode: Text.Wrap
                         Layout.fillWidth: true
-                        ToggleSwitch {
-                            text: "Экономный режим финалов (greedy)"
-                            checked: Boolean(bridge.settings.live_greedy_finals)
-                            onToggled: bridge.setSetting("live_greedy_finals", checked)
-                        }
-                        Text {
-                            Layout.alignment: Qt.AlignVCenter
-                            text: "для слабых машин: финалы лучом 1"
-                            color: Theme.faint
-                            font.pixelSize: Theme.fsMicro
-                        }
-                        Item { Layout.fillWidth: true }
                     }
                     Label {
                         text: "Комбинация выхода: закрывает программу целиком из консоли и по горячей клавише."

@@ -139,8 +139,8 @@ def plan_whisper(hardware: dict) -> WhisperPlan:
             model="medium",
             profile="balanced",
             device=device,
-            live_greedy_finals=False,
-            note="CUDA и запас VRAM: medium без отставания Live.",
+            live_greedy_finals=True,
+            note="CUDA и запас VRAM: medium для файлов, greedy-финалы для Live.",
             label="Ноутбук с NVIDIA",
         )
     if tier == "cuda_ready":
@@ -149,8 +149,8 @@ def plan_whisper(hardware: dict) -> WhisperPlan:
             model="small",
             profile="balanced",
             device=device,
-            live_greedy_finals=False,
-            note="CUDA есть, VRAM скромная: small надёжнее medium.",
+            live_greedy_finals=True,
+            note="CUDA есть, VRAM скромная: small и greedy-финалы Live.",
             label="NVIDIA с ограниченной памятью",
         )
     if tier == "cuda_pending_strong":
@@ -159,7 +159,7 @@ def plan_whisper(hardware: dict) -> WhisperPlan:
             model="medium",
             profile="balanced",
             device="auto",
-            live_greedy_finals=False,
+            live_greedy_finals=True,
             note="NVIDIA найдена: после CUDA runtime возьмём medium.",
             label="NVIDIA без runtime",
         )
@@ -169,7 +169,7 @@ def plan_whisper(hardware: dict) -> WhisperPlan:
             model="small",
             profile="balanced",
             device="auto",
-            live_greedy_finals=False,
+            live_greedy_finals=True,
             note="NVIDIA найдена: после CUDA runtime останемся на small.",
             label="NVIDIA без runtime",
         )
