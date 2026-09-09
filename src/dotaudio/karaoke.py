@@ -7,8 +7,11 @@ then a normal FFmpeg task, keeping expensive media work out of the Qt thread.
 from __future__ import annotations
 
 import math
+import shutil
 import subprocess
+import tempfile
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 from dotaudio.tools_ffmpeg import resolve_ffmpeg
@@ -134,8 +137,6 @@ def render_video(
     """
 
     source = str(media_path)
-    ass_filter_path = str(ass_path).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-    subtitle_filter = f"ass=filename='{ass_filter_path}'"
     is_video = source.lower().endswith(tuple(VIDEO_EXTENSIONS))
     if not is_video and not cover_path:
         raise ValueError("для аудио выберите обложку перед экспортом видео")
@@ -144,23 +145,39 @@ def render_video(
         raise RuntimeError(
             "FFmpeg не найден. Запустите автонастройку или установите FFmpeg в PATH."
         )
-    if is_video:
-        command = [
-            ffmpeg, "-y", "-i", source, "-vf", subtitle_filter,
-            "-c:v", "libx264", "-crf", "20", "-preset", "medium",
-            "-c:a", "copy", output_path,
-        ]
-    else:
-        command = [
-            ffmpeg, "-y", "-loop", "1", "-i", str(cover_path), "-i", source,
-            "-vf", subtitle_filter, "-c:v", "libx264", "-crf", "20",
-            "-preset", "medium", "-c:a", "aac", "-shortest", output_path,
-        ]
+    # Путь пользователя не попадает в -vf: только фиксированное имя в temp cwd.
+    work = Path(tempfile.mkdtemp(prefix="dotaudio-karaoke-"))
     try:
-        subprocess.run(command, check=True, stdin=subprocess.DEVNULL, capture_output=True)
-    except FileNotFoundError as error:
-        raise RuntimeError("FFmpeg не найден. Запустите автонастройку или установите FFmpeg в PATH.") from error
-    except subprocess.CalledProcessError as error:
-        detail = error.stderr.decode("utf-8", errors="replace").strip().splitlines()
-        message = detail[-1] if detail else "FFmpeg завершился с ошибкой"
-        raise RuntimeError(message[:500]) from error
+        safe_ass = work / "subs.ass"
+        shutil.copy2(ass_path, safe_ass)
+        subtitle_filter = "ass=filename=subs.ass"
+        if is_video:
+            command = [
+                ffmpeg, "-y", "-i", source, "-vf", subtitle_filter,
+                "-c:v", "libx264", "-crf", "20", "-preset", "medium",
+                "-c:a", "copy", output_path,
+            ]
+        else:
+            command = [
+                ffmpeg, "-y", "-loop", "1", "-i", str(cover_path), "-i", source,
+                "-vf", subtitle_filter, "-c:v", "libx264", "-crf", "20",
+                "-preset", "medium", "-c:a", "aac", "-shortest", output_path,
+            ]
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                cwd=str(work),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                "FFmpeg не найден. Запустите автонастройку или установите FFmpeg в PATH."
+            ) from error
+        except subprocess.CalledProcessError as error:
+            detail = error.stderr.decode("utf-8", errors="replace").strip().splitlines()
+            message = detail[-1] if detail else "FFmpeg завершился с ошибкой"
+            raise RuntimeError(message[:500]) from error
+    finally:
+        shutil.rmtree(work, ignore_errors=True)

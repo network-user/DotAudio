@@ -5,6 +5,9 @@ services:
       dockerfile: deploy/Dockerfile
     ports:
       - "127.0.0.1:8765:8765"
+    environment:
+      DOTAUDIO_API_KEY: ${DOTAUDIO_API_KEY:?Set DOTAUDIO_API_KEY before compose up}
+      HF_HUB_DISABLE_TELEMETRY: "1"
     volumes:
       - whisper-models:/home/dotaudio/.cache/huggingface
     restart: unless-stopped
@@ -16,6 +19,7 @@ services:
     # CPU service by default. Access a remote host through an SSH tunnel:
     # ssh -N -L 8765:127.0.0.1:8765 user@server
     # Downloads the selected model on first recognition.
+    # Requires DOTAUDIO_API_KEY in the environment (see compose.env.example).
     command: ["dotaudio-server", "--host", "0.0.0.0", "--models", "base"]
 
 volumes:

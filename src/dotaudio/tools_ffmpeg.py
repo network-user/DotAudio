@@ -9,7 +9,6 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
-import zipfile
 from pathlib import Path
 from threading import Event
 from typing import Any, Callable
@@ -182,8 +181,9 @@ def ensure_ffmpeg(
     progress("extract", 80.0, "Распаковываем FFmpeg…")
     extract = Path(tempfile.mkdtemp(prefix="dotaudio-ffmpeg-"))
     try:
-        with zipfile.ZipFile(archive) as zf:
-            zf.extractall(extract)
+        from dotaudio.archiveutil import safe_extract_zip
+
+        safe_extract_zip(archive, extract)
         found = _find_ffmpeg_in_tree(extract)
         if found is None:
             raise RuntimeError("в архиве FFmpeg нет исполняемого файла")

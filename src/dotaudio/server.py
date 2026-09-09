@@ -1,17 +1,25 @@
-"""Optional single-worker Whisper service. Keep behind loopback or an SSH tunnel."""
+"""Optional single-worker Whisper service. Keep behind loopback or an SSH tunnel.
+
+Требует API-ключ: ``DOTAUDIO_API_KEY`` или ``--api-key``. Без ключа процесс
+не стартует. Эндпоинты ``/v1/*`` принимают ``Authorization: Bearer …``
+или ``X-API-Key``.
+"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import io
+import os
+import secrets
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 DEFAULT_MODELS = ("tiny", "base", "small", "medium", "large-v3", "turbo", "large-v3-turbo")
-DEFAULT_UPLOAD_BYTES = 100 * 1024 * 1024
+DEFAULT_UPLOAD_BYTES = 25 * 1024 * 1024
+DEFAULT_DURATION_SECONDS = 1800
 _OPENAI_FORMATS = {"json", "text", "verbose_json", "srt", "vtt"}
 
 
@@ -236,8 +244,15 @@ async def _read_upload(request, limit):
     return upload
 
 
-def create_app(*, engine=None, max_upload_bytes=DEFAULT_UPLOAD_BYTES, max_duration_seconds=3600,
-               allowed_models=DEFAULT_MODELS, decoder=None):
+def create_app(
+    *,
+    engine=None,
+    max_upload_bytes=DEFAULT_UPLOAD_BYTES,
+    max_duration_seconds=DEFAULT_DURATION_SECONDS,
+    allowed_models=DEFAULT_MODELS,
+    decoder=None,
+    api_key: str | None = None,
+):
     from fastapi import FastAPI, HTTPException, Request
     from starlette.requests import ClientDisconnect
 
@@ -246,6 +261,11 @@ def create_app(*, engine=None, max_upload_bytes=DEFAULT_UPLOAD_BYTES, max_durati
     models = tuple(allowed_models)
     if not models or any(model not in DEFAULT_MODELS for model in models):
         raise ValueError("Choose at least one supported Whisper model.")
+    key = (api_key if api_key is not None else os.environ.get("DOTAUDIO_API_KEY", "")).strip()
+    if not key:
+        raise ValueError(
+            "API key required: set DOTAUDIO_API_KEY or pass api_key= to create_app."
+        )
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dotaudio-asr")
 
     @asynccontextmanager
@@ -253,17 +273,39 @@ def create_app(*, engine=None, max_upload_bytes=DEFAULT_UPLOAD_BYTES, max_durati
         yield
         executor.shutdown(wait=False, cancel_futures=True)
 
-    app = FastAPI(title="DotAudio", lifespan=lifespan)
+    app = FastAPI(
+        title="DotAudio",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.state.busy = False
     app.state.engine = engine
+    app.state.api_key = key
     decode = decoder or decode_audio
+
+    def _require_api_key(request: Request) -> None:
+        auth = (request.headers.get("authorization") or "").strip()
+        header_key = (request.headers.get("x-api-key") or "").strip()
+        bearer = ""
+        if auth.lower().startswith("bearer "):
+            bearer = auth[7:].strip()
+        provided = bearer or header_key
+        expected = app.state.api_key
+        try:
+            ok = bool(provided) and secrets.compare_digest(provided, expected)
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            raise HTTPException(401, "API key required.")
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "busy": app.state.busy, "models": models,
-                "max_upload_bytes": max_upload_bytes, "max_duration_seconds": max_duration_seconds}
+        return {"status": "ok", "busy": app.state.busy}
 
     async def run_asr(request):
+        _require_api_key(request)
         if app.state.busy:
             raise HTTPException(503, "Recognition worker is busy.", headers={"Retry-After": "2"})
         app.state.busy = True
@@ -355,19 +397,41 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--max-upload-mib", type=int, default=100)
-    parser.add_argument("--max-duration-seconds", type=int, default=3600)
+    parser.add_argument("--max-upload-mib", type=int, default=25)
+    parser.add_argument("--max-duration-seconds", type=int, default=DEFAULT_DURATION_SECONDS)
     parser.add_argument("--models", nargs="+", choices=DEFAULT_MODELS, default=["base"])
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("DOTAUDIO_API_KEY", ""),
+        help="Shared secret for /v1/* (or DOTAUDIO_API_KEY).",
+    )
     args = parser.parse_args()
     if args.max_upload_mib <= 0 or args.max_duration_seconds <= 0:
         parser.error("Upload and duration limits must be positive.")
     if not 1 <= args.port <= 65535:
         parser.error("Port must be between 1 and 65535.")
+    api_key = str(args.api_key or "").strip()
+    if not api_key:
+        parser.error("API key required: pass --api-key or set DOTAUDIO_API_KEY.")
+    if args.host in {"0.0.0.0", "::", "[::]"}:
+        print(
+            "warning: listening on all interfaces; keep the API key private "
+            "and prefer publishing only 127.0.0.1 on the host.",
+            flush=True,
+        )
     import uvicorn
 
-    uvicorn.run(create_app(max_upload_bytes=args.max_upload_mib * 1024 * 1024,
-                           max_duration_seconds=args.max_duration_seconds, allowed_models=args.models),
-                host=args.host, port=args.port, workers=1)
+    uvicorn.run(
+        create_app(
+            max_upload_bytes=args.max_upload_mib * 1024 * 1024,
+            max_duration_seconds=args.max_duration_seconds,
+            allowed_models=args.models,
+            api_key=api_key,
+        ),
+        host=args.host,
+        port=args.port,
+        workers=1,
+    )
 
 
 if __name__ == "__main__":

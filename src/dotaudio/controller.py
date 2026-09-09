@@ -1532,6 +1532,23 @@ class Controller(QObject):
         }
         if name in choices and value not in choices[name]:
             return
+        if name == "backend" and value == "remote":
+            # Внешний ASR только по явному opt-in: иначе аудио не покидает машину.
+            import os
+
+            if os.environ.get("DOTAUDIO_ALLOW_REMOTE_ASR", "").strip() != "1":
+                return
+        if name == "server_url":
+            from dotaudio.netguard import require_local_http_url
+
+            try:
+                require_local_http_url(
+                    str(value),
+                    what="server_url",
+                    allow_env="DOTAUDIO_ALLOW_REMOTE_ASR",
+                )
+            except ValueError:
+                return
         if name in (
             "caption_overlay", "auto_paste", "dictate_hold", "island_click_through",
             "island_snap", "caption_autohide", "caption_locked", "reduce_motion",

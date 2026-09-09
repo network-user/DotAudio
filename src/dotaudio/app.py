@@ -33,6 +33,7 @@ def _register_ui_fonts():
 
 def main():
     # До импорта/опроса CTranslate2: иначе pip-пакеты nvidia-* не видны.
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     register_cuda_dll_directories()
     parser = argparse.ArgumentParser(description="DotAudio · Whisper workspace")
     parser.add_argument("--data-dir", type=Path, default=None)

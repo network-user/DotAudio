@@ -15,6 +15,14 @@ dist/
 *.wav
 *.mp4
 .env*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+service-account*.json
+*.ass
 # Local QML/smoke-test data and screenshots.  Keep every ad-hoc diagnostic
 # run out of the working tree, not only the canonical .local-check directory.
 .local*/

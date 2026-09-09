@@ -7,6 +7,13 @@
   <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-5657-lightgrey?style=flat" alt="5657 lines of code" /><!-- loc:end -->
 </p>
 
+<!-- audit:start -->
+<p>
+  <a href="docs/audit/latest.md"><img src="https://img.shields.io/badge/security_audit-passed-3fb950?style=flat" alt="security audit passed - full, leaks + code" /></a>
+  <a href="docs/audit/2026-09-09-clear-harbor.md"><img src="https://img.shields.io/badge/date-2026--09--09-555?style=flat" alt="audit date" /></a>
+</p>
+<!-- audit:end -->
+
 <img src="docs/cover.svg" width="720" alt="DotAudio: речь и субтитры" />
 
 Desktop-приложение к статье о Whisper для Windows. Оно распознаёт русскую речь
@@ -20,7 +27,7 @@ Desktop-приложение к статье о Whisper для Windows. Оно �
 Нужен **Python 3.12 или 3.13**. Откройте PowerShell в папке проекта и выполните:
 
 ```powershell
-cd C:\Users\User\PycharmProjects\DotAudio
+cd <path-to-DotAudio>
 
 # Только при первом запуске
 py -3.12 -m venv .venv

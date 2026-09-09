@@ -29,8 +29,20 @@ import httpx
 from dotaudio import hardware, modelhub
 from dotaudio.hardware import HardwareProfile
 from dotaudio.modelhub import ModelFile
+from dotaudio.netguard import require_local_http_url
 
-OLLAMA_URL = os.environ.get("DOTAUDIO_OLLAMA_URL", "http://127.0.0.1:11434")
+
+def _default_ollama_url() -> str:
+    url = os.environ.get("DOTAUDIO_OLLAMA_URL", "http://127.0.0.1:11434")
+    require_local_http_url(
+        url,
+        what="DOTAUDIO_OLLAMA_URL",
+        allow_env="DOTAUDIO_ALLOW_REMOTE_OLLAMA",
+    )
+    return url
+
+
+OLLAMA_URL = "http://127.0.0.1:11434"
 
 # Ступени каталога. Пользователю показывается ровно это: насколько модель
 # тяжела для машины, а не внутреннее имя семейства.
@@ -978,8 +990,14 @@ class OllamaRuntime:
     TAGS_TTL_SECONDS = 5.0
     PROBE_TIMEOUT_SECONDS = 0.6
 
-    def __init__(self, base_url: str = OLLAMA_URL) -> None:
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, base_url: str | None = None) -> None:
+        url = base_url if base_url is not None else _default_ollama_url()
+        require_local_http_url(
+            url,
+            what="Ollama base_url",
+            allow_env="DOTAUDIO_ALLOW_REMOTE_OLLAMA",
+        )
+        self.base_url = url.rstrip("/")
         self._lock = threading.Lock()
         self._cached: tuple[float, list[str] | None] | None = None
 

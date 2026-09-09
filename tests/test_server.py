@@ -10,6 +10,14 @@ from fastapi.testclient import TestClient
 
 from dotaudio.server import InvalidAudio, create_app, decode_audio, openai_transcription_payload
 
+API_KEY = "test-server-key"
+AUTH = {"Authorization": f"Bearer {API_KEY}"}
+
+
+def _app(**kwargs):
+    kwargs.setdefault("api_key", API_KEY)
+    return create_app(**kwargs)
+
 
 class FakeEngine:
     def __init__(self):
@@ -27,10 +35,21 @@ def fake_decode(data, duration, cancel):
 
 def test_health_and_transcribe():
     engine = FakeEngine()
-    with TestClient(create_app(engine=engine, decoder=fake_decode)) as client:
-        assert client.get("/health").json()["busy"] is False
-        response = client.post("/v1/transcribe", files={"file": ("clip.wav", b"audio")},
-                               data={"model": "base", "language": "ru", "task": "transcribe"})
+    with TestClient(_app(engine=engine, decoder=fake_decode)) as client:
+        health = client.get("/health").json()
+        assert health["busy"] is False
+        assert "models" not in health
+        assert client.post(
+            "/v1/transcribe",
+            files={"file": ("clip.wav", b"audio")},
+            data={"model": "base", "language": "ru", "task": "transcribe"},
+        ).status_code == 401
+        response = client.post(
+            "/v1/transcribe",
+            files={"file": ("clip.wav", b"audio")},
+            data={"model": "base", "language": "ru", "task": "transcribe"},
+            headers=AUTH,
+        )
         assert response.status_code == 200
         assert response.json()["segments"][0]["text"] == "Привет"
         assert engine.calls[0][1].language == "ru"
@@ -39,11 +58,12 @@ def test_health_and_transcribe():
 
 def test_openai_transcriptions_json_and_text():
     engine = FakeEngine()
-    with TestClient(create_app(engine=engine, decoder=fake_decode)) as client:
+    with TestClient(_app(engine=engine, decoder=fake_decode)) as client:
         json_response = client.post(
             "/v1/audio/transcriptions",
             files={"file": ("clip.wav", b"audio")},
             data={"model": "base", "language": "ru", "response_format": "json"},
+            headers=AUTH,
         )
         assert json_response.status_code == 200, json_response.text
         assert json_response.json()["text"] == "Привет"
@@ -51,6 +71,7 @@ def test_openai_transcriptions_json_and_text():
             "/v1/audio/transcriptions",
             files={"file": ("clip.wav", b"audio")},
             data={"model": "base", "response_format": "text"},
+            headers=AUTH,
         )
         assert text_response.status_code == 200
         assert text_response.text == "Привет"
@@ -70,36 +91,57 @@ def test_openai_transcriptions_json_and_text():
      "multipart/form-data; boundary=x"),
 ])
 def test_malformed_request(body, content_type):
-    with TestClient(create_app(engine=FakeEngine(), decoder=fake_decode)) as client:
-        response = client.post("/v1/transcribe", content=body, headers={"Content-Type": content_type})
+    with TestClient(_app(engine=FakeEngine(), decoder=fake_decode)) as client:
+        response = client.post(
+            "/v1/transcribe",
+            content=body,
+            headers={**AUTH, "Content-Type": content_type},
+        )
         assert response.status_code == 400
         assert client.get("/health").json()["busy"] is False
 
 
 def test_limits_and_model_restriction():
     engine = FakeEngine()
-    with TestClient(create_app(engine=engine, decoder=fake_decode,
-                               max_upload_bytes=5, allowed_models=("base",))) as client:
-        assert client.post("/v1/transcribe", files={"file": ("clip.wav", b"123456")}).status_code == 413
-        assert client.post("/v1/transcribe", files={"file": ("clip.wav", b"audio")},
-                           data={"model": "large-v3"}).status_code == 422
-        assert client.post("/v1/transcribe", files={"file": ("clip.wav", b"audio")},
-                           data={"language": "../../xx"}).status_code == 422
-        assert client.post("/v1/transcribe", files={"file": ("clip.wav", b"")}).status_code == 400
+    with TestClient(_app(engine=engine, decoder=fake_decode,
+                         max_upload_bytes=5, allowed_models=("base",))) as client:
+        assert client.post(
+            "/v1/transcribe", files={"file": ("clip.wav", b"123456")}, headers=AUTH
+        ).status_code == 413
+        assert client.post(
+            "/v1/transcribe",
+            files={"file": ("clip.wav", b"audio")},
+            data={"model": "large-v3"},
+            headers=AUTH,
+        ).status_code == 422
+        assert client.post(
+            "/v1/transcribe",
+            files={"file": ("clip.wav", b"audio")},
+            data={"language": "../../xx"},
+            headers=AUTH,
+        ).status_code == 422
+        assert client.post(
+            "/v1/transcribe", files={"file": ("clip.wav", b"")}, headers=AUTH
+        ).status_code == 400
         assert not engine.calls
 
 
 def test_streamed_upload_cap_without_content_length():
     async def scenario():
-        app = create_app(engine=FakeEngine(), decoder=fake_decode, max_upload_bytes=5)
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        app = _app(engine=FakeEngine(), decoder=fake_decode, max_upload_bytes=5)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
             async def chunks():
                 yield b'--x\r\nContent-Disposition: form-data; name="file"\r\n\r\n'
                 yield b"123"
                 yield b"456"
                 yield b"\r\n--x--\r\n"
-            response = await client.post("/v1/transcribe", content=chunks(),
-                                         headers={"Content-Type": "multipart/form-data; boundary=x"})
+            response = await client.post(
+                "/v1/transcribe",
+                content=chunks(),
+                headers={**AUTH, "Content-Type": "multipart/form-data; boundary=x"},
+            )
             assert response.status_code == 413
     asyncio.run(scenario())
 
@@ -113,15 +155,19 @@ def test_busy_worker_rejects_concurrent_request():
             assert finish.wait(3)
             return super().transcribe(source, config, cancel)
 
-    with TestClient(create_app(engine=SlowEngine(), decoder=fake_decode)) as client:
+    with TestClient(_app(engine=SlowEngine(), decoder=fake_decode)) as client:
         result = []
         thread = threading.Thread(target=lambda: result.append(
-            client.post("/v1/transcribe", files={"file": ("clip.wav", b"audio")}).status_code))
+            client.post(
+                "/v1/transcribe", files={"file": ("clip.wav", b"audio")}, headers=AUTH
+            ).status_code))
         thread.start()
         try:
             assert started.wait(3)
             assert client.get("/health").json()["busy"] is True
-            response = client.post("/v1/transcribe", files={"file": ("clip.wav", b"audio")})
+            response = client.post(
+                "/v1/transcribe", files={"file": ("clip.wav", b"audio")}, headers=AUTH
+            )
             assert response.status_code == 503
             assert response.headers["Retry-After"] == "2"
         finally:
@@ -147,8 +193,10 @@ def test_decoder_enforces_duration_and_bad_input():
 def test_decoder_error_releases_worker():
     def fail_decode(*args):
         raise InvalidAudio("Broken audio.")
-    with TestClient(create_app(engine=FakeEngine(), decoder=fail_decode)) as client:
-        assert client.post("/v1/transcribe", files={"file": ("a.wav", b"x")}).status_code == 422
+    with TestClient(_app(engine=FakeEngine(), decoder=fail_decode)) as client:
+        assert client.post(
+            "/v1/transcribe", files={"file": ("a.wav", b"x")}, headers=AUTH
+        ).status_code == 422
         assert client.get("/health").json()["busy"] is False
 
 
@@ -164,9 +212,13 @@ def test_disconnect_cancels_inference_and_holds_worker_until_finished():
             return []
 
     async def scenario():
-        app = create_app(engine=SlowEngine(), decoder=fake_decode)
-        request = httpx.Request("POST", "http://test/v1/transcribe",
-                                files={"file": ("clip.wav", b"audio")})
+        app = _app(engine=SlowEngine(), decoder=fake_decode)
+        request = httpx.Request(
+            "POST",
+            "http://test/v1/transcribe",
+            files={"file": ("clip.wav", b"audio")},
+            headers=AUTH,
+        )
         body = request.read()
         delivered = False
         messages = []
@@ -183,11 +235,20 @@ def test_disconnect_cancels_inference_and_holds_worker_until_finished():
         async def send(message):
             messages.append(message)
 
-        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-                 "method": "POST", "scheme": "http", "path": "/v1/transcribe", "raw_path": b"/v1/transcribe",
-                 "query_string": b"", "headers": [(key.lower(), value) for key, value in request.headers.raw],
-                 "client": ("127.0.0.1", 1234),
-                 "server": ("test", 80), "root_path": ""}
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/v1/transcribe",
+            "raw_path": b"/v1/transcribe",
+            "query_string": b"",
+            "headers": [(key.lower(), value) for key, value in request.headers.raw],
+            "client": ("127.0.0.1", 1234),
+            "server": ("test", 80),
+            "root_path": "",
+        }
         try:
             await asyncio.wait_for(app(scope, receive, send), timeout=3)
             assert messages[0]["status"] == 499
@@ -202,3 +263,8 @@ def test_disconnect_cancels_inference_and_holds_worker_until_finished():
         assert app.state.busy is False
 
     asyncio.run(scenario())
+
+
+def test_create_app_requires_api_key():
+    with pytest.raises(ValueError, match="API key"):
+        create_app(engine=FakeEngine(), decoder=fake_decode, api_key="")

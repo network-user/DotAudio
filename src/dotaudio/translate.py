@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import zipfile
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
@@ -237,8 +236,9 @@ def download_and_prepare(
     if extract_tmp.exists():
         shutil.rmtree(extract_tmp, ignore_errors=True)
     extract_tmp.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(zip_path) as archive:
-        archive.extractall(extract_tmp)
+    from dotaudio.archiveutil import safe_extract_zip
+
+    safe_extract_zip(zip_path, extract_tmp)
     found = _find_marian_bundle(extract_tmp)
     if marian.exists():
         shutil.rmtree(marian, ignore_errors=True)

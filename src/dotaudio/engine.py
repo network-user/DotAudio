@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import time
 import wave
 from collections import OrderedDict, deque
@@ -17,9 +18,10 @@ from io import BytesIO
 from pathlib import Path
 from threading import Event, Lock
 from typing import Any, Callable
-from urllib.parse import urlsplit
 
 import numpy as np
+
+from dotaudio.netguard import require_local_http_url
 
 Segment = dict[str, Any]
 SegmentCallback = Callable[[Segment], None]
@@ -1052,12 +1054,16 @@ class Engine:
                 "language": config.language,
                 "task": config.task,
             }
+            headers = {"Accept": "application/json"}
+            api_key = (os.environ.get("DOTAUDIO_API_KEY") or "").strip()
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
             with httpx.Client(timeout=httpx.Timeout(30.0, read=15.0)) as client:
                 with client.stream(
                     "POST", config.server_url.rstrip("/") + "/v1/transcribe",
                     files=files,
                     data=form,
-                    headers={"Accept": "application/json"},
+                    headers=headers,
                 ) as response:
                     raw = self._read_bounded_response(response, cancel)
                     if self._cancelled(cancel):
@@ -1112,11 +1118,11 @@ class Engine:
 
     @staticmethod
     def _validate_server_url(server_url: str) -> None:
-        parsed = urlsplit(server_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("server_url must be an absolute http(s) URL")
-        if parsed.username is not None or parsed.password is not None:
-            raise ValueError("server_url must not contain credentials")
+        require_local_http_url(
+            server_url,
+            what="server_url",
+            allow_env="DOTAUDIO_ALLOW_REMOTE_ASR",
+        )
 
     @staticmethod
     def _remote_file(source: str | np.ndarray) -> tuple[str, BytesIO | Any, str]:

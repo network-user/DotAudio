@@ -32,7 +32,7 @@ DotAudio не являются копией контрактов других п
 
 ### DotSoundBackend
 
-Корень: `C:\Users\User\PycharmProjects\DotSoundBackend`.
+Корень: соседний репозиторий `DotSoundBackend` (рядом с DotAudio).
 
 - `agents.md`, `docs/ai-boundary-policy.md`: граница транспортного слоя и закрытого ядра.
 - `app/models/compute_job.py`, `app/services/compute_queue_service.py`: асинхронная очередь, claim/lease, retry и восстановление зависших работ.
@@ -46,7 +46,7 @@ DotAudio не являются копией контрактов других п
 
 ### DotSoundComputeWorker
 
-Корень: `C:\Users\User\PycharmProjects\DotSoundComputeWorker`.
+Корень: соседний репозиторий `DotSoundComputeWorker` (рядом с DotAudio).
 
 - `worker/asr/whisper_runner.py`: faster-whisper/stable-ts, кеш модели, выбор CPU/GPU, CPU fallback при проблеме CUDA, словные таймкоды.
 - `worker/pipeline.py`: загрузка медиа, необязательное выделение вокала, ASR и последующие стадии.

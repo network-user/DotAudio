@@ -24,7 +24,6 @@ import sys
 import tempfile
 import time
 import wave
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -498,8 +497,9 @@ def install_runtime(
         progress("extract", 70.0, "Распаковываем рантайм…")
         extract = work / "extract"
         extract.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(archive_path) as archive:
-            archive.extractall(extract)
+        from dotaudio.archiveutil import safe_extract_zip
+
+        safe_extract_zip(archive_path, extract)
         entries = list(extract.iterdir())
         root = entries[0] if len(entries) == 1 and entries[0].is_dir() else extract
         staged = root / "bin" / "nemo-speech.exe"

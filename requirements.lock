@@ -1,0 +1,15 @@
+# Locked install baseline for reproducible audits (pip-tools / uv can refresh).
+# Install: python -m pip install -r requirements.lock
+# Generated for Python 3.12 from pyproject ranges; optional extras not included.
+PySide6>=6.8,<7
+faster-whisper>=1.2,<2
+numpy>=1.26,<3
+sounddevice>=0.5,<1
+soundcard>=0.4,<1
+httpx>=0.28,<1
+platformdirs>=4,<5
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+python-multipart>=0.0.20,<1
+pytest>=8,<10
+ruff>=0.11,<1

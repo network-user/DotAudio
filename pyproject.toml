@@ -22,7 +22,7 @@ build = ["pyinstaller>=6.12,<7"]
 # входит вовсе: это нативный рантайм NeMo-Speech.cpp, он ставится своим
 # установщиком и не является пакетом Python. Пакет `nemo_toolkit` здесь
 # неприменим - Windows у него в статусе «No support yet».
-diarize = ["torch>=2.3", "speechbrain>=1.0"]
+diarize = ["torch>=2.3,<3", "speechbrain>=1.0,<2"]
 # Лёгкий Kaldi-движок Live для очень слабого CPU. Выбирается вручную в
 # настройках; по умолчанию Live идёт на faster-whisper.
 vosk = ["vosk>=0.3.45,<1"]
@@ -35,10 +35,10 @@ llm = ["llama-cpp-python>=0.3,<1"]
 # CUDA runtime для Whisper на Windows без полного Toolkit. Ставится из UI
 # («Настроить GPU») или вручную: pip install -e ".[cuda]".
 cuda = [
-  "nvidia-cublas-cu12",
-  "nvidia-cuda-runtime-cu12",
-  "nvidia-cudnn-cu12",
-  "nvidia-cuda-nvrtc-cu12",
+  "nvidia-cublas-cu12>=12.4,<13",
+  "nvidia-cuda-runtime-cu12>=12.4,<13",
+  "nvidia-cudnn-cu12>=9,<10",
+  "nvidia-cuda-nvrtc-cu12>=12.4,<13",
 ]
 
 [project.scripts]
