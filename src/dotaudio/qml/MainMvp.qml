@@ -55,8 +55,6 @@ ApplicationWindow {
             || [760, 440]
     }
     readonly property int liveLocked: Boolean(bridge.settings.live_locked)
-    property real dragGrabDx: 0
-    property real dragGrabDy: 0
     property var pageKeys: [
         "live", "dictation", "transcript", "media", "assistant",
         "history", "models", "settings"
@@ -86,24 +84,12 @@ ApplicationWindow {
     // морфит только MiniIsland внутри. Клики вне хрома режет setWindowMask.
     readonly property int islandCanvasW: 552
     readonly property int islandCanvasH: 108
-    // Визуальный drag: на время жеста HWND растягивается на виртуальный
-    // рабочий стол, а хром едет translate-ом (Scene Graph / vsync). SetWindowPos
-    // один раз — в конце жеста.
-    property bool islandDragExpanded: false
-    property real islandDragX: 0
-    property real islandDragY: 0
-    property real islandDragGrabX: 0
-    property real islandDragGrabY: 0
-    property int dragDeskX: 0
-    property int dragDeskY: 0
-    property int dragDeskW: 1920
-    property int dragDeskH: 1080
     width: shellMode === "app" ? appW
            : shellMode === "theater" ? theaterW
-           : (islandDragExpanded ? dragDeskW : islandCanvasW)
+           : islandCanvasW
     height: shellMode === "app" ? appH
             : shellMode === "theater" ? theaterH
-            : (islandDragExpanded ? dragDeskH : islandCanvasH)
+            : islandCanvasH
     // Поверх всех окон живут только остров и сцена Live: они должны быть
     // видны во время другой работы. Полное окно - обычное окно, его может
     // перекрыть любое другое, включая браузер с черновиком статьи.
@@ -207,58 +193,33 @@ ApplicationWindow {
             root.theaterH = h
     }
 
-    // Якорь только у острова и только вне drag.
+    // Якорь только у острова и только вне drag — иначе Binding
+    // перебивает startSystemMove и окно дёргается назад к центру.
     Binding on x {
-        when: !root.dragging && !root.islandDragExpanded
-              && root.shellMode === "island" && root.islandCenterX >= 0
+        when: !root.dragging && root.shellMode === "island" && root.islandCenterX >= 0
         value: Math.round(root.islandCenterX - root.islandCanvasW / 2)
     }
     Binding on y {
-        when: !root.dragging && !root.islandDragExpanded && root.shellMode === "island"
+        when: !root.dragging && root.shellMode === "island"
         value: Math.round(root.islandTopY)
     }
 
-    function beginIslandDrag(screenX, screenY) {
-        if (root.shellMode !== "island" || root.islandDragExpanded)
+    function beginIslandDrag() {
+        if (root.shellMode !== "island" || root.dragging)
             return
-        root.dragging = true
+        // Маску снять до native move: иначе hit-region отстаёт от HWND.
         bridge.clearWindowMask()
-        root.dragDeskX = Screen.virtualX
-        root.dragDeskY = Screen.virtualY
-        root.dragDeskW = Screen.virtualWidth
-        root.dragDeskH = Screen.virtualHeight
-        var chromeSX = root.x + Math.round((root.islandCanvasW - root.islandW) / 2)
-        var chromeSY = root.y + Math.round((root.islandCanvasH - root.islandH) / 2)
-        root.islandDragGrabX = screenX - chromeSX
-        root.islandDragGrabY = screenY - chromeSY
-        root.islandDragX = chromeSX - root.dragDeskX
-        root.islandDragY = chromeSY - root.dragDeskY
-        root.islandDragExpanded = true
-        root.x = root.dragDeskX
-        root.y = root.dragDeskY
-    }
-
-    function moveIslandDrag(screenX, screenY) {
-        if (!root.islandDragExpanded)
-            return
-        root.islandDragX = Math.round(screenX - root.islandDragGrabX - root.x)
-        root.islandDragY = Math.round(screenY - root.islandDragGrabY - root.y)
+        root.dragging = true
+        root.startSystemMove()
     }
 
     function endIslandDrag() {
-        if (!root.islandDragExpanded && !root.dragging)
+        if (!root.dragging || root.shellMode !== "island")
             return
-        var chromeSX = root.x + root.islandDragX
-        var chromeSY = root.y + root.islandDragY
-        var winX = Math.round(chromeSX - (root.islandCanvasW - root.islandW) / 2)
-        var winY = Math.round(chromeSY - (root.islandCanvasH - root.islandH) / 2)
-        root.islandDragExpanded = false
-        root.islandDragX = 0
-        root.islandDragY = 0
+        var winX = Math.round(root.x)
+        var winY = Math.round(root.y)
         root.islandCenterX = winX + root.islandCanvasW / 2
         root.islandTopY = winY
-        root.x = winX
-        root.y = winY
         root.dragging = false
         bridge.saveIslandPosition(winX, winY)
         root.refreshIslandMask()
@@ -422,27 +383,19 @@ ApplicationWindow {
         onTriggered: root.quietHeld = true
     }
 
-    // Остров: курсор читаем на vsync, HWND не трогаем до отпускания.
-    FrameAnimation {
-        running: root.islandDragExpanded
-        onTriggered: {
-            if (!bridge.primaryButtonDown()) {
-                root.endIslandDrag()
-                return
-            }
-            var pos = bridge.cursorScreenPos()
-            root.moveIslandDrag(Number(pos.x), Number(pos.y))
-        }
-    }
-
-    // Live-сцена: startSystemMove, конец по отпусканию кнопки.
+    // Остров и Live-сцена: DWM ведёт HWND через startSystemMove.
+    // Конец жеста — по отпусканию ЛКМ (MouseArea уже отдал захват системе).
     Timer {
-        interval: 32
-        running: root.dragging && root.shellMode === "theater"
+        interval: 16
+        running: root.dragging && (root.shellMode === "island" || root.shellMode === "theater")
         repeat: true
         onTriggered: {
             if (bridge.primaryButtonDown())
                 return
+            if (root.shellMode === "island") {
+                root.endIslandDrag()
+                return
+            }
             root.dragging = false
             root.theaterX = root.x
             root.theaterY = root.y
@@ -553,22 +506,19 @@ ApplicationWindow {
         visible: root.shellMode === "island"
         width: root.islandW
         height: root.islandH
-        anchors.horizontalCenter: root.islandDragExpanded ? undefined : parent.horizontalCenter
-        anchors.verticalCenter: root.islandDragExpanded ? undefined : parent.verticalCenter
-        x: root.islandDragExpanded ? root.islandDragX : 0
-        y: root.islandDragExpanded ? root.islandDragY : 0
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.verticalCenter: parent.verticalCenter
         opacity: root.shellFade * Math.max(0.9, Number(bridge.settings.island_opacity))
-        shellRise: root.islandDragExpanded ? 0 : root.shellRise
+        shellRise: root.shellRise
         phase: root.islandPhase
         radius: root.islandR
         clickThrough: Boolean(bridge.settings.island_click_through) && root.shellMode === "island"
-                       && !root.islandDragExpanded
+                       && !root.dragging
         onRequestTheater: root.openTheater()
         onRequestApp: root.openApp(page)
         onRequestModePick: root.islandModesOpen = true
         onCloseModes: root.islandModesOpen = false
-        onDragStarted: function (sx, sy) { root.beginIslandDrag(sx, sy) }
-        onDragReleased: root.endIslandDrag()
+        onDragStarted: root.beginIslandDrag()
     }
 
     LiveTheater {

@@ -133,9 +133,11 @@ Rectangle {
             if (dx * dx + dy * dy < 16)
                 return
             dragArmed = false
-            // Дальше MainMvp ведёт визуальный drag (без SetWindowPos на кадр).
+            // MainMvp отдаёт жест DWM через startSystemMove.
             root.dragStarted(mouse.screenX, mouse.screenY)
         }
+        // Не эмитить dragReleased здесь: после startSystemMove Qt сразу
+        // шлёт Released, а кнопка ещё зажата — Binding снова включится.
         onReleased: dragArmed = false
         onCanceled: dragArmed = false
         onDoubleClicked: {
