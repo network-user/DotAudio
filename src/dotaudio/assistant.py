@@ -34,6 +34,7 @@ import re
 import threading
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from dotaudio.llm import GenerationOptions
 
@@ -387,6 +388,12 @@ SYSTEM_MATERIAL = (
     "Ты помощник в программе для расшифровки речи. Ниже приложен текстовый файл. "
     "Отвечай по-русски, коротко и только по этому тексту. Не выдумывай факты, "
     "которых в файле нет."
+)
+
+SYSTEM_TITLE = (
+    "Ты придумываешь короткие заголовки к расшифровкам речи. Ответь по-русски "
+    "только заголовком из трёх-семи слов: без кавычек, без точки в конце, "
+    "без пояснений и без слова «заголовок»."
 )
 
 SYSTEM_RECORD = (
@@ -913,7 +920,7 @@ def record_from_session(session: dict) -> dict:
     segments: Iterable[dict] = session.get("segments") or ()
     chunks = build_chunks(list(segments))
     duration = max((chunk.end for chunk in chunks), default=0.0)
-    return {
+    card = {
         "id": session.get("id", ""),
         "title": session.get("title", ""),
         "mode": session.get("mode", ""),
@@ -923,3 +930,150 @@ def record_from_session(session: dict) -> dict:
         "chunks": len(chunks),
         "segments": len(chunks and [line for chunk in chunks for line in chunk.lines] or []),
     }
+    card.update(
+        list_item_from_row(
+            {
+                **session,
+                "text": " ".join(
+                    str(segment.get("text") or "") for segment in segments
+                ),
+                "segment_count": card["segments"],
+                "chat_count": int(session.get("chat_count") or 0),
+            }
+        )
+    )
+    return card
+
+
+MODE_LABELS_RU = {
+    "dictation": "Диктовка",
+    "live": "Live",
+    "media": "Медиа",
+    "monitor": "Эфир",
+    "transcript": "Транскрибация",
+}
+
+# Типовые имена источников и режимов: в списке они не различимы.
+GENERIC_TITLES = frozenset(
+    {
+        "Микрофон",
+        "Звук компьютера",
+        "Микрофон и звук компьютера",
+        "Диктовка",
+        "Живые субтитры",
+        "Мониторинг эфира",
+        "Эфир",
+    }
+)
+
+
+def is_generic_title(title: str) -> bool:
+    cleaned = " ".join(str(title or "").split())
+    return not cleaned or cleaned in GENERIC_TITLES
+
+
+def title_from_transcript(segments: Sequence[dict] | str, max_words: int = 7) -> str:
+    """Короткий заголовок из начала расшифровки без модели."""
+
+    if isinstance(segments, str):
+        raw = segments
+    else:
+        parts: list[str] = []
+        for segment in segments or ():
+            text = str(segment.get("text") or "").strip()
+            if text.startswith("[") and "]" in text:
+                text = text.split("]", 1)[1].strip()
+            if text:
+                parts.append(text)
+            if sum(len(part) for part in parts) > 240:
+                break
+        raw = " ".join(parts)
+    words = [word for word in raw.replace("\n", " ").split() if word]
+    if not words:
+        return ""
+    phrase = " ".join(words[:max_words]).strip(" .,;:!?-")
+    if len(words) > max_words:
+        phrase = phrase.rstrip(".,;:") + "…"
+    return phrase
+
+
+def format_session_when(created_at: str) -> str:
+    """Короткая дата для списка: день и время без секунд."""
+
+    raw = str(created_at or "").strip()
+    if not raw:
+        return ""
+    try:
+        # Хранится UTC ISO; для подписи достаточно среза без зоны.
+        stamp_raw = raw.replace("Z", "+00:00")
+        moment = datetime.fromisoformat(stamp_raw)
+        if moment.tzinfo is not None:
+            moment = moment.astimezone().replace(tzinfo=None)
+        return f"{moment.day:02d}.{moment.month:02d} {moment.hour:02d}:{moment.minute:02d}"
+    except ValueError:
+        return raw[:16].replace("T", " ")
+
+
+def list_item_from_row(row: dict) -> dict:
+    """Карточка записи/чата для левой колонки ассистента."""
+
+    title = str(row.get("title") or "").strip()
+    mode = str(row.get("mode") or "")
+    mode_label = MODE_LABELS_RU.get(mode, mode or "Запись")
+    when = format_session_when(str(row.get("created_at") or ""))
+    preview = " ".join(str(row.get("text") or "").split())
+    if preview.startswith("[") and "]" in preview:
+        preview = preview.split("]", 1)[1].strip()
+    snippet = title_from_transcript(preview, max_words=8)
+    generic = is_generic_title(title)
+    if generic and snippet:
+        display = snippet
+    elif title:
+        display = title
+    else:
+        display = f"{mode_label}" + (f" · {when}" if when else "")
+    subtitle_parts = [mode_label]
+    if when:
+        subtitle_parts.append(when)
+    segments = int(row.get("segment_count") or 0)
+    if segments:
+        subtitle_parts.append(f"{segments} фраз")
+    return {
+        "id": row.get("id", ""),
+        "title": title,
+        "displayTitle": display,
+        "subtitle": " · ".join(subtitle_parts),
+        "mode": mode,
+        "createdAt": row.get("created_at", ""),
+        "segments": segments,
+        "preview": (snippet or preview)[:160],
+        "needsTitle": generic,
+        "chatCount": int(row.get("chat_count") or 0),
+    }
+
+
+def clean_suggested_title(text: str) -> str:
+    """Убрать кавычки и хвост, который модель иногда дописывает."""
+
+    cleaned = " ".join(str(text or "").strip().split())
+    cleaned = cleaned.strip(" «»\"'`")
+    for separator in ("\n", ".", ";", " - ", " — "):
+        if separator in cleaned:
+            cleaned = cleaned.split(separator, 1)[0].strip()
+    return cleaned[:80].strip(" .,;:«»\"'`")
+
+
+def suggest_title_messages(excerpt: str) -> list[dict]:
+    body = " ".join(str(excerpt or "").split())
+    if len(body) > 1800:
+        body = body[:1800].rsplit(" ", 1)[0] + "…"
+    return [
+        {"role": "system", "content": SYSTEM_TITLE},
+        {
+            "role": "user",
+            "content": (
+                "По этой расшифровке придумай заголовок записи.\n\n"
+                f"{body or 'Пустая запись.'}"
+            ),
+        },
+    ]

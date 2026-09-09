@@ -94,6 +94,7 @@ class AssistantController(QObject):
     changed = Signal()
     messagesChanged = Signal()
     recordsChanged = Signal()
+    chatsChanged = Signal()
     catalogChanged = Signal()
     streamChanged = Signal()
     # Узкие сигналы: прогресс загрузки и опрос железа не должны
@@ -104,12 +105,13 @@ class AssistantController(QObject):
     modelChanged = Signal()
     recordChanged = Signal()
     attachmentChanged = Signal()
+    listModeChanged = Signal()
 
     # Сигналы из воркеров в GUI-поток.
     tokenArrived = Signal(str)
     replyFinished = Signal(str, str)
     stageArrived = Signal(str, "QVariantMap")
-    recordsArrived = Signal("QVariant")
+    recordsArrived = Signal("QVariant", "QVariant", int)
     catalogArrived = Signal("QVariant")
     hardwareArrived = Signal("QVariantMap", "QVariant", "QVariant")
     downloadProgress = Signal("QVariantMap")
@@ -117,6 +119,8 @@ class AssistantController(QObject):
     installLine = Signal(str)
     installFinished = Signal(str)
     recordArrived = Signal(int, str, "QVariantMap", "QVariant", str)
+    titleFinished = Signal(str, str, str)
+    namingFinished = Signal(str, int)
 
     def __init__(self, data_dir: Path, store, controller) -> None:
         super().__init__()
@@ -138,11 +142,15 @@ class AssistantController(QObject):
         self._ready = False
         self._runtime_label = ""
         self._records: list = []
+        self._chats: list = []
+        self._untitled_count = 0
+        self._list_mode = "records"
         self._record_id = ""
         self._record: dict = {}
         self._messages: list = []
         self._busy = False
         self._streaming = False
+        self._naming = False
         self._status = "Выберите запись или спросите что-нибудь"
         self._notice = ""
         self._stage = ""
@@ -167,6 +175,8 @@ class AssistantController(QObject):
         self.installLine.connect(self._on_install_line)
         self.installFinished.connect(self._on_install_finished)
         self.recordArrived.connect(self._on_record)
+        self.titleFinished.connect(self._on_title_finished)
+        self.namingFinished.connect(self._on_naming_finished)
 
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
@@ -262,6 +272,18 @@ class AssistantController(QObject):
     def records(self):
         return self._records
 
+    @Property("QVariant", notify=chatsChanged)
+    def chats(self):
+        return self._chats
+
+    @Property(int, notify=recordsChanged)
+    def untitledCount(self):
+        return self._untitled_count
+
+    @Property(str, notify=listModeChanged)
+    def listMode(self):
+        return self._list_mode
+
     @Property(str, notify=recordChanged)
     def recordId(self):
         return self._record_id
@@ -272,7 +294,17 @@ class AssistantController(QObject):
 
     @Property(str, notify=recordChanged)
     def recordTitle(self):
-        return str(self._record.get("title") or GENERAL_CHAT_TITLE)
+        if not self._record_id:
+            return GENERAL_CHAT_TITLE
+        return str(
+            self._record.get("displayTitle")
+            or self._record.get("title")
+            or GENERAL_CHAT_TITLE
+        )
+
+    @Property(bool, notify=recordChanged)
+    def recordNeedsTitle(self):
+        return bool(self._record_id) and bool(self._record.get("needsTitle"))
 
     @Property("QVariant", notify=messagesChanged)
     def messages(self):
@@ -280,7 +312,11 @@ class AssistantController(QObject):
 
     @Property(bool, notify=streamChanged)
     def busy(self):
-        return self._busy
+        return self._busy or self._naming
+
+    @Property(bool, notify=streamChanged)
+    def naming(self):
+        return self._naming
 
     @Property(bool, notify=streamChanged)
     def streaming(self):
@@ -379,28 +415,51 @@ class AssistantController(QObject):
         }
 
     @Slot(str)
+    def setListMode(self, mode):
+        value = str(mode or "")
+        if value not in ("records", "chats") or value == self._list_mode:
+            return
+        self._list_mode = value
+        self.listModeChanged.emit()
+
+    @Slot(str)
     def refreshRecords(self, query):
-        """Список записей для выбора; чтение базы не на GUI-потоке."""
+        """Список записей и чатов; чтение базы не на GUI-потоке."""
 
         text = str(query or "")
 
         def work():
             rows = self.store.list_sessions(text, limit=200)
-            items = []
+            records = []
+            chats = []
+            untitled = 0
             for row in rows:
                 if not int(row.get("segment_count") or 0):
                     continue
-                items.append(
-                    {
-                        "id": row["id"],
-                        "title": row["title"],
-                        "mode": row["mode"],
-                        "createdAt": row["created_at"],
-                        "segments": int(row.get("segment_count") or 0),
-                        "preview": str(row.get("text") or "")[:160],
-                    }
-                )
-            self.recordsArrived.emit(items)
+                item = core.list_item_from_row(row)
+                records.append(item)
+                if item.get("needsTitle"):
+                    untitled += 1
+                if int(item.get("chatCount") or 0) > 0:
+                    chats.append(item)
+            general_count = self.store.count_chat_messages(GENERAL_CHAT_ID)
+            general = {
+                "id": "",
+                "title": GENERAL_CHAT_TITLE,
+                "displayTitle": GENERAL_CHAT_TITLE,
+                "subtitle": (
+                    f"{general_count} сообщ."
+                    if general_count
+                    else "Без записи, обычный чат"
+                ),
+                "mode": "chat",
+                "createdAt": "",
+                "segments": 0,
+                "preview": "",
+                "needsTitle": False,
+                "chatCount": general_count,
+            }
+            self.recordsArrived.emit(records, [general, *chats], untitled)
 
         threading.Thread(target=work, name="dotaudio-llm-records", daemon=True).start()
 
@@ -419,9 +478,35 @@ class AssistantController(QObject):
         self.catalogChanged.emit()
         self.modelChanged.emit()
 
-    def _on_records(self, items):
-        self._records = list(items)
+    def _on_records(self, records, chats, untitled):
+        self._records = list(records)
+        self._chats = list(chats)
+        self._untitled_count = int(untitled)
         self.recordsChanged.emit()
+        self.chatsChanged.emit()
+
+    def _apply_title(self, session_id: str, title: str) -> None:
+        """Обновить заголовок в текущей карточке и обоих списках."""
+
+        patch = {
+            "title": title,
+            "displayTitle": title,
+            "needsTitle": False,
+        }
+        if self._record_id == session_id:
+            self._record = {**self._record, **patch}
+            self.recordChanged.emit()
+        for index, row in enumerate(self._records):
+            if row.get("id") == session_id:
+                self._records[index] = {**row, **patch}
+                break
+        for index, row in enumerate(self._chats):
+            if row.get("id") == session_id:
+                self._chats[index] = {**row, **patch}
+                break
+        self._untitled_count = sum(1 for row in self._records if row.get("needsTitle"))
+        self.recordsChanged.emit()
+        self.chatsChanged.emit()
 
     # -- выбор модели и записи ---------------------------------------------
 
@@ -720,7 +805,7 @@ class AssistantController(QObject):
         и импорт llama.cpp на GUI-потоке снова замораживали кнопку «Спросить».
         """
 
-        if self._busy:
+        if self._busy or self._naming:
             self._set_notice("Ответ ещё идёт. Остановите его или подождите.")
             return False
         model = self._current_model()
@@ -867,14 +952,133 @@ class AssistantController(QObject):
             except ValueError:
                 self._set_notice("Заголовок не может быть пустым.")
                 return
-        self._record = {**self._record, "title": cleaned}
-        for index, row in enumerate(self._records):
-            if row.get("id") == self._record_id:
-                self._records[index] = {**row, "title": cleaned}
-                break
-        self.recordChanged.emit()
-        self.recordsChanged.emit()
+        self._apply_title(self._record_id, cleaned)
         self._set_notice(f"Запись переименована: {cleaned}")
+
+    @Slot()
+    def nameRecord(self):
+        """Придумать заголовок выбранной записи локальной моделью."""
+
+        if not self._record_id:
+            self._set_notice("Сначала выберите запись.")
+            return
+        if not self._guard():
+            return
+        self._start_naming([self._record_id])
+
+    @Slot()
+    def nameUntitledRecords(self):
+        """Проставить заголовки всем записям с типовым именем источника."""
+
+        if not self._guard():
+            return
+        targets = [str(row["id"]) for row in self._records if row.get("needsTitle")]
+        if not targets:
+            self._set_notice("Все записи уже с понятными названиями.")
+            return
+        self._start_naming(targets)
+
+    def _start_naming(self, session_ids: list[str]) -> None:
+        self._idle.stop()
+        self._cancel = threading.Event()
+        self._naming = True
+        self._busy = True
+        self._stage = "title"
+        self._status = (
+            "Придумываю название…"
+            if len(session_ids) == 1
+            else f"Называю записи: 0 из {len(session_ids)}"
+        )
+        self.streamChanged.emit()
+        model = self._current_model()
+        cancel = self._cancel
+        ids = list(session_ids)
+
+        def work():
+            done = 0
+            error = ""
+            try:
+                for session_id in ids:
+                    if cancel.is_set():
+                        error = "cancelled"
+                        break
+                    session = self.store.get_session(session_id)
+                    if session is None:
+                        continue
+                    excerpt = " ".join(
+                        str(segment.get("text") or "")
+                        for segment in (session.get("segments") or [])[:40]
+                    )
+                    fallback = core.title_from_transcript(session.get("segments") or [])
+                    title = ""
+                    try:
+                        raw = self.engine.complete(
+                            core.suggest_title_messages(excerpt or fallback),
+                            model,
+                            GenerationOptions(temperature=0.2, max_tokens=48),
+                            cancel=cancel,
+                        )
+                        title = core.clean_suggested_title(raw)
+                    except llm.GenerationCancelled:
+                        error = "cancelled"
+                        break
+                    except llm.RuntimeUnavailable as failure:
+                        error = str(failure)
+                        break
+                    except Exception as failure:
+                        error = str(failure) or failure.__class__.__name__
+                        break
+                    if not title:
+                        title = fallback
+                    if not title:
+                        continue
+                    rename = getattr(self.controller, "renameSession", None)
+                    if callable(rename):
+                        rename(session_id, title)
+                    else:
+                        title = self.store.rename_session(session_id, title)
+                    done += 1
+                    self.titleFinished.emit(session_id, title, "")
+                    if len(ids) > 1:
+                        self.stageArrived.emit(
+                            "title_progress",
+                            {"done": done, "total": len(ids)},
+                        )
+            except Exception as failure:
+                error = str(failure) or failure.__class__.__name__
+            self.namingFinished.emit(error, done)
+
+        self._worker = threading.Thread(target=work, name="dotaudio-llm-title", daemon=True)
+        self._worker.start()
+
+    def _on_title_finished(self, session_id, title, _unused):
+        if session_id and title:
+            self._apply_title(str(session_id), str(title))
+
+    def _on_naming_finished(self, error, done):
+        self._naming = False
+        self._busy = False
+        self._stage = ""
+        count = int(done)
+        if error == "cancelled":
+            self._status = "Название остановлено"
+            if count:
+                self._set_notice(f"Успели назвать: {count}")
+        elif error:
+            self._status = "Ошибка"
+            self._set_notice(f"Не удалось назвать: {error}")
+        elif count == 1:
+            self._status = "Готов к следующему вопросу"
+            self._set_notice("Заголовок обновлён.")
+        elif count:
+            self._status = "Готов к следующему вопросу"
+            self._set_notice(f"Названо записей: {count}")
+        else:
+            self._status = "Готов к следующему вопросу"
+            self._set_notice("Нечего называть: в расшифровках мало текста.")
+        self._idle.start()
+        self.streamChanged.emit()
+        self.refreshRecords("")
 
     def _start(self, question: str, action: str, meta: dict | None = None) -> None:
         self._idle.stop()
@@ -1023,9 +1227,15 @@ class AssistantController(QObject):
                 if data.get("mode") == "full"
                 else f"Читаю выбранные части: {opened}"
             )
+        elif name == "title_progress":
+            done = int(data.get("done") or 0)
+            total = int(data.get("total") or 0)
+            self._status = f"Называю записи: {done} из {total}"
         self.streamChanged.emit()
 
     def _on_reply_finished(self, error, action):
+        if self._naming:
+            return
         self._token_ui.stop()
         self._busy = False
         self._streaming = False

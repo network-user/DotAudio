@@ -355,7 +355,9 @@ class Store:
                         ) AS ordered
                     ), '') AS text,
                     (SELECT COUNT(*) FROM segments WHERE session_id = s.id)
-                        AS segment_count
+                        AS segment_count,
+                    (SELECT COUNT(*) FROM chat_messages WHERE session_id = s.id)
+                        AS chat_count
                 FROM sessions s
                 {where}
                 ORDER BY s.created_at DESC, s.id DESC
@@ -364,6 +366,14 @@ class Store:
                 params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def count_chat_messages(self, session_id: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = ?",
+                (session_id or GENERAL_CHAT_ID,),
+            ).fetchone()
+        return int(row["n"] if row is not None else 0)
 
     def update_segment(
         self,

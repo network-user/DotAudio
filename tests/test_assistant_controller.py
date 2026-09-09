@@ -24,6 +24,7 @@ def test_frequent_updates_have_their_own_notify_signals() -> None:
     expected = {
         "messages": "messagesChanged",
         "records": "recordsChanged",
+        "chats": "chatsChanged",
         "catalog": "catalogChanged",
         "status": "streamChanged",
         "streaming": "streamChanged",
@@ -35,6 +36,7 @@ def test_frequent_updates_have_their_own_notify_signals() -> None:
         "modelReady": "modelChanged",
         "notice": "noticeChanged",
         "recordId": "recordChanged",
+        "listMode": "listModeChanged",
     }
     for name, signal in expected.items():
         prop = meta.property(meta.indexOfProperty(name))
@@ -81,7 +83,10 @@ def test_actions_are_offered_to_the_interface() -> None:
     meta = AssistantController.staticMetaObject
     assert meta.indexOfProperty("actions") >= 0
     assert set(ACTION_LABELS) == {"summary", "keypoints", "tasks", "topics"}
-    for slot in ("ask", "runAction", "stop", "selectRecord", "downloadModel", "clearChat"):
+    for slot in (
+        "ask", "runAction", "stop", "selectRecord", "downloadModel", "clearChat",
+        "setListMode", "nameRecord", "nameUntitledRecords",
+    ):
         assert meta.indexOfMethod(f"{slot}()") >= 0 or any(
             bytes(meta.method(index).name()).decode() == slot
             for index in range(meta.methodCount())
@@ -165,13 +170,14 @@ def test_rename_record_updates_title_and_list(tmp_path: Path) -> None:
         session_id, [{"start": 0.0, "end": 1.0, "text": "привет"}]
     )
     assistant._record_id = session_id
-    assistant._record = {"id": session_id, "title": "Старое"}
-    assistant._records = [{"id": session_id, "title": "Старое"}]
+    assistant._record = {"id": session_id, "title": "Старое", "displayTitle": "Старое"}
+    assistant._records = [{"id": session_id, "title": "Старое", "displayTitle": "Старое"}]
 
     assistant.renameRecord("  Новое имя ")
 
     assert assistant.recordTitle == "Новое имя"
     assert assistant._records[0]["title"] == "Новое имя"
+    assert assistant._records[0]["needsTitle"] is False
     assert assistant.store.get_session(session_id)["title"] == "Новое имя"
 
 

@@ -3,15 +3,13 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "Theme.js" as Theme
 
-// Страница «Ассистент»: слева выбор записи и модель, справа разговор.
+// Страница «Ассистент»: слева отдельно записи и чаты, справа разговор.
 // Расшифровка здесь только читается - правки остаются на своих страницах.
 Item {
     id: root
 
     property bool catalogOpen: false
 
-    // Однострочное поле на токенах темы: системное поле приносит светлую
-    // палитру на тёмный фон.
     component Field: TextField {
         color: Theme.text
         placeholderTextColor: Theme.faint
@@ -39,18 +37,40 @@ Item {
         border.color: Theme.border
     }
 
-    function stamp(seconds) {
-        var total = Math.max(0, Math.round(Number(seconds) || 0))
-        var minutes = Math.floor(total / 60)
-        var rest = total % 60
-        return (minutes < 10 ? "0" : "") + minutes + ":" + (rest < 10 ? "0" : "") + rest
+    component SegmentPill: Rectangle {
+        id: pill
+        property string key
+        property string label
+        property bool active: assistant.listMode === key
+        implicitHeight: 28
+        implicitWidth: pillLabel.implicitWidth + 20
+        radius: Theme.radiusSm
+        color: active ? Theme.fillHi : (pillMouse.containsMouse ? Theme.fill : "transparent")
+        border.width: 1
+        border.color: active ? Theme.borderHi : Theme.hairline
+        Behavior on color { ColorAnimation { duration: Theme.fastMs } }
+        MouseArea {
+            id: pillMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: assistant.setListMode(pill.key)
+        }
+        Label {
+            id: pillLabel
+            anchors.centerIn: parent
+            text: pill.label
+            color: Theme.text
+            font.pixelSize: Theme.fsSmall
+            font.weight: Font.DemiBold
+        }
     }
 
     RowLayout {
         anchors.fill: parent
         spacing: Theme.gapLg
 
-        // ---- левая колонка: записи и модель ----
+        // ---- левая колонка: записи / чаты и модель ----
         ColumnLayout {
             Layout.preferredWidth: 300
             Layout.maximumWidth: 320
@@ -68,24 +88,23 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: Theme.gapSm
-                        Label {
-                            text: "Запись"
-                            color: Theme.text
-                            font.pixelSize: Theme.fsTitle
-                            font.weight: Font.DemiBold
-                        }
+                        SegmentPill { key: "records"; label: "Записи" }
+                        SegmentPill { key: "chats"; label: "Чаты" }
                         Item { Layout.fillWidth: true }
                         IconButton {
                             iconName: "undo"
                             onClicked: assistant.refreshRecords(search.text)
                             ToolTip.visible: hovered
-                            ToolTip.text: "Обновить список"
+                            ToolTip.text: "Обновить списки"
                         }
                     }
+
                     Field {
                         id: search
                         Layout.fillWidth: true
-                        placeholderText: "Поиск по названию и тексту"
+                        placeholderText: assistant.listMode === "chats"
+                                         ? "Поиск по чатам и записям"
+                                         : "Поиск по названию и тексту"
                         onTextChanged: searchDelay.restart()
                         Timer {
                             id: searchDelay
@@ -94,107 +113,128 @@ Item {
                         }
                     }
 
-                    // Общий чат стоит первым: он не привязан к записи и всегда доступен.
-                    Rectangle {
+                    RowLayout {
                         Layout.fillWidth: true
-                        implicitHeight: 44
-                        radius: Theme.radiusMd
-                        color: assistant.recordId === "" ? Theme.fillHi
-                             : generalHover.containsMouse ? Theme.fill : "transparent"
-                        border.width: 1
-                        border.color: assistant.recordId === "" ? Theme.borderHi : Theme.hairline
-                        Behavior on color { ColorAnimation { duration: Theme.fastMs } }
-                        MouseArea {
-                            id: generalHover
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: assistant.selectRecord("")
+                        visible: assistant.listMode === "records" && assistant.untitledCount > 0
+                        spacing: Theme.gapSm
+                        Label {
+                            Layout.fillWidth: true
+                            text: "Без имени: " + assistant.untitledCount
+                            color: Theme.muted
+                            font.pixelSize: Theme.fsMicro
                         }
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 12
-                            spacing: Theme.gapSm
-                            Icon { name: "dictation"; width: 15; height: 15; ink: Theme.muted }
-                            ColumnLayout {
-                                spacing: 0
-                                Label {
-                                    text: "Свободный разговор"
-                                    color: Theme.text
-                                    font.pixelSize: Theme.fsLabel
-                                    font.weight: Font.DemiBold
-                                }
-                                Label {
-                                    text: "Без записи, обычный чат"
-                                    color: Theme.muted
-                                    font.pixelSize: Theme.fsMicro
-                                }
-                            }
+                        PillButton {
+                            compact: true
+                            text: assistant.naming ? "Называю…" : "Назвать"
+                            enabled: !assistant.busy && assistant.modelReady
+                            onClicked: assistant.nameUntitledRecords()
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Локальная модель придумает заголовки для типовых «Микрофон» и т.п."
                         }
                     }
 
                     Label {
-                        visible: assistant.records.length === 0
+                        visible: assistant.listMode === "records" && assistant.records.length === 0
                         Layout.fillWidth: true
-                        Layout.topMargin: Theme.gapSm
-                        text: "Записей с расшифровкой пока нет. Сделайте запись в Live или в диктовке."
+                        text: "Записей с расшифровкой пока нет."
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsSmall
+                        wrapMode: Text.Wrap
+                    }
+
+                    Label {
+                        visible: assistant.listMode === "chats" && assistant.chats.length <= 1
+                                 && !(assistant.chats.length === 1 && assistant.chats[0].chatCount > 0)
+                        Layout.fillWidth: true
+                        text: "Пока только свободный разговор. Выберите запись слева во вкладке «Записи»."
                         color: Theme.muted
                         font.pixelSize: Theme.fsSmall
                         wrapMode: Text.Wrap
                     }
 
                     ListView {
-                        id: recordList
+                        id: sideList
                         objectName: "recordList"
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
-                        spacing: 6
-                        model: assistant.records
+                        spacing: Theme.gapXs
+                        model: assistant.listMode === "chats" ? assistant.chats : assistant.records
                         ScrollBar.vertical: ScrollBar { }
-                        delegate: Rectangle {
+                        delegate: Item {
+                            id: rowItem
                             required property var modelData
-                            readonly property bool selected: assistant.recordId === modelData.id
-                            width: recordList.width
-                            implicitHeight: 56
-                            radius: Theme.radiusMd
-                            color: selected ? Theme.fillHi
-                                 : recordHover.containsMouse ? Theme.fill : "transparent"
-                            border.width: 1
-                            border.color: selected ? Theme.borderHi : Theme.hairline
-                            Behavior on color { ColorAnimation { duration: Theme.fastMs } }
-                            MouseArea {
-                                id: recordHover
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: assistant.selectRecord(modelData.id)
-                            }
-                            ColumnLayout {
-                                anchors.fill: parent
-                                anchors.margins: 10
-                                spacing: 1
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: modelData.title
-                                    color: Theme.text
-                                    font.pixelSize: Theme.fsLabel
-                                    font.weight: Font.DemiBold
-                                    elide: Text.ElideRight
+                            width: sideList.width
+                            height: card.implicitHeight
+
+                            Rectangle {
+                                id: card
+                                width: parent.width
+                                implicitHeight: cardCol.implicitHeight + 18
+                                radius: Theme.radiusMd
+                                color: assistant.recordId === String(modelData.id || "")
+                                       ? Theme.fillHi
+                                       : (rowHover.containsMouse ? Theme.fill : "transparent")
+                                border.width: 1
+                                border.color: assistant.recordId === String(modelData.id || "")
+                                              ? Theme.borderHi : Theme.hairline
+                                Behavior on color { ColorAnimation { duration: Theme.fastMs } }
+
+                                MouseArea {
+                                    id: rowHover
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: assistant.selectRecord(String(modelData.id || ""))
                                 }
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: modelData.preview
-                                    color: Theme.muted
-                                    font.pixelSize: Theme.fsMicro
-                                    elide: Text.ElideRight
-                                }
-                                Label {
-                                    text: modelData.segments + " фраз"
-                                    color: Theme.faint
-                                    font.pixelSize: Theme.fsMicro
-                                    font.family: Theme.monoFamily
+
+                                Column {
+                                    id: cardCol
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.margins: 10
+                                    spacing: 3
+
+                                    Row {
+                                        width: parent.width
+                                        spacing: 6
+                                        Label {
+                                            width: parent.width - (needsMark.visible ? needsMark.width + 6 : 0)
+                                            text: modelData.displayTitle || modelData.title || "Запись"
+                                            color: Theme.text
+                                            font.pixelSize: Theme.fsLabel
+                                            font.weight: Font.DemiBold
+                                            elide: Text.ElideRight
+                                            maximumLineCount: 2
+                                            wrapMode: Text.Wrap
+                                        }
+                                        Rectangle {
+                                            id: needsMark
+                                            visible: !!modelData.needsTitle
+                                            width: markLabel.implicitWidth + 8
+                                            height: 16
+                                            radius: 8
+                                            color: Theme.fill
+                                            border.width: 1
+                                            border.color: Theme.hairline
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            Label {
+                                                id: markLabel
+                                                anchors.centerIn: parent
+                                                text: "имя"
+                                                color: Theme.faint
+                                                font.pixelSize: Theme.fsMicro
+                                            }
+                                        }
+                                    }
+                                    Label {
+                                        width: parent.width
+                                        text: modelData.subtitle || ""
+                                        color: Theme.muted
+                                        font.pixelSize: Theme.fsMicro
+                                        elide: Text.ElideRight
+                                    }
                                 }
                             }
                         }
@@ -202,7 +242,6 @@ Item {
                 }
             }
 
-            // Активная модель и путь к каталогу.
             Card {
                 Layout.fillWidth: true
                 Layout.preferredHeight: modelBox.implicitHeight + 26
@@ -263,8 +302,6 @@ Item {
                         }
                         Item { Layout.fillWidth: true }
                     }
-                    // Прогресс загрузки виден и когда каталог закрыт: файл идёт
-                    // минутами, и об этом должно быть видно с рабочей страницы.
                     ColumnLayout {
                         Layout.fillWidth: true
                         visible: assistant.download.active
@@ -340,7 +377,7 @@ Item {
                     id: titleEditor
                     Layout.fillWidth: true
                     visible: false
-                    text: assistant.recordTitle
+                    text: assistant.record.title || assistant.recordTitle
                     color: Theme.text
                     font.pixelSize: Theme.fsBody
                     selectByMouse: true
@@ -364,7 +401,7 @@ Item {
                         if (titleEditor.visible)
                             root.saveRecordTitle()
                         else {
-                            titleEditor.text = assistant.recordTitle
+                            titleEditor.text = assistant.record.title || assistant.recordTitle
                             titleEditor.visible = true
                             titleEditor.forceActiveFocus()
                             titleEditor.selectAll()
@@ -376,7 +413,16 @@ Item {
                 PillButton {
                     compact: true
                     visible: assistant.recordId !== ""
-                    text: "Собрать карту заново"
+                    text: assistant.naming ? "…" : "Назвать"
+                    enabled: !assistant.busy && assistant.modelReady
+                    onClicked: assistant.nameRecord()
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Придумать заголовок по расшифровке"
+                }
+                PillButton {
+                    compact: true
+                    visible: assistant.recordId !== ""
+                    text: "Карта"
                     enabled: !assistant.busy
                     onClicked: assistant.rebuildIndex()
                     ToolTip.visible: hovered
@@ -419,7 +465,6 @@ Item {
                 }
             }
 
-            // Готовые действия работают по записи, поэтому в общем чате их нет.
             Flow {
                 objectName: "assistantActions"
                 Layout.fillWidth: true
@@ -442,8 +487,6 @@ Item {
                 Layout.fillHeight: true
                 clip: true
 
-                // Пустое состояние объясняет, что делать: без модели чат
-                // молчал бы без причины.
                 ColumnLayout {
                     anchors.centerIn: parent
                     width: Math.min(430, parent.width - 60)
@@ -452,7 +495,9 @@ Item {
                     Label {
                         Layout.fillWidth: true
                         horizontalAlignment: Text.AlignHCenter
-                        text: assistant.modelReady ? "Спросите о записи" : "Модель ещё не скачана"
+                        text: assistant.modelReady
+                              ? (assistant.recordId === "" ? "Свободный разговор" : "Спросите о записи")
+                              : "Модель ещё не скачана"
                         color: Theme.text
                         font.pixelSize: Theme.fsLead
                         font.weight: Font.DemiBold
@@ -462,8 +507,10 @@ Item {
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.Wrap
                         text: assistant.modelReady
-                              ? "Модель работает на этом компьютере: ни расшифровка, ни вопросы никуда не отправляются."
-                              : "Откройте «Модели», выберите подходящую этому устройству и скачайте её. После этого чат работает без интернета."
+                              ? (assistant.recordId === ""
+                                 ? "Можно просто поговорить или прикрепить .txt. Чтобы разобрать расшифровку, откройте вкладку «Записи»."
+                                 : "Модель работает на этом компьютере: ни расшифровка, ни вопросы никуда не отправляются.")
+                              : "Откройте «Модели», выберите подходящую этому устройству и скачайте её."
                         color: Theme.muted
                         font.pixelSize: Theme.fsBody
                     }
@@ -492,6 +539,10 @@ Item {
                     Connections {
                         target: assistant
                         function onMessagesChanged() { chat.positionViewAtEnd() }
+                        function onStreamChanged() {
+                            if (assistant.busy)
+                                chat.positionViewAtEnd()
+                        }
                     }
                     delegate: Item {
                         id: bubbleRow
@@ -500,13 +551,17 @@ Item {
                         readonly property bool mine: modelData.role === "user"
                         readonly property var fileMeta: (modelData.meta && modelData.meta.attachment)
                                                        ? modelData.meta.attachment : null
+                        // Ширина пузыря фиксирована долей списка: иначе
+                        // TextEdit и ColumnLayout крутят друг друга по размеру
+                        // и строки наезжают.
+                        readonly property real bubbleWidth: Math.min(chat.width * 0.82, 560)
                         width: chat.width
-                        implicitHeight: bubble.implicitHeight
+                        height: Math.max(bubble.height, copyBtn.visible ? copyBtn.height : 0)
 
                         Rectangle {
                             id: bubble
-                            width: Math.min(parent.width * 0.86, Math.max(120, bodyCol.implicitWidth + 28))
-                            implicitHeight: bodyCol.implicitHeight + 22
+                            width: bubbleRow.bubbleWidth
+                            height: col.height + 22
                             anchors.right: bubbleRow.mine ? parent.right : undefined
                             anchors.left: bubbleRow.mine ? undefined : parent.left
                             radius: Theme.radiusMd
@@ -514,30 +569,30 @@ Item {
                             border.width: 1
                             border.color: bubbleRow.mine ? Theme.border : Theme.hairline
 
-                            ColumnLayout {
-                                id: bodyCol
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.top: parent.top
-                                anchors.margins: 11
+                            Column {
+                                id: col
+                                x: 11
+                                y: 11
+                                width: parent.width - 22
                                 spacing: Theme.gapXs
 
                                 Rectangle {
                                     visible: bubbleRow.fileMeta !== null
-                                    Layout.fillWidth: true
-                                    implicitHeight: attachLabel.implicitHeight + 12
+                                    width: parent.width
+                                    height: attachRow.height + 10
                                     radius: Theme.radiusSm
                                     color: Theme.fill
                                     border.width: 1
                                     border.color: Theme.hairline
-                                    RowLayout {
-                                        anchors.fill: parent
-                                        anchors.margins: 6
+                                    Row {
+                                        id: attachRow
+                                        x: 6
+                                        y: 5
+                                        width: parent.width - 12
                                         spacing: 6
                                         Icon { name: "attach"; width: 12; height: 12; ink: Theme.muted }
                                         Label {
-                                            id: attachLabel
-                                            Layout.fillWidth: true
+                                            width: parent.width - 18
                                             text: bubbleRow.fileMeta
                                                   ? (bubbleRow.fileMeta.name + " · "
                                                      + bubbleRow.fileMeta.chars + " симв.")
@@ -551,12 +606,13 @@ Item {
 
                                 TextEdit {
                                     id: body
-                                    Layout.fillWidth: true
+                                    width: parent.width
                                     readOnly: true
                                     selectByMouse: true
                                     selectionColor: Theme.fillPress
                                     selectedTextColor: Theme.text
                                     wrapMode: TextEdit.Wrap
+                                    textFormat: TextEdit.PlainText
                                     text: {
                                         if (modelData.pending)
                                             return assistant.pendingReply.length
@@ -575,7 +631,9 @@ Item {
                                 }
                             }
                         }
+
                         IconButton {
+                            id: copyBtn
                             visible: !bubbleRow.mine && !assistant.busy
                                      && modelData.content && modelData.content.length > 0
                             anchors.left: bubble.right
@@ -590,8 +648,6 @@ Item {
                 }
             }
 
-            // Ввод. Enter отправляет, Shift+Enter переносит строку: вопрос по
-            // записи бывает длиннее одной строки.
             Card {
                 Layout.fillWidth: true
                 Layout.preferredHeight: inputColumn.implicitHeight + 20
@@ -702,7 +758,7 @@ Item {
     function saveRecordTitle() {
         var value = titleEditor.text.trim()
         titleEditor.visible = false
-        if (!value.length || value === assistant.recordTitle)
+        if (!value.length)
             return
         assistant.renameRecord(value)
     }
@@ -717,8 +773,6 @@ Item {
         input.clear()
     }
 
-    // Каталог моделей поверх страницы: создаётся при первом открытии,
-    // чтобы не держать лист и его привязки в памяти зря.
     Loader {
         id: catalogLoader
         objectName: "assistantModels"

@@ -83,7 +83,35 @@ def page(gui, tmp_path, warnings):
     # Список записей приходит из воркера; для проверки вёрстки он подставляется,
     # чтобы тест не зависел от гонки с потоком.
     assistant._on_records(
-        [{"id": session, "title": "Планёрка", "mode": "live", "createdAt": "", "segments": 3, "preview": "Смета"}]
+        [
+            {
+                "id": session,
+                "title": "Планёрка",
+                "displayTitle": "Планёрка",
+                "subtitle": "Live · 3 фраз",
+                "mode": "live",
+                "createdAt": "",
+                "segments": 3,
+                "preview": "Смета",
+                "needsTitle": False,
+                "chatCount": 0,
+            }
+        ],
+        [
+            {
+                "id": "",
+                "title": "Свободный разговор",
+                "displayTitle": "Свободный разговор",
+                "subtitle": "Без записи, обычный чат",
+                "mode": "chat",
+                "createdAt": "",
+                "segments": 0,
+                "preview": "",
+                "needsTitle": False,
+                "chatCount": 0,
+            }
+        ],
+        0,
     )
 
     view = QQuickView()

@@ -3381,7 +3381,9 @@ class Controller(QObject):
         )
         self.store.append_segments(session_id, payload)
         self.store.finish_session(session_id, "completed")
-        self._maybe_autotitle_session(session_id)
+        maybe_title = getattr(self, "_maybe_autotitle_session", None)
+        if callable(maybe_title):
+            maybe_title(session_id)
         self.transcribeStatus.emit(f"Готово. Сохранено в историю: {media.name}")
         return session_id
 

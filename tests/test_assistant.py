@@ -451,6 +451,32 @@ def test_history_keeps_attachment_text_for_the_model() -> None:
     assert "Суммируй" in rows[0]["content"]
 
 
+def test_generic_microphone_title_becomes_a_transcript_snippet() -> None:
+    item = core.list_item_from_row(
+        {
+            "id": "1",
+            "title": "Микрофон",
+            "mode": "dictation",
+            "created_at": "2026-09-09T10:15:00+00:00",
+            "text": "Смета выросла до трёх миллионов и сроки сдвинули",
+            "segment_count": 4,
+            "chat_count": 0,
+        }
+    )
+
+    assert item["needsTitle"] is True
+    assert "Смета" in item["displayTitle"]
+    assert "Диктовка" in item["subtitle"]
+    assert "Микрофон" not in item["displayTitle"]
+
+
+def test_suggested_title_is_cleaned_from_model_noise() -> None:
+    assert core.clean_suggested_title('«Смета и сроки».\nЕщё текст') == "Смета и сроки"
+    assert core.title_from_transcript(
+        [{"text": "[Человек 1] Привет всем на совещании по смете"}]
+    ).startswith("Привет")
+
+
 def test_cancel_stops_building_the_map() -> None:
     chunks = build_chunks(_segments(8, step=60.0), target_seconds=120.0)
     cancel = threading.Event()
