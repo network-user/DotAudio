@@ -24,13 +24,22 @@ class VramArbiter:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._owner: Owner | None = None
-        self._evict: dict[Owner, EvictCallback] = {}
+        self._evict: dict[Owner, list[EvictCallback]] = {}
 
     def on_evict(self, owner: str, callback: EvictCallback) -> None:
+        """Добавить, что освободить у этого владельца при вытеснении.
+
+        Владелец не всегда один объект: у Live две модели Whisper - быстрая
+        на черновики и выбранная на финалы. Прежняя одиночная ссылка теряла
+        первую из них, и та оставалась в видеопамяти после вытеснения.
+        """
+
         if owner not in _VALID_OWNERS:
             raise ValueError(f"unknown VRAM owner: {owner}")
         with self._lock:
-            self._evict[owner] = callback
+            handlers = self._evict.setdefault(owner, [])
+            if callback not in handlers:
+                handlers.append(callback)
 
     def acquire(self, owner: str, *, force: bool = False) -> bool:
         if owner not in _VALID_OWNERS:
@@ -40,8 +49,7 @@ class VramArbiter:
             if current == owner and not force:
                 return True
             if current is not None and current != owner:
-                evict = self._evict.get(current)
-                if evict is not None:
+                for evict in tuple(self._evict.get(current, ())):
                     try:
                         evict()
                     except Exception:

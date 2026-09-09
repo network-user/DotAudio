@@ -223,7 +223,9 @@ Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             segments: bridge.segments
-            hideLast: bridge.liveOpenPhrase
+            // Готовая фраза остаётся в колонке: живая строка её больше не
+            // дублирует, поэтому прятать последнюю строку не нужно.
+            hideLast: false
             confirmed: bridge.confirmedCaption
             pending: bridge.partialCaption
             placeholder: root.stageHint

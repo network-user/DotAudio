@@ -47,13 +47,12 @@ Window {
         && bridge.livePhase !== "decoding"
         && bridge.livePhase !== "stopping"
 
-    // Незаконченное предложение уже стоит в живой строке, в «предыдущих» оно
-    // не считается. Пока речь идёт, предыдущая строка - последнее законченное
-    // предложение; когда живая строка пуста, его показывает сама строка, а
-    // предыдущей становится то, что было перед ним.
+    // Живая строка показывает только текущую фразу, поэтому все сказанные
+    // фразы считаются закрытыми. Пока речь идёт, предыдущая строка - самая
+    // свежая из них; когда живая строка пуста, её показывает сама строка, а
+    // предыдущей становится то, что было перед ней.
     readonly property bool liveEmpty: bridge.displayCaption.length === 0
-    readonly property int closedCount: bridge.liveOpenPhrase
-        ? Math.max(0, bridge.segments.length - 1) : bridge.segments.length
+    readonly property int closedCount: bridge.segments.length
     readonly property string previousText: {
         var items = bridge.segments
         var count = overlay.closedCount

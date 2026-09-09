@@ -24,23 +24,22 @@ LIVE_SPEECH_THRESHOLD = 0.0015
 # waits for its final: on a speaker who never pauses, a phrase settles when it
 # hits this many seconds, so a long monologue keeps producing finals and the
 # preview has covered every line the whole way.
-# Фраза держится короче, чем прежние 6 секунд, и это решение про скорость
-# чтения, а не про память. Черновик распознаёт всю активную фразу целиком,
-# поэтому её длина - это и есть стоимость одного черновика: на 6 секундах
-# он доходил до секунды и текст шёл рывками. На 4 секундах черновик
-# укладывается примерно в 600 мс на этой машине, а сказанное чаще уходит
-# готовой фразой в поток речи, где его и читают.
-LIVE_PHRASE_SECONDS = 4.0
+# Фраза - это и единица чтения, и цена одного черновика: черновик
+# распознаёт активную фразу целиком, поэтому чем она длиннее, тем дороже
+# каждое обновление и тем больше текста переписывается на экране за раз.
+# 2,2 секунды - это короткая строка, которая быстро застывает готовой и
+# уходит в колонку, вместо простыни, живущей в черновике по четыре секунды.
+LIVE_PHRASE_SECONDS = 2.2
 # Конец реплики: короче - быстрее финал после паузы. 0.32 с ещё ловит
 # естественную паузу между словами, но не держит субтитр лишние ~100 мс.
 LIVE_SILENCE_SECONDS = 0.32
 # Первый черновик. На CUDA small окно считается ~50-90 мс, поэтому ждать
 # почти секунду до первого текста - искусственная задержка, а не цена
-# декода. 0.5 с даёт модели достаточно звука для русского слова; порог
+# декода. 0.4 с даёт модели достаточно звука для русского слова; порог
 # уверенности в режиме «Речь» по-прежнему отсекает шум. Раньше 0.9 с
 # подстраивались под CPU, где окно само стоило сотни миллисекунд.
-LIVE_PREVIEW_MIN_SECONDS = 0.5
-LIVE_PREVIEW_INTERVAL_SECONDS = 0.28
+LIVE_PREVIEW_MIN_SECONDS = 0.4
+LIVE_PREVIEW_INTERVAL_SECONDS = 0.22
 # Окно черновика равно длине фразы: пока фраза целиком попадает в окно,
 # показанный текст всегда полный. Окно короче фразы пробовали - оно держит
 # задержку ровной, но на окне, начавшемся посреди фразы, декодер иногда
@@ -68,6 +67,12 @@ PHRASE_CONTEXT_SECONDS = 2.0
 # Сколько последних финальных фраз декодер видит как предыдущий текст.
 # Движок дополнительно ограничивает контекст по символам.
 LIVE_CONTEXT_PHRASES = 3
+# Слово у самого края окна - самое неустойчивое: следующий черновик слышит
+# ещё сотню миллисекунд и уточняет его («родотест» становится «когда»).
+# Согласия двух гипотез для тёмного текста мало, потому что соседние окна
+# почти одинаковы. Подтверждённой публикуется согласованная часть без
+# последних слов: уточнение происходит в черновике, а прочитанное стоит.
+LIVE_CONFIRM_LAG_WORDS = 2
 
 _PREVIEW_PUNCTUATION = str.maketrans("", "", ".,!?;:…«»\"“”()[]{}")
 
@@ -350,12 +355,28 @@ class LiveSession:
         preview_min_seconds: float | None = None,
         preview_interval_seconds: float | None = None,
         preview_window_seconds: float | None = None,
+        draft_engine: Engine | None = None,
     ):
         self.engine, self.config = engine, config
         self.on_segment, self.on_status, self.on_done = on_segment, on_status, on_done
         self.on_partial = on_partial
         self.catch_up = catch_up
-        self.preview_config = replace(config, live_preview=True, live_stream=False)
+        # Каскад двух моделей: черновик считает лёгкая модель и успевает за
+        # речью, финал - выбранная, и в историю идёт её текст. Один движок
+        # держит в памяти одну модель, поэтому у черновика свой движок:
+        # иначе окна вытесняли бы модель друг у друга несколько раз в секунду.
+        draft_model = str(getattr(config, "live_draft_model", "") or "").strip()
+        self.draft_engine = (
+            draft_engine
+            if draft_engine is not None and draft_model and draft_model != config.model
+            else None
+        )
+        self.preview_config = replace(
+            config,
+            live_preview=True,
+            live_stream=False,
+            model=draft_model if self.draft_engine is not None else config.model,
+        )
         if catch_up:
             # Whisper reads a whole phrase much better than a fragment of one,
             # and the rolling preview covers the wait.  The energy threshold
@@ -402,6 +423,9 @@ class LiveSession:
         self._decode_seconds = 0.0
         self._last_preview_text = ""
         self._stable_prefix = ""
+        # Подтверждённая часть, уже показанная тёмным текстом. Отдельно от
+        # согласия гипотез: согласие может сжаться, а прочитанное - нет.
+        self._published_stable = ""
         # Речь текущей фразы, которая уже вышла из окна предпросмотра. Окно
         # короче фразы, поэтому её начало нужно помнить отдельно, иначе
         # субтитр показывал бы только последние секунды сказанного.
@@ -866,6 +890,41 @@ class LiveSession:
         return " ".join(old_words[:cut])
 
     @staticmethod
+    def _starts_with_words(text, prefix):
+        words = [_preview_key(word) for word in text.split()]
+        head = [_preview_key(word) for word in prefix.split()]
+        return len(words) >= len(head) and words[: len(head)] == head
+
+    @staticmethod
+    def _hold_back(agreed, words=LIVE_CONFIRM_LAG_WORDS):
+        """Согласованный префикс без неустойчивого хвоста у края окна."""
+
+        parts = agreed.split()
+        if len(parts) <= words:
+            return ""
+        return " ".join(parts[: len(parts) - words])
+
+    def _publish_stable(self, agreed, hypothesis):
+        """Тёмный текст растёт и не переписывается на каждом черновике.
+
+        Согласия двух соседних гипотез мало: окна отличаются на сотню
+        миллисекунд, поэтому согласуется даже неверно услышанное слово.
+        Наружу идёт согласованная часть без хвоста у края окна, и она не
+        сжимается, пока новая гипотеза начинается с тех же слов - иначе
+        уже прочитанное уезжало обратно в черновик. Настоящее
+        переписывание уступает декодеру: слова остаются на экране, но
+        снова становятся черновиком, а не выдают себя за проверенные.
+        """
+
+        candidate = self._hold_back(agreed)
+        published = self._published_stable
+        if published and not self._starts_with_words(candidate, published):
+            if self._starts_with_words(hypothesis, published):
+                return published
+        self._published_stable = candidate
+        return candidate
+
+    @staticmethod
     def _join(head, tail):
         return " ".join(part for part in (head.strip(), tail.strip()) if part)
 
@@ -882,9 +941,22 @@ class LiveSession:
             received.append(dict(segment))
 
         started = monotonic()
-        result = self.engine.transcribe(
-            audio, self._with_context(self.preview_config), self.cancel, collect, self.on_status
-        )
+        try:
+            result = (self.draft_engine or self.engine).transcribe(
+                audio, self._with_context(self.preview_config), self.cancel, collect, self.on_status
+            )
+        except Exception:
+            if self.draft_engine is None:
+                raise
+            # Быстрая модель черновика - необязательное ускорение. Если она
+            # не поднялась, субтитры не должны исчезнуть: дальше черновики
+            # считает выбранная модель, как до каскада.
+            self.draft_engine = None
+            self.preview_config = replace(self.preview_config, model=self.config.model)
+            received.clear()
+            result = self.engine.transcribe(
+                audio, self._with_context(self.preview_config), self.cancel, collect, self.on_status
+            )
         self._note_decode(monotonic() - started, len(audio) / SAMPLE_RATE)
         if not received and result:
             received.extend(dict(segment) for segment in result)
@@ -908,10 +980,14 @@ class LiveSession:
                 return
             agreed = self._overlapping_word_prefix(self._last_preview_text, text)
             self._phrase_head = self._join(self._phrase_head, settled)
+            # Прочитанное ушло в голову фразы и подтверждено там: префикс
+            # этого окна считается заново, иначе он показался бы дважды.
+            self._published_stable = ""
         else:
             # No shared audio at all, so the previous window is complete.
             self._phrase_head = self._join(self._phrase_head, self._last_preview_text)
             agreed = ""
+            self._published_stable = ""
         self._last_preview_text = text
         self._last_preview_offset = offset
         self._last_preview_end = final_end
@@ -924,7 +1000,9 @@ class LiveSession:
                 "start": offset,
                 "end": final_end,
                 "text": self._join(self._phrase_head, text),
-                "stable_text": self._join(self._phrase_head, agreed),
+                "stable_text": self._join(
+                    self._phrase_head, self._publish_stable(agreed, text)
+                ),
                 "latency_ms": round((monotonic() - requested_at) * 1000),
             })
         except Exception:
@@ -934,6 +1012,7 @@ class LiveSession:
     def _transcribe_final(self, offset, audio, lead=None, cut=False):
         self._last_preview_text = ""
         self._stable_prefix = ""
+        self._published_stable = ""
         self._phrase_head = ""
         self._last_preview_offset = None
         self._last_preview_end = None

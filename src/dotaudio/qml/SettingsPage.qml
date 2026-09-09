@@ -715,6 +715,44 @@ Item {
                         Item { Layout.fillWidth: true }
                     }
                     Label {
+                        text: "Черновик Live"
+                        color: Theme.text
+                        font.pixelSize: Theme.fsLabel
+                        Layout.topMargin: Theme.gapSm
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.gapSm
+                        PillButton {
+                            text: "Авто"
+                            primary: String(bridge.settings.live_draft_model) === "auto"
+                            onClicked: bridge.setSetting("live_draft_model", "auto")
+                        }
+                        PillButton {
+                            text: "base"
+                            primary: String(bridge.settings.live_draft_model) === "base"
+                            onClicked: bridge.setSetting("live_draft_model", "base")
+                        }
+                        PillButton {
+                            text: "small"
+                            primary: String(bridge.settings.live_draft_model) === "small"
+                            onClicked: bridge.setSetting("live_draft_model", "small")
+                        }
+                        PillButton {
+                            text: "Одна модель"
+                            primary: String(bridge.settings.live_draft_model) === "off"
+                            onClicked: bridge.setSetting("live_draft_model", "off")
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+                    Label {
+                        text: "Черновик считает лёгкая модель, финал - выбранная: текст успевает за речью, а в историю идёт точный. «Авто» включает каскад, когда финал тяжелее small."
+                        color: Theme.faint
+                        font.pixelSize: Theme.fsMicro
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+                    Label {
                         text: "Live всегда финалит greedy (луч 1): от звука к тексту быстрее, без потери русского на коротком окне. Профиль «Сбалансированный»/beam остаётся для файлов и диктовки."
                         color: Theme.faint
                         font.pixelSize: Theme.fsMicro

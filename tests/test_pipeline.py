@@ -612,7 +612,11 @@ def test_preview_keeps_an_agreed_prefix_across_hypotheses() -> None:
             if not config.live_preview:
                 return []
             self.n += 1
-            text = "раз два три" if self.n == 1 else "раз два четыре"
+            text = (
+                "сегодня мы говорим о живых субтитрах"
+                if self.n == 1
+                else "сегодня мы говорим о живых титрах"
+            )
             on_segment({"start": 0.0, "end": len(audio) / SAMPLE_RATE, "text": text})
             if self.n == 1:
                 self.first.set()
@@ -637,7 +641,10 @@ def test_preview_keeps_an_agreed_prefix_across_hypotheses() -> None:
     session.stop(cancel=True)
     assert completed.wait(2)
     assert partials[0]["stable_text"] == ""
-    assert any(item["stable_text"] == "раз два" for item in partials)
+    # Согласие двух гипотез - «сегодня мы говорим о живых», но подтверждаются
+    # не все согласованные слова: последние два стоят у края окна и ещё
+    # уточняются, поэтому читаются как черновик.
+    assert any(item["stable_text"] == "сегодня мы говорим" for item in partials)
 
 
 def test_preview_agreement_keeps_words_when_only_punctuation_changes() -> None:
@@ -660,8 +667,9 @@ def test_rolling_preview_keeps_a_stable_overlap_after_its_window_moves() -> None
 
     # Окно сдвинулось, и «раз» из него вышло. Слово не исчезает с экрана:
     # оно уже сказано и больше не уточняется, поэтому идёт впереди
-    # подтверждённого перекрытия.
-    assert [part["stable_text"] for part in partials] == ["", "раз Два, три четыре."]
+    # подтверждённого перекрытия. Из самого перекрытия последние два слова
+    # остаются черновиком: их декодер ещё уточняет.
+    assert [part["stable_text"] for part in partials] == ["", "раз Два,"]
     assert partials[-1]["text"] == "раз Два, три четыре. пять"
 
 
@@ -749,8 +757,21 @@ def test_preview_skips_a_snapshot_replaced_before_inference() -> None:
     assert engine.calls == 0
 
 
-def test_preview_releases_a_confirmed_prefix_when_the_decoder_revises_it() -> None:
-    engine = _ScriptedEngine("раз два три", "раз два четыре", "три четыре", "три четыре пять")
+def test_preview_holds_confirmed_words_until_the_decoder_rewrites_them() -> None:
+    """Прочитанное не расплавляется, пока декодер правит только хвост.
+
+    Согласие двух соседних окон получает даже неверно услышанное слово:
+    окна почти одинаковы. Поэтому подтверждается согласованная часть без
+    последних слов, а уже подтверждённое держится, пока новая гипотеза
+    начинается с тех же слов. Настоящее переписывание уступает декодеру.
+    """
+
+    engine = _ScriptedEngine(
+        "мы говорим о живых субтитрах сейчас",
+        "мы говорим о живых субтитрах сегодня",
+        "мы говорим о живых титрах сегодня",
+        "совсем другая речь",
+    )
     partials: list[dict] = []
     session = LiveSession(
         engine, RecognitionConfig(), lambda _segment: None, lambda _status: None,
@@ -760,8 +781,70 @@ def test_preview_releases_a_confirmed_prefix_when_the_decoder_revises_it() -> No
     for _ in range(4):
         session._transcribe_preview(0.0, _speech(), 0.0, 1)
 
-    assert [part["stable_text"] for part in partials] == ["", "раз два", "", "три четыре"]
+    assert [part["stable_text"] for part in partials] == [
+        "",
+        # Согласовано «мы говорим о живых субтитрах», подтверждено без хвоста.
+        "мы говорим о",
+        # Декодер переписал «субтитрах» на «титрах»: согласие короче, но
+        # прочитанные слова остаются подтверждёнными.
+        "мы говорим о",
+        # Речь совсем другая - держать прежнее значило бы склеить две фразы.
+        "",
+    ]
     assert all(part["text"].startswith(part["stable_text"]) for part in partials)
+
+
+def test_live_previews_use_the_draft_model_and_finals_the_chosen_one() -> None:
+    """Каскад: черновик считает лёгкая модель, финал - выбранная."""
+
+    class _Recorder:
+        def __init__(self, text: str) -> None:
+            self.text, self.models = text, []
+
+        def transcribe(self, audio, config, _cancel=None, on_segment=None, _on_status=None):
+            self.models.append(config.model)
+            segment = {"start": 0.0, "end": len(audio) / SAMPLE_RATE, "text": self.text}
+            if on_segment is not None:
+                on_segment(segment)
+            return [segment]
+
+    finals: list[dict] = []
+    main = _Recorder("точный текст финала")
+    draft = _Recorder("быстрый черновик")
+    session = LiveSession(
+        main,
+        RecognitionConfig(model="medium", live_draft_model="small"),
+        finals.append,
+        lambda _status: None,
+        lambda _error, _cancelled: None,
+        lambda _partial: None,
+        catch_up=True,
+        draft_engine=draft,
+    )
+    session._preview_generation = 1
+
+    session._transcribe_preview(0.0, _speech(), 0.0, 1)
+    session._transcribe_final(0.0, _speech())
+
+    assert draft.models == ["small"]
+    assert main.models == ["medium"]
+    assert finals[0]["text"] == "точный текст финала"
+
+
+def test_live_draft_engine_is_ignored_when_it_repeats_the_chosen_model() -> None:
+    session = LiveSession(
+        object(),
+        RecognitionConfig(model="small", live_draft_model="small"),
+        lambda _segment: None,
+        lambda _status: None,
+        lambda _error, _cancelled: None,
+        lambda _partial: None,
+        catch_up=True,
+        draft_engine=object(),
+    )
+
+    assert session.draft_engine is None
+    assert session.preview_config.model == "small"
 
 
 def test_inflight_preview_emits_when_a_newer_snapshot_arrives() -> None:

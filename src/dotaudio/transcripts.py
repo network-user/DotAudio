@@ -16,11 +16,14 @@ _SENTENCE_END = re.compile(r"[.!?…](?:[\"'»)]*)$")
 # joined back for reading by these rules.  A pause longer than this between two
 # finals means the speaker finished the thought, whatever the punctuation.
 LIVE_SENTENCE_GAP_SECONDS = 2.0
-# A sentence longer than this is closed so the live row stays readable.
-# Tuned for ~2-3 lines at stage type (fs 30-34 on a ~600-700 px card).
-LIVE_SENTENCE_MAX_CHARS = 140
+# Предложение длиннее этого закрывается, чтобы строка в колонке оставалась
+# короткой единицей чтения. Прежние 140 символов собирали в одну строку три
+# реплики подряд, и строка заметно росла на каждом финале.
+LIVE_SENTENCE_MAX_CHARS = 90
 # Soft window for what the live row paints. History keeps the full sentence.
-LIVE_CAPTION_VISIBLE_CHARS = 110
+# Живая строка держит одну фразу, а не собранное предложение, поэтому окно
+# показа совпадает с длиной строки истории.
+LIVE_CAPTION_VISIBLE_CHARS = 90
 
 
 def sentence_open(text: str, cut: bool = False) -> bool:

@@ -33,6 +33,32 @@ def test_asr_acquire_evicts_llm_callback() -> None:
     assert arbiter.owner() == "asr"
 
 
+def test_every_registered_asr_model_is_evicted() -> None:
+    """У Live две модели Whisper: черновик и финал - вытесняются обе."""
+
+    arbiter = VramArbiter()
+    evicted: list[str] = []
+    arbiter.on_evict("asr", lambda: evicted.append("final"))
+    arbiter.on_evict("asr", lambda: evicted.append("draft"))
+    arbiter.acquire("asr")
+    arbiter.acquire("llm")
+    assert evicted == ["final", "draft"]
+
+
+def test_registering_the_same_callback_twice_evicts_once() -> None:
+    arbiter = VramArbiter()
+    evicted: list[str] = []
+
+    def release() -> None:
+        evicted.append("asr")
+
+    arbiter.on_evict("asr", release)
+    arbiter.on_evict("asr", release)
+    arbiter.acquire("asr")
+    arbiter.acquire("llm")
+    assert evicted == ["asr"]
+
+
 def test_release_clears_owner() -> None:
     arbiter = VramArbiter()
     arbiter.acquire("llm")

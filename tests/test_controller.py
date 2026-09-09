@@ -9,6 +9,7 @@ from dotaudio.controller import (
     STATUS_LABELS,
     Controller,
     hotkey_id,
+    live_draft_model_for,
     parse_hotkey,
     sensitivity_label,
 )
@@ -319,9 +320,9 @@ def test_late_live_final_does_not_replace_a_newer_preview() -> None:
     )
 
     assert controller._segments[-1]["text"] == "старая фраза"
-    # Черновик более новой речи остаётся на экране после фразы, которую он
-    # продолжает; законченного предложения здесь ещё нет.
-    assert controller._confirmed_caption == "старая фраза"
+    # Сказанное встало строкой в колонке, а живая строка держит черновик
+    # более новой речи: она не подставляет туда уже готовую фразу.
+    assert controller._confirmed_caption == ""
     assert controller._partial_caption == "новая фраза продолжается"
     assert controller._partial_source == "новая фраза продолжается"
     assert controller._partial_end == 5.0
@@ -337,16 +338,14 @@ def test_live_finals_of_one_sentence_are_joined_into_one_row() -> None:
         "start": 0.0, "end": 4.0, "audio_end": 4.0, "cut": True,
         "text": "Сегодня мы говорим о распознавании речи в реальном",
     })
-    # Пока предложение не закончено, оно живёт в живой строке, а не в списке.
+    # Предложение не закончено, но строка уже стоит в списке и больше не
+    # переписывается: живая строка занята только текущей фразой.
     assert controller._open_phrase is True
-    assert Controller.liveOpenPhrase.fget(controller) is True
-    assert controller._confirmed_caption == "Сегодня мы говорим о распознавании речи в реальном"
+    assert controller._confirmed_caption == ""
     assert controller._settled_caption == ""
 
     Controller._on_partial(controller, "live", {"start": 4.0, "end": 4.9, "text": "времени,"})
-    assert Controller.displayCaption.fget(controller) == (
-        "Сегодня мы говорим о распознавании речи в реальном времени,"
-    )
+    assert Controller.displayCaption.fget(controller) == "времени,"
 
     Controller._on_segment(controller, "live", {
         "start": 4.0, "end": 5.2, "audio_end": 5.2, "cut": False, "text": "времени.",
@@ -366,17 +365,17 @@ def test_live_finals_of_one_sentence_are_joined_into_one_row() -> None:
 
 def test_live_caption_window_shows_readable_tail_only() -> None:
     controller = _live_controller()
-    long_open = (
-        "Это очень длинное незаконченное предложение про живые субтитры, "
-        "которое не должно целиком висеть в живой строке на экране зала"
+    long_draft = (
+        "это очень длинный черновик одной фразы про живые субтитры, "
+        "который не должен целиком висеть в живой строке на экране зала"
     )
-    Controller._on_segment(controller, "live", {
-        "start": 0.0, "end": 4.0, "audio_end": 4.0, "cut": True, "text": long_open,
-    })
+    Controller._on_partial(
+        controller, "live", {"start": 0.0, "end": 4.0, "text": long_draft}
+    )
     shown = Controller.displayCaption.fget(controller)
     assert shown.endswith("на экране зала")
-    assert len(shown) <= 120
-    assert controller._segments[0]["text"] == long_open
+    assert len(shown) <= 100
+    assert shown in long_draft
 
 
 def test_live_cut_seam_reads_as_one_sentence() -> None:
@@ -387,18 +386,16 @@ def test_live_cut_seam_reads_as_one_sentence() -> None:
         "text": "Живые субтитры должны появляться почти мгновенно.",
     })
     Controller._on_partial(controller, "live", {"start": 4.0, "end": 5.0, "text": "Даже на слабом"})
-    # Точка от обрезанного окна не заканчивает предложение: на экране запятая
-    # и строчная буква, как в одной фразе.
-    assert Controller.displayCaption.fget(controller) == (
-        "Живые субтитры должны появляться почти мгновенно, даже на слабом"
-    )
+    # Живая строка держит только текущую фразу: сказанное читается строкой
+    # истории, а не переписывается вместе с черновиком несколько раз в секунду.
+    assert Controller.displayCaption.fget(controller) == "Даже на слабом"
 
     Controller._on_segment(controller, "live", {
         "start": 4.0, "end": 6.5, "audio_end": 6.5, "cut": False,
-        "text": "Даже на слабом процессоре без видеокарты.",
+        "text": "Даже на слабом.",
     })
     assert controller._segments[0]["text"] == (
-        "Живые субтитры должны появляться почти мгновенно, даже на слабом процессоре без видеокарты."
+        "Живые субтитры должны появляться почти мгновенно, даже на слабом."
     )
 
     # Следующая фраза с заглавной буквы после законченного предложения - новая строка.
@@ -479,6 +476,39 @@ def test_live_sensitivity_stays_speech_outside_live() -> None:
     assert live.live_sensitivity == "everything"
     # Диктовка и медиа не имеют своего «всё подряд»: настройка только для Live.
     assert dictation.live_sensitivity == "speech"
+
+
+def test_live_draft_model_only_helps_when_the_final_model_is_heavy() -> None:
+    # Тяжёлому финалу нужен быстрый черновик: сам он отстаёт от речи.
+    assert live_draft_model_for("medium", "auto") == "small"
+    assert live_draft_model_for("large-v3", "auto") == "small"
+    # Лёгкая модель успевает сама - второй модели в памяти не нужно.
+    assert live_draft_model_for("small", "auto") == ""
+    assert live_draft_model_for("base", "auto") == ""
+    # Явный выбор и явное отключение.
+    assert live_draft_model_for("large-v3", "base") == "base"
+    assert live_draft_model_for("base", "base") == ""
+    assert live_draft_model_for("medium", "off") == ""
+
+
+def test_live_config_asks_for_a_draft_model_outside_dictation() -> None:
+    controller = type("ControllerState", (), {})()
+    controller._settings = {
+        key: DEFAULTS[key]
+        for key in (
+            "model", "device", "language", "task", "backend", "server_url",
+            "profile", "live_sensitivity", "live_draft_model",
+        )
+    }
+    controller._settings["model"] = "medium"
+    controller.dictionary = []
+
+    live = Controller._config(controller, live_stream=True)
+    dictation = Controller._config(controller)
+
+    assert live.live_draft_model == "small"
+    # Диктовка и медиа идут одной моделью: там читают готовый текст.
+    assert dictation.live_draft_model == ""
 
 
 def test_sensitivity_label_and_toggle_round_trip() -> None:
