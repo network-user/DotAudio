@@ -1,11 +1,12 @@
 import QtQuick
+import QtQuick.Window
 import QtQuick.Controls
 import QtQuick.Layouts
 import "Theme.js" as Theme
 
-// Остров. Размер окна меняет MainMvp по фазе, а здесь фазы сменяют друг
-// друга кроссфейдом: содержимое не режется по кадру, а растворяется, пока
-// геометрия доезжает до новой формы.
+// Остров. HWND - фиксированный холст в MainMvp; здесь морфит ширина/высота
+// и кроссфейд фаз. Drag идёт по mouse.screenX/Y — без mapToGlobal на
+// движущемся item (там дрожала привязка).
 Rectangle {
     id: root
 
@@ -19,6 +20,20 @@ Rectangle {
     clip: true
 
     Behavior on border.color { ColorAnimation { duration: Theme.slowMs } }
+    Behavior on width {
+        NumberAnimation {
+            duration: Theme.morphMs
+            easing.type: Easing.Bezier
+            easing.bezierCurve: Theme.easeOut
+        }
+    }
+    Behavior on height {
+        NumberAnimation {
+            duration: Theme.morphMs
+            easing.type: Easing.Bezier
+            easing.bezierCurve: Theme.easeOut
+        }
+    }
     Behavior on radius {
         NumberAnimation {
             duration: Theme.morphMs
@@ -70,10 +85,29 @@ Rectangle {
         anchors.fill: parent
         hoverEnabled: !root.clickThrough
         z: 0
+        property real grabOffsetX: 0
+        property real grabOffsetY: 0
         onEntered: root.hoveredIsland = true
         onExited: root.hoveredIsland = false
-        onPressed: root.dragStarted()
+        onPressed: function (mouse) {
+            var win = Window.window
+            if (!win)
+                return
+            grabOffsetX = mouse.screenX - win.x
+            grabOffsetY = mouse.screenY - win.y
+            root.dragStarted()
+        }
+        onPositionChanged: function (mouse) {
+            if (!pressed)
+                return
+            var win = Window.window
+            if (!win)
+                return
+            win.x = Math.round(mouse.screenX - grabOffsetX)
+            win.y = Math.round(mouse.screenY - grabOffsetY)
+        }
         onReleased: root.dragReleased()
+        onCanceled: root.dragReleased()
         onDoubleClicked: {
             if (root.livePage)
                 root.requestTheater()

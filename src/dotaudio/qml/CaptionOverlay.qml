@@ -158,18 +158,18 @@ Window {
             anchors.fill: parent
             enabled: !overlay.locked
             cursorShape: overlay.locked ? Qt.ArrowCursor : Qt.SizeAllCursor
-            property real grabX: 0
-            property real grabY: 0
+            property real grabOffsetX: 0
+            property real grabOffsetY: 0
             onPressed: function (mouse) {
                 overlay.dragging = true
-                grabX = mouse.x
-                grabY = mouse.y
+                grabOffsetX = mouse.screenX - overlay.x
+                grabOffsetY = mouse.screenY - overlay.y
             }
             onPositionChanged: function (mouse) {
                 if (!pressed)
                     return
-                overlay.x += mouse.x - grabX
-                overlay.y += mouse.y - grabY
+                overlay.x = Math.round(mouse.screenX - grabOffsetX)
+                overlay.y = Math.round(mouse.screenY - grabOffsetY)
             }
             onReleased: {
                 overlay.dragging = false

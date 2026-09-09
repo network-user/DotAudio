@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Window
 import QtQuick.Controls
 import QtQuick.Layouts
 import "Theme.js" as Theme
@@ -24,8 +25,9 @@ Rectangle {
 
     signal requestIsland()
     signal requestApp()
-    // Пользователь тянет окно / растягивает за угол (нативные окно-действия).
-    signal requestWindowMove()
+    // Пользователь тянет окно вручную / растягивает за угол (native resize).
+    signal shellDragStarted()
+    signal shellDragReleased()
     signal requestWindowEdgeResize()
     // Замок фиксирует положение и размер окна Live и делает клики сквозными.
     readonly property bool locked: Boolean(bridge.settings.live_locked)
@@ -134,7 +136,27 @@ Rectangle {
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.SizeAllCursor
-                    onPressed: root.requestWindowMove()
+                    property real grabOffsetX: 0
+                    property real grabOffsetY: 0
+                    onPressed: function (mouse) {
+                        var win = Window.window
+                        if (!win)
+                            return
+                        grabOffsetX = mouse.screenX - win.x
+                        grabOffsetY = mouse.screenY - win.y
+                        root.shellDragStarted()
+                    }
+                    onPositionChanged: function (mouse) {
+                        if (!pressed)
+                            return
+                        var win = Window.window
+                        if (!win)
+                            return
+                        win.x = Math.round(mouse.screenX - grabOffsetX)
+                        win.y = Math.round(mouse.screenY - grabOffsetY)
+                    }
+                    onReleased: root.shellDragReleased()
+                    onCanceled: root.shellDragReleased()
                 }
                 Icon { name: "move"; ink: Theme.muted; width: 15; height: 15; anchors.centerIn: parent }
             }

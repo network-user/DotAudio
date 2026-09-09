@@ -41,14 +41,18 @@ python -m venv .venv
 ```text
 src/dotaudio/
   app.py, controller.py, desktop.py  Qt и Windows
+  setup.py, setup_controller.py      план и мастер первой настройки
   qml/MainMvp.qml, MiniIsland.qml, LiveTheater.qml, CaptionOverlay.qml
                                       оболочка, остров, Live-сцена, субтитры зала
+  qml/SetupWizard.qml                опрос устройства, брифинг, прогресс загрузок
  qml/Theme.js, Icon.qml, Waveform.qml, CaptionText.qml, CaptionStage.qml
  токены и движение, глифы, waveform, живая строка и сцена фразы
  qml/PillButton.qml, IconButton.qml, ToggleSwitch.qml, Dropdown.qml, StatusDot.qml
  общие элементы управления вместо системных
  qml/TranscriptEditor.qml, KaraokePreview.qml редактор и karaoke
  qml/AssistantPage.qml, AssistantModels.qml чат по записи и каталог моделей
+ assets/ иконка приложения (ICO/PNG/SVG)
+ branding.py идентичность Windows: иконка, AppUserModelID, тёмный заголовок
   capture.py, pipeline.py           захват и live-очередь
   engine.py                        локальный/удалённый ASR
   storage.py, transcripts.py        история и текстовый экспорт

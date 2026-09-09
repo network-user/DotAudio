@@ -20,6 +20,8 @@ Lint: `.venv\Scripts\python.exe -m ruff check src tests`.
 `assistant.py` (части записи, выжимки, поиск), `assistant_controller.py` (мост).
 Нативная сборка `llama-cpp-python` необязательна и ставится extra `llm`.
 В Q_PROPERTY не обращаться к диску и сети - считать в воркере.
+Окно app — системная рамка Windows; остров/сцена безрамные. Иконка: `assets/`, `branding.py`.
+Первый запуск: `setup.py` / `setup_controller.py` / `SetupWizard.qml` — опрос, брифинг, фоновая загрузка.
 
 При глобальных изменениях обновляй README через `generate-readme`,
 правила через `sync-project-rules`. Соблюдай ограничения пользователя

@@ -16,6 +16,49 @@ Item {
             spacing: Theme.gapMd
             Rectangle {
                 Layout.fillWidth: true
+                implicitHeight: setupBox.implicitHeight + 2 * Theme.padCard
+                radius: Theme.radiusLg
+                color: Theme.surface
+                border.width: 1
+                border.color: Theme.border
+                ColumnLayout {
+                    id: setupBox
+                    anchors.fill: parent
+                    anchors.margins: Theme.padCard
+                    spacing: Theme.gapSm
+                    Label {
+                        text: "Автонастройка"
+                        color: Theme.text
+                        font.pixelSize: Theme.fsTitle
+                        font.weight: Font.DemiBold
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "Опрос устройства, выбор моделей и фоновая загрузка рекомендованных файлов."
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsLabel
+                        wrapMode: Text.Wrap
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.gapSm
+                        PillButton {
+                            text: setup.visible ? "Идёт настройка…" : "Запустить снова"
+                            primary: !setup.visible
+                            enabled: !setup.busy && !bridge.recording && !bridge.busy
+                            onClicked: setup.reopen()
+                        }
+                        Label {
+                            text: Boolean(bridge.settings.setup_completed) ? "Уже проходили" : "Ещё не завершена"
+                            color: Theme.faint
+                            font.pixelSize: Theme.fsSmall
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+                }
+            }
+            Rectangle {
+                Layout.fillWidth: true
                 implicitHeight: computeBox.implicitHeight + 2 * Theme.padCard
                 radius: Theme.radiusLg
                 color: Theme.surface
@@ -187,18 +230,17 @@ Item {
                     anchors.fill: parent
                     anchors.margins: Theme.padCard
                     spacing: 10
-                    Label { text: "Источник Live и устройства"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
-                    Text { Layout.fillWidth: true; text: "Диктовка всегда с микрофона. Live: микрофон, звук компьютера или Авто - оба сразу. На острове источник переключается кнопкой."; color: Theme.muted; font.pixelSize: Theme.fsSmall; wrapMode: Text.Wrap }
-                    RowLayout {
+                    Label { text: "Микрофон и устройства"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
+                    Text {
                         Layout.fillWidth: true
-                        Label { text: "Источник Live"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.fillWidth: true }
-                        PillButton { text: "Микрофон"; primary: String(bridge.settings.live_source) === "microphone"; onClicked: bridge.setSetting("live_source", "microphone") }
-                        PillButton { text: "Звук системы"; primary: String(bridge.settings.live_source) === "system"; onClicked: bridge.setSetting("live_source", "system") }
-                        PillButton { text: "Авто"; primary: String(bridge.settings.live_source) === "mixed"; onClicked: bridge.setSetting("live_source", "mixed"); ToolTip.visible: hovered; ToolTip.text: "Микрофон и звук компьютера одновременно" }
+                        text: "Диктовка всегда идёт с микрофона ниже. Live отдельно: микрофон, звук компьютера или Авто. Проверка микрофона записывает пару секунд и проигрывает сказанное в наушники - как в Discord."
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsSmall
+                        wrapMode: Text.Wrap
                     }
+                    Label { text: "Микрофон диктовки"; color: Theme.text; font.pixelSize: Theme.fsLabel; font.weight: Font.DemiBold }
                     RowLayout {
                         Layout.fillWidth: true
-                        visible: String(bridge.settings.live_source) === "microphone" || String(bridge.settings.live_source) === "mixed"
                         Dropdown {
                             id: inputChooser
                             Layout.fillWidth: true
@@ -217,7 +259,25 @@ Item {
                             }
                         }
                         PillButton { text: "Обновить"; onClicked: bridge.refreshDevices() }
-                        PillButton { text: "Проверить Live"; primary: true; onClicked: bridge.testLiveSource() }
+                        PillButton {
+                            text: bridge.deviceTest.phase === "listening" || bridge.deviceTest.phase === "starting" || bridge.deviceTest.phase === "playing"
+                                  ? "Слушаю…"
+                                  : "Проверить"
+                            primary: true
+                            enabled: !bridge.recording && !bridge.busy && bridge.deviceTest.phase !== "listening" && bridge.deviceTest.phase !== "starting" && bridge.deviceTest.phase !== "playing"
+                            onClicked: bridge.testMicrophone()
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Говорите 2–3 с, затем услышите себя в наушниках"
+                        }
+                    }
+                    Label { text: "Источник Live"; color: Theme.text; font.pixelSize: Theme.fsLabel; font.weight: Font.DemiBold }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        PillButton { text: "Микрофон"; primary: String(bridge.settings.live_source) === "microphone"; onClicked: bridge.setSetting("live_source", "microphone") }
+                        PillButton { text: "Звук системы"; primary: String(bridge.settings.live_source) === "system"; onClicked: bridge.setSetting("live_source", "system") }
+                        PillButton { text: "Авто"; primary: String(bridge.settings.live_source) === "mixed"; onClicked: bridge.setSetting("live_source", "mixed"); ToolTip.visible: hovered; ToolTip.text: "Микрофон и звук компьютера одновременно" }
+                        Item { Layout.fillWidth: true }
+                        PillButton { text: "Проверить Live"; onClicked: bridge.testLiveSource(); enabled: !bridge.recording && !bridge.busy }
                     }
                     RowLayout {
                         Layout.fillWidth: true
@@ -240,7 +300,6 @@ Item {
                             }
                         }
                         PillButton { text: "Обновить"; onClicked: bridge.refreshLoopbacks() }
-                        PillButton { text: "Проверить Live"; primary: true; onClicked: bridge.testLiveSource() }
                     }
                     RowLayout {
                         Layout.fillWidth: true
@@ -284,7 +343,20 @@ Item {
                             Behavior on width { NumberAnimation { duration: 110; easing.type: Easing.OutQuad } }
                         }
                     }
-                    Label { text: bridge.deviceTest.message || "Проверка не сохраняет запись."; color: Theme.muted; font.pixelSize: Theme.fsSmall }
+                    Label {
+                        text: {
+                            var phase = String(bridge.deviceTest.phase || "")
+                            if (phase === "listening" || phase === "starting")
+                                return bridge.deviceTest.message || "Говорите сейчас - полоска должна двигаться."
+                            if (phase === "playing")
+                                return bridge.deviceTest.message || "Слушаем запись…"
+                            return bridge.deviceTest.message || "Проверка не сохраняет запись на диск."
+                        }
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsSmall
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
                 }
             }
             Rectangle {
@@ -299,7 +371,16 @@ Item {
                     anchors.fill: parent
                     anchors.margins: Theme.padCard
                     spacing: Theme.gapSm
-                    Label { text: "Остров"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
+                    Label { text: "Диктовка и остров"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
+                    Text {
+                        Layout.fillWidth: true
+                        text: bridge.hotkeysAvailable
+                              ? "Глобальные клавиши работают, даже когда окно свёрнуто."
+                              : "Глобальные клавиши недоступны на этой системе. Запускайте запись кнопкой."
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsSmall
+                        wrapMode: Text.Wrap
+                    }
                     RowLayout {
                         Layout.fillWidth: true
                         Label { text: "Диктовка"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.preferredWidth: 90 }
@@ -323,6 +404,19 @@ Item {
                                 text: modelData
                                 primary: bridge.settings.island_hotkey === modelData
                                 onClicked: bridge.setHotkeys(bridge.settings.dictate_hotkey, modelData)
+                            }
+                        }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: "Вставка"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.preferredWidth: 90 }
+                        Repeater {
+                            model: ["Shift+Alt+Z", "Ctrl+Alt+V", "Ctrl+Shift+V"]
+                            PillButton {
+                                required property string modelData
+                                text: modelData
+                                primary: bridge.settings.paste_last_hotkey === modelData
+                                onClicked: bridge.setPasteHotkey(modelData)
                             }
                         }
                     }

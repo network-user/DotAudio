@@ -26,7 +26,19 @@ ApplicationWindow {
 
     // Старт - полное окно с навигацией. Остров и Live-сцена открываются
     // по запросу (свёртка / старт записи), а не вместо главной страницы.
-    title: "DotAudio"
+    // В режиме app - обычное окно Windows с системной рамкой и кнопками.
+    readonly property string pageTitle: ({
+        live: "Живые субтитры",
+        dictation: "Диктовка",
+        media: "Караоке-студия",
+        transcript: "Транскрибация записи",
+        monitor: "Мониторинг эфиров",
+        models: "Модели Whisper",
+        history: "История",
+        settings: "Настройки",
+        assistant: "Ассистент"
+    })[bridge.page] || "DotAudio"
+    title: shellMode === "app" ? ("DotAudio — " + pageTitle) : "DotAudio"
     property string shellMode: "app"
     property bool logsOpen: false
     property bool islandModesOpen: false
@@ -46,7 +58,8 @@ ApplicationWindow {
     property real dragGrabDx: 0
     property real dragGrabDy: 0
     property var pageKeys: [
-        "live", "dictation", "media", "models", "history", "settings", "transcript", "assistant"
+        "live", "dictation", "transcript", "media", "assistant",
+        "history", "models", "settings"
     ]
     // Страница не переключается в тот же кадр: содержимое сначала гаснет,
     // затем новое приезжает снизу. Индекс меняет сам переход.
@@ -61,28 +74,36 @@ ApplicationWindow {
         else
             root.pageIndex = root.targetPageIndex
     }
-    width: shellMode === "app" ? 1220 : shellMode === "theater"
-              ? root.theaterSizes[0]
-              : islandW
-    height: shellMode === "app" ? 790 : shellMode === "theater"
-              ? root.theaterSizes[1]
-              : islandH
+    // Размеры оболочек запоминаются отдельно. Пресет Live только задаёт
+    // старт; дальше пользователь тянет края без борьбы с Binding.
+    property int appW: 1220
+    property int appH: 790
+    property int theaterW: 760
+    property int theaterH: 440
+    property real theaterX: -1
+    property real theaterY: -1
+    // Максимум фазы острова: HWND этого размера не прыгает при смене фазы,
+    // морфит только MiniIsland внутри. Клики вне хрома режет setWindowMask.
+    readonly property int islandCanvasW: 552
+    readonly property int islandCanvasH: 108
+    width: shellMode === "app" ? appW : shellMode === "theater" ? theaterW : islandCanvasW
+    height: shellMode === "app" ? appH : shellMode === "theater" ? theaterH : islandCanvasH
     // Поверх всех окон живут только остров и сцена Live: они должны быть
     // видны во время другой работы. Полное окно - обычное окно, его может
     // перекрыть любое другое, включая браузер с черновиком статьи.
     property bool stayOnTop: false
-    // Qt.Window явно держит кнопку на панели задач; без Tool/Popup окно
-    // остаётся обычным приложением и в режиме острова.
-    flags: Qt.Window | Qt.FramelessWindowHint | (stayOnTop ? Qt.WindowStaysOnTopHint : 0)
-    // Минимум один на все оболочки. Прежний минимум полного окна успевал
-    // зажать высоту раньше, чем менялся режим, и остров не сворачивался:
-    // окно оставалось высотой 660. Ручного изменения размера здесь нет,
-    // размер задаёт сама оболочка.
-    minimumWidth: 180
-    minimumHeight: 40
+    // App - обычное окно Windows (рамка, resize, snap, Alt+Space).
+    // Остров и Live-сцена остаются безрамными и поверх других окон.
+    flags: Qt.Window
+           | (shellMode !== "app" ? Qt.FramelessWindowHint : 0)
+           | (stayOnTop ? Qt.WindowStaysOnTopHint : 0)
+    // В app разрешаем тянуть края; остров/сцена по-прежнему задают размер сами.
+    minimumWidth: shellMode === "app" ? 960 : 180
+    minimumHeight: shellMode === "app" ? 640 : 40
     visible: true
     color: shellMode === "app" ? Theme.bg : "transparent"
-    opacity: shellMode === "island" ? Math.max(0.9, Number(bridge.settings.island_opacity)) : 1
+    // Прозрачность острова — на хроме, не на HWND: иначе DWM дёргает при drag.
+    opacity: 1
     font.family: Theme.fontFamily
     font.hintingPreference: Font.PreferDefaultHinting
 
@@ -148,53 +169,73 @@ ApplicationWindow {
         }
     }
 
-    // Морф меняет размер настоящего окна, а не прямоугольника на экране:
-    // каждый кадр анимации - это запрос к оконной системе. Поэтому здесь нет
-    // перелёта: пружина по ширине заставляла окно проехать мимо цели и
-    // вернуться, и на этом возврате содержимое заметно дёргалось.
-    Behavior on width {
-        enabled: root.morphGeo && !root.dragging
-        NumberAnimation {
-            duration: Theme.morphMs
-            easing.type: Easing.Bezier
-            easing.bezierCurve: Theme.easeOut
-        }
+    // Геометрию HWND больше не анимируем: каждый кадр Behavior + Binding по
+    // центру давал два SetWindowPos и дёргал остров. Размер фазы меняется
+    // одним шагом, а плавность остаётся в кроссфейде содержимого MiniIsland.
+    onWidthChanged: {
+        if (root.visibility === Window.Maximized)
+            return
+        var w = Math.round(root.width)
+        if (root.shellMode === "app" && w !== root.appW)
+            root.appW = w
+        else if (root.shellMode === "theater" && w !== root.theaterW)
+            root.theaterW = w
     }
-    Behavior on height {
-        enabled: root.morphGeo && !root.dragging
-        NumberAnimation {
-            duration: Theme.morphMs
-            easing.type: Easing.Bezier
-            easing.bezierCurve: Theme.easeOut
-        }
-    }
-    Behavior on opacity {
-        NumberAnimation { duration: Theme.baseMs }
+    onHeightChanged: {
+        if (root.visibility === Window.Maximized)
+            return
+        var h = Math.round(root.height)
+        if (root.shellMode === "app" && h !== root.appH)
+            root.appH = h
+        else if (root.shellMode === "theater" && h !== root.theaterH)
+            root.theaterH = h
     }
 
+    // Якорь только у острова. Сцена Live свободно ездит — иначе Binding
+    // перебивал startSystemMove/ручной drag на каждом кадре.
     Binding on x {
-        when: !root.dragging && root.shellMode !== "app" && root.islandCenterX >= 0
-        value: Math.round(root.islandCenterX - root.width / 2)
+        when: !root.dragging && root.shellMode === "island" && root.islandCenterX >= 0
+        value: Math.round(root.islandCenterX - root.islandCanvasW / 2)
     }
     Binding on y {
-        when: !root.dragging && root.shellMode !== "app"
+        when: !root.dragging && root.shellMode === "island"
         value: Math.round(root.islandTopY)
     }
 
-    // Смена оболочки. Между островом и сценой Live разница в размере
-    // небольшая, поэтому окно морфит. С полным окном морф пришлось бы гнать
-    // на тысячу пикселей: размер меняется сразу, а въезжает содержимое.
+    function refreshIslandMask() {
+        if (root.shellMode !== "island") {
+            bridge.clearWindowMask()
+            return
+        }
+        var mx = Math.round((root.islandCanvasW - root.islandW) / 2)
+        var my = Math.round((root.islandCanvasH - root.islandH) / 2)
+        bridge.setWindowMask(mx, my, root.islandW, root.islandH, root.islandR)
+    }
+
+    onIslandWChanged: if (root.shellMode === "island") root.refreshIslandMask()
+    onIslandHChanged: if (root.shellMode === "island") root.refreshIslandMask()
+    onIslandRChanged: if (root.shellMode === "island") root.refreshIslandMask()
+    onShellModeChanged: {
+        if (root.shellMode === "island")
+            Qt.callLater(root.refreshIslandMask)
+        else
+            bridge.clearWindowMask()
+    }
+
+    // Смена оболочки. Размер HWND меняется сразу; плавность даёт кроссфейд
+    // содержимого (shellFade / shellRise), а не морф геометрии окна.
     property real shellFade: 1
     property real shellRise: 0
 
     function enterShell(mode, morph) {
-        root.morphGeo = morph
+        root.morphGeo = false
         root.islandModesOpen = false
-        // Смена флага «поверх всех» требует пересоздания нативного окна
-        // на Windows: короткое скрытие и показ. В этот момент окно
-        // прозрачное, поэтому переключение не вспыхивает.
+        root.dragging = false
+        // Смена «поверх всех» или рамки требует пересоздания HWND на Windows.
         var wantTop = mode !== "app"
-        var needFlags = root.stayOnTop !== wantTop
+        var wantFramed = mode === "app"
+        var wasFramed = root.shellMode === "app"
+        var needFlags = root.stayOnTop !== wantTop || wantFramed !== wasFramed
         var wasVisible = root.visible
         if (needFlags && wasVisible)
             root.hide()
@@ -202,11 +243,15 @@ ApplicationWindow {
         root.shellMode = mode
         if (needFlags && wasVisible)
             root.show()
+        if (mode === "app")
+            Qt.callLater(function () { bridge.refreshWindowChrome() })
+        if (mode === "island")
+            Qt.callLater(root.refreshIslandMask)
+        else
+            bridge.clearWindowMask()
         root.shellFade = 0
         root.shellRise = mode === "island" ? 6 : 14
         shellIn.restart()
-        if (!morph)
-            Qt.callLater(function () { root.morphGeo = true })
     }
 
     function openApp(page) {
@@ -214,25 +259,40 @@ ApplicationWindow {
             bridge.selectPage(page)
         bridge.applyIslandClickThrough(false)
         root.enterShell("app", false)
-        root.x = Math.max(40, Math.round((Screen.width - root.width) / 2))
-        root.y = Math.max(40, Math.round((Screen.height - root.height) / 2))
+        root.x = Math.max(40, Math.round((Screen.width - root.appW) / 2))
+        root.y = Math.max(40, Math.round((Screen.height - root.appH) / 2))
     }
     function openTheater() {
         bridge.selectPage("live")
         bridge.applyIslandClickThrough(false)
         // Единое Live-окно: отдельное окно зала не дублирует текст поверх.
         bridge.setSetting("caption_overlay", false)
-        root.enterShell("theater", true)
+        // Пресет размера подхватываем только если сцена ещё не тянулась.
+        var preset = root.theaterSizes
+        if (root.theaterX < 0) {
+            root.theaterW = preset[0]
+            root.theaterH = preset[1]
+        }
+        root.enterShell("theater", false)
+        if (root.theaterX >= 0) {
+            root.x = root.theaterX
+            root.y = root.theaterY
+        } else {
+            root.x = Math.max(40, Math.round((Screen.width - root.theaterW) / 2))
+            root.y = Math.max(40, Math.round((Screen.height - root.theaterH) / 2))
+        }
     }
     function collapse() {
         root.logsOpen = false
-        // Развёрнутое окно должно вернуть обычный размер до морфа в остров,
-        // иначе остров растянется на весь экран.
+        if (root.shellMode === "theater") {
+            root.theaterX = root.x
+            root.theaterY = root.y
+            root.theaterW = Math.round(root.width)
+            root.theaterH = Math.round(root.height)
+        }
         if (root.visibility === Window.Maximized)
             root.showNormal()
-        // Из полного окна остров не сжимается кадр за кадром: анкер острова
-        // всё равно переставляет окно, и морф читался бы как рывок.
-        root.enterShell("island", root.shellMode !== "app")
+        root.enterShell("island", false)
         bridge.applyIslandClickThrough(Boolean(bridge.settings.island_click_through))
     }
 
@@ -240,25 +300,28 @@ ApplicationWindow {
         root.pageIndex = root.targetPageIndex
         // Якорь острова храним всегда: при свёртке окно вернётся сюда.
         if (Number(bridge.settings.island_x) >= 0) {
-            root.islandCenterX = Number(bridge.settings.island_x) + root.islandW / 2
+            root.islandCenterX = Number(bridge.settings.island_x) + root.islandCanvasW / 2
             root.islandTopY = Number(bridge.settings.island_y)
         } else {
             root.islandCenterX = Screen.width / 2
             root.islandTopY = 32
         }
+        var preset = root.theaterSizes
+        root.theaterW = preset[0]
+        root.theaterH = preset[1]
         if (root.shellMode === "app") {
             // Главное окно по центру экрана, с боковой навигацией и Live.
             bridge.selectPage(bridge.page && bridge.page.length ? bridge.page : "live")
             bridge.applyIslandClickThrough(false)
-            root.x = Math.max(40, Math.round((Screen.width - root.width) / 2))
-            root.y = Math.max(40, Math.round((Screen.height - root.height) / 2))
+            root.x = Math.max(40, Math.round((Screen.width - root.appW) / 2))
+            root.y = Math.max(40, Math.round((Screen.height - root.appH) / 2))
         } else {
-            root.x = Math.round(root.islandCenterX - root.islandW / 2)
+            root.x = Math.round(root.islandCenterX - root.islandCanvasW / 2)
             root.y = root.islandTopY
             if (Boolean(bridge.settings.island_click_through))
                 bridge.applyIslandClickThrough(true)
+            Qt.callLater(root.refreshIslandMask)
         }
-        Qt.callLater(function() { root.morphGeo = true })
     }
 
     Connections {
@@ -392,9 +455,13 @@ ApplicationWindow {
     }
 
     MiniIsland {
+        id: islandChrome
         visible: root.shellMode === "island"
-        anchors.fill: parent
-        opacity: root.shellFade
+        width: root.islandW
+        height: root.islandH
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.verticalCenter: parent.verticalCenter
+        opacity: root.shellFade * Math.max(0.9, Number(bridge.settings.island_opacity))
         transform: Translate { y: root.shellRise }
         phase: root.islandPhase
         radius: root.islandR
@@ -403,12 +470,9 @@ ApplicationWindow {
         onRequestApp: root.openApp(page)
         onRequestModePick: root.islandModesOpen = true
         onCloseModes: root.islandModesOpen = false
-        onDragStarted: {
-            root.dragging = true
-            root.startSystemMove()
-        }
+        onDragStarted: root.dragging = true
         onDragReleased: {
-            root.islandCenterX = root.x + root.width / 2
+            root.islandCenterX = root.x + root.islandCanvasW / 2
             root.islandTopY = root.y
             root.dragging = false
             bridge.saveIslandPosition(root.x, root.y)
@@ -423,9 +487,13 @@ ApplicationWindow {
         embedded: false
         onRequestIsland: root.collapse()
         onRequestApp: root.openApp("live")
-        onRequestWindowMove: {
-            if (!root.liveLocked)
-                root.startSystemMove()
+        onShellDragStarted: root.dragging = true
+        onShellDragReleased: {
+            root.dragging = false
+            root.theaterX = root.x
+            root.theaterY = root.y
+            root.theaterW = Math.round(root.width)
+            root.theaterH = Math.round(root.height)
         }
         onRequestWindowEdgeResize: {
             if (!root.liveLocked)
@@ -438,17 +506,11 @@ ApplicationWindow {
         anchors.fill: parent
         opacity: root.shellFade
         transform: Translate { y: root.shellRise }
+        // Системная рамка уже рисует край окна — без второго «карточного» борта.
         color: Theme.bg
-        radius: Theme.radiusSm
-        border.width: 1
-        border.color: Theme.border
+        radius: 0
+        border.width: 0
         clip: true
-
-        MouseArea {
-            anchors.fill: parent
-            z: 0
-            onPressed: root.startSystemMove()
-        }
 
         RowLayout {
             anchors.fill: parent
@@ -468,20 +530,13 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.bottomMargin: 18
                         spacing: 10
-                        Rectangle {
+                        Image {
                             Layout.preferredWidth: 34
                             Layout.preferredHeight: 34
-                            radius: Theme.radiusSm
-                            color: Theme.text
-                            border.width: 1
-                            border.color: Theme.borderHi
-                            Text {
-                                anchors.centerIn: parent
-                                text: ".а"
-                                color: Theme.bg
-                                font.pixelSize: Theme.fsBody
-                                font.weight: Font.Bold
-                            }
+                            source: Qt.resolvedUrl("../assets/app_icon_32.png")
+                            fillMode: Image.PreserveAspectFit
+                            smooth: true
+                            mipmap: true
                         }
                         ColumnLayout {
                             spacing: 0
@@ -491,20 +546,122 @@ ApplicationWindow {
                     }
                     // Навигация. Выделение - один переезжающий блок, а не
                     // мгновенная перекраска: видно, откуда и куда ушёл фокус.
+                    // История / Модели / Среда - внизу в раскрываемой группе.
                     Item {
                         id: navBox
                         readonly property int rowH: 48
                         readonly property int rowGap: 6
+                        readonly property var primaryModel: [
+                            { key: "live", icon: "live", title: "Live", detail: "Субтитры" },
+                            { key: "dictation", icon: "dictation", title: "Диктовка", detail: "Голос в текст" },
+                            { key: "transcript", icon: "media", title: "Транскрибация", detail: "Файл + голоса" },
+                            { key: "media", icon: "media", title: "Караоке", detail: "Аудио и видео" },
+                            { key: "assistant", icon: "assistant", title: "Ассистент", detail: "Чат по записи" }
+                        ]
+                        readonly property var secondaryModel: [
+                            { key: "history", icon: "history", title: "История", detail: "Сессии" },
+                            { key: "models", icon: "models", title: "Модели", detail: "Whisper" },
+                            { key: "settings", icon: "settings", title: "Среда", detail: "Устройства" }
+                        ]
+                        readonly property var secondaryKeys: ["history", "models", "settings"]
+                        property bool moreUserOpen: false
+                        readonly property bool moreExpanded: moreUserOpen
+                                                          || secondaryKeys.indexOf(bridge.page) >= 0
                         readonly property int current: Math.max(0, root.pageKeys.indexOf(bridge.page))
+                        // Индекс ряда под бегунком: после основных идёт заголовок
+                        // группы, затем вторичные (когда раскрыты).
+                        readonly property int highlightIndex: {
+                            var i
+                            for (i = 0; i < primaryModel.length; ++i) {
+                                if (primaryModel[i].key === bridge.page)
+                                    return i
+                            }
+                            for (i = 0; i < secondaryModel.length; ++i) {
+                                if (secondaryModel[i].key === bridge.page)
+                                    return primaryModel.length + 1 + i
+                            }
+                            return 0
+                        }
+                        readonly property int visibleCount: primaryModel.length + 1
+                                                          + (moreExpanded ? secondaryModel.length : 0)
                         Layout.fillWidth: true
-                        Layout.preferredHeight: root.pageKeys.length * rowH
-                                                + (root.pageKeys.length - 1) * rowGap
+                        Layout.preferredHeight: visibleCount * rowH
+                                                + (visibleCount - 1) * rowGap
+                        Behavior on Layout.preferredHeight {
+                            NumberAnimation {
+                                duration: Theme.slowMs
+                                easing.type: Easing.Bezier
+                                easing.bezierCurve: Theme.easeOut
+                            }
+                        }
 
                         function step(delta) {
                             var next = navBox.current + delta
                             if (next < 0 || next >= root.pageKeys.length)
                                 return
                             bridge.selectPage(root.pageKeys[next])
+                        }
+
+                        function toggleMore() {
+                            // Пока открыт вторичный раздел, группу не сворачиваем:
+                            // иначе пропадёт пункт с текущей страницей.
+                            if (navBox.secondaryKeys.indexOf(bridge.page) >= 0)
+                                return
+                            navBox.moreUserOpen = !navBox.moreUserOpen
+                        }
+
+                        Component {
+                            id: navButton
+                            Button {
+                                id: nav
+                                required property var modelData
+                                readonly property bool selected: bridge.page === nav.modelData.key
+                                width: navBox.width
+                                height: navBox.rowH
+                                hoverEnabled: true
+                                onClicked: bridge.selectPage(nav.modelData.key)
+                                Accessible.role: Accessible.PageTab
+                                Accessible.name: nav.modelData.title + ", " + nav.modelData.detail
+                                Keys.onUpPressed: navBox.step(-1)
+                                Keys.onDownPressed: navBox.step(1)
+                                contentItem: RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 12
+                                    spacing: 10
+                                    Icon {
+                                        name: nav.modelData.icon
+                                        ink: nav.selected ? Theme.text : Theme.muted
+                                        width: 16
+                                        height: 16
+                                    }
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 0
+                                        Label {
+                                            text: nav.modelData.title
+                                            color: nav.selected ? Theme.text : Theme.muted
+                                            font.pixelSize: Theme.fsBody
+                                            font.weight: Font.DemiBold
+                                            Behavior on color { ColorAnimation { duration: Theme.baseMs } }
+                                        }
+                                        Label {
+                                            text: nav.modelData.detail
+                                            color: Theme.muted
+                                            font.pixelSize: Theme.fsMicro
+                                            opacity: nav.selected ? 1 : 0.75
+                                            Behavior on opacity { NumberAnimation { duration: Theme.baseMs } }
+                                        }
+                                    }
+                                }
+                                background: Rectangle {
+                                    radius: Theme.radiusMd
+                                    color: !nav.selected && nav.hovered ? Theme.hairline : "transparent"
+                                    border.width: nav.activeFocus ? 1 : 0
+                                    border.color: Theme.borderHi
+                                    Behavior on color { ColorAnimation { duration: Theme.fastMs } }
+                                }
+                            }
                         }
 
                         Rectangle {
@@ -514,7 +671,7 @@ ApplicationWindow {
                             color: Theme.fill
                             border.width: 1
                             border.color: Theme.hairline
-                            y: navBox.current * (navBox.rowH + navBox.rowGap)
+                            y: navBox.highlightIndex * (navBox.rowH + navBox.rowGap)
                             Behavior on y {
                                 NumberAnimation {
                                     duration: Theme.slowMs
@@ -529,68 +686,68 @@ ApplicationWindow {
                             spacing: navBox.rowGap
 
                             Repeater {
-                                model: [
-                                    { key: "live", icon: "live", title: "Live", detail: "Субтитры" },
-                                    { key: "dictation", icon: "dictation", title: "Диктовка", detail: "Голос в текст" },
-                                    { key: "media", icon: "media", title: "Караоке", detail: "Аудио и видео" },
-                                    { key: "models", icon: "models", title: "Модели", detail: "Whisper" },
-                                    { key: "history", icon: "history", title: "История", detail: "Сессии" },
-                                    { key: "settings", icon: "settings", title: "Среда", detail: "Устройства" },
-                                    { key: "transcript", icon: "media", title: "Транскрибация", detail: "Файл + голоса" },
-                                    { key: "assistant", icon: "assistant", title: "Ассистент", detail: "Чат по записи" }
-                                ]
-                                delegate: Button {
-                                    id: nav
-                                    required property var modelData
-                                    readonly property bool selected: bridge.page === nav.modelData.key
-                                    width: navBox.width
-                                    height: navBox.rowH
-                                    hoverEnabled: true
-                                    onClicked: bridge.selectPage(nav.modelData.key)
-                                    Accessible.role: Accessible.PageTab
-                                    Accessible.name: nav.modelData.title + ", " + nav.modelData.detail
-                                    // Стрелки ходят по разделам, когда фокус
-                                    // уже в навигации; Tab уводит на страницу.
-                                    Keys.onUpPressed: navBox.step(-1)
-                                    Keys.onDownPressed: navBox.step(1)
-                                    contentItem: RowLayout {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: 12
-                                        anchors.rightMargin: 12
-                                        spacing: 10
-                                        Icon {
-                                            name: nav.modelData.icon
-                                            ink: nav.selected ? Theme.text : Theme.muted
-                                            width: 16
-                                            height: 16
+                                model: navBox.primaryModel
+                                delegate: navButton
+                            }
+
+                            Button {
+                                id: moreToggle
+                                width: navBox.width
+                                height: navBox.rowH
+                                hoverEnabled: true
+                                onClicked: navBox.toggleMore()
+                                Accessible.role: Accessible.Button
+                                Accessible.name: navBox.moreExpanded
+                                                 ? "Свернуть служебные разделы"
+                                                 : "Ещё: история, модели, среда"
+                                Keys.onUpPressed: navBox.step(-1)
+                                Keys.onDownPressed: navBox.step(1)
+                                contentItem: RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 12
+                                    spacing: 10
+                                    Icon {
+                                        name: "more"
+                                        ink: Theme.muted
+                                        width: 16
+                                        height: 16
+                                    }
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 0
+                                        Label {
+                                            text: "Ещё"
+                                            color: Theme.muted
+                                            font.pixelSize: Theme.fsBody
+                                            font.weight: Font.DemiBold
                                         }
-                                        ColumnLayout {
-                                            Layout.fillWidth: true
-                                            spacing: 0
-                                            Label {
-                                                text: nav.modelData.title
-                                                color: nav.selected ? Theme.text : "#d1d1d6"
-                                                font.pixelSize: Theme.fsBody
-                                                font.weight: Font.DemiBold
-                                                Behavior on color { ColorAnimation { duration: Theme.baseMs } }
-                                            }
-                                            Label {
-                                                text: nav.modelData.detail
-                                                color: Theme.muted
-                                                font.pixelSize: Theme.fsMicro
-                                                opacity: nav.selected ? 1 : 0.75
-                                                Behavior on opacity { NumberAnimation { duration: Theme.baseMs } }
-                                            }
+                                        Label {
+                                            text: "История, модели, среда"
+                                            color: Theme.muted
+                                            font.pixelSize: Theme.fsMicro
+                                            opacity: 0.75
                                         }
                                     }
-                                    background: Rectangle {
-                                        radius: Theme.radiusMd
-                                        color: !nav.selected && nav.hovered ? Theme.hairline : "transparent"
-                                        border.width: nav.activeFocus ? 1 : 0
-                                        border.color: Theme.borderHi
-                                        Behavior on color { ColorAnimation { duration: Theme.fastMs } }
+                                    Icon {
+                                        name: navBox.moreExpanded ? "collapse" : "expand"
+                                        ink: Theme.muted
+                                        width: 14
+                                        height: 14
                                     }
                                 }
+                                background: Rectangle {
+                                    radius: Theme.radiusMd
+                                    color: moreToggle.hovered ? Theme.hairline : "transparent"
+                                    border.width: moreToggle.activeFocus ? 1 : 0
+                                    border.color: Theme.borderHi
+                                    Behavior on color { ColorAnimation { duration: Theme.fastMs } }
+                                }
+                            }
+
+                            Repeater {
+                                model: navBox.moreExpanded ? navBox.secondaryModel : []
+                                delegate: navButton
                             }
                         }
                     }
@@ -641,17 +798,7 @@ ApplicationWindow {
                             easing.bezierCurve: Theme.easeOut
                         }
                         Label {
-                            text: ({
-                                live: "Живые субтитры",
-                                dictation: "Диктовка",
-                                media: "Караоке-студия",
-                                transcript: "Транскрибация записи",
-                                monitor: "Мониторинг эфиров",
-                                models: "Модели Whisper",
-                                history: "История",
-                                settings: "Настройки",
-                                assistant: "Ассистент"
-                            })[bridge.page]
+                            text: root.pageTitle
                             color: Theme.text
                             font.pixelSize: Theme.fsHead
                             font.weight: Font.DemiBold
@@ -667,14 +814,7 @@ ApplicationWindow {
                         font.pixelSize: Theme.fsLabel
                     }
                     IconButton { iconName: "logs"; onClicked: root.logsOpen = !root.logsOpen; ToolTip.visible: hovered; ToolTip.text: "Журнал" }
-                    IconButton {
-                        iconName: root.visibility === Window.Maximized ? "restore" : "maximize"
-                        onClicked: root.visibility === Window.Maximized ? root.showNormal() : root.showMaximized()
-                        ToolTip.visible: hovered
-                        ToolTip.text: root.visibility === Window.Maximized ? "Вернуть обычный размер" : "Развернуть на весь экран"
-                    }
                     PillButton { text: "Скрыть"; onClicked: root.hide(); ToolTip.visible: hovered; ToolTip.text: "Вернуть: Ctrl+Alt+O" }
-                    IconButton { iconName: "close"; onClicked: Qt.quit(); ToolTip.visible: hovered; ToolTip.text: "Закрыть программу" }
                     IconButton { iconName: "collapse"; onClicked: root.collapse(); ToolTip.visible: hovered; ToolTip.text: "Свернуть в остров" }
                 }
                 Rectangle {
@@ -714,7 +854,7 @@ ApplicationWindow {
                 }
                 Rectangle {
                     id: gpuHintCard
-                    visible: bridge.showGpuHint
+                    visible: bridge.showGpuHint && !setup.visible
                     Layout.fillWidth: true
                     implicitHeight: gpuHintBody.implicitHeight + 2 * Theme.padCard
                     radius: Theme.radiusMd
@@ -847,6 +987,7 @@ ApplicationWindow {
                         onCurrentChanged: if (current) wanted = true
                         Component.onCompleted: if (current) wanted = true
                     }
+                    TranscriptView { Layout.fillWidth: true; Layout.fillHeight: true }
                     // Страница создаётся при первом открытии и дальше живёт: пока раздел
                     // не открывали, его привязки не считаются вовсе.
                     Loader {
@@ -865,7 +1006,7 @@ ApplicationWindow {
                         property bool wanted: false
                         asynchronous: true
                         active: wanted
-                        source: "ModelsPage.qml"
+                        source: "AssistantPage.qml"
                         onCurrentChanged: if (current) wanted = true
                         Component.onCompleted: if (current) wanted = true
                     }
@@ -887,11 +1028,10 @@ ApplicationWindow {
                         property bool wanted: false
                         asynchronous: true
                         active: wanted
-                        source: "SettingsPage.qml"
+                        source: "ModelsPage.qml"
                         onCurrentChanged: if (current) wanted = true
                         Component.onCompleted: if (current) wanted = true
                     }
-                    TranscriptView { Layout.fillWidth: true; Layout.fillHeight: true }
                     // Страница создаётся при первом открытии и дальше живёт: пока раздел
                     // не открывали, его привязки не считаются вовсе.
                     Loader {
@@ -899,7 +1039,7 @@ ApplicationWindow {
                         property bool wanted: false
                         asynchronous: true
                         active: wanted
-                        source: "AssistantPage.qml"
+                        source: "SettingsPage.qml"
                         onCurrentChanged: if (current) wanted = true
                         Component.onCompleted: if (current) wanted = true
                     }
@@ -955,4 +1095,11 @@ ApplicationWindow {
     }
 
     CaptionOverlay { id: captionOverlay }
+
+    // Мастер первого запуска поверх оболочки: опрос, брифинг, прогресс.
+    SetupWizard {
+        anchors.fill: parent
+        z: 100
+        visible: setup.visible
+    }
 }

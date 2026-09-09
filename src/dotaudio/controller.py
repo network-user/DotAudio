@@ -1569,6 +1569,37 @@ class Controller(QObject):
         except (RuntimeError, TypeError, ValueError):
             return
 
+    @Slot(int, int, int, int, float)
+    def setWindowMask(self, x, y, w, h, radius):
+        """Hit-test only the island chrome; transparent canvas padding passes clicks."""
+        if self._window is None or w <= 0 or h <= 0:
+            return
+        try:
+            from PySide6.QtCore import QRectF
+            from PySide6.QtGui import QPainterPath, QRegion
+
+            path = QPainterPath()
+            path.addRoundedRect(
+                QRectF(float(x), float(y), float(w), float(h)),
+                float(radius),
+                float(radius),
+            )
+            region = QRegion(path.toFillPolygon().toPolygon())
+            self._window.setMask(region)
+        except (RuntimeError, TypeError, ValueError, AttributeError):
+            return
+
+    @Slot()
+    def clearWindowMask(self):
+        if self._window is None:
+            return
+        try:
+            from PySide6.QtGui import QRegion
+
+            self._window.setMask(QRegion())
+        except (RuntimeError, AttributeError):
+            return
+
     def _apply_click_through(self, enabled):
         if self._window is None:
             return
@@ -2578,6 +2609,8 @@ class Controller(QObject):
         if job is None:
             return
         self.store.finish_session(sid, "error" if error else "cancelled" if cancelled else "completed")
+        if not error and not cancelled:
+            self._maybe_autotitle_session(sid)
         if error:
             self._notice = error
             self._record_log("error", error)
@@ -3348,8 +3381,31 @@ class Controller(QObject):
         )
         self.store.append_segments(session_id, payload)
         self.store.finish_session(session_id, "completed")
+        self._maybe_autotitle_session(session_id)
         self.transcribeStatus.emit(f"Готово. Сохранено в историю: {media.name}")
         return session_id
+
+    def _maybe_autotitle_session(self, session_id: str) -> None:
+        """Если название типовое (Микрофон и т.п.), взять первые слова расшифровки."""
+
+        from dotaudio.assistant import is_generic_title, title_from_transcript
+
+        session = self.store.get_session(session_id)
+        if session is None:
+            return
+        if not is_generic_title(str(session.get("title") or "")):
+            return
+        suggested = title_from_transcript(session.get("segments") or [])
+        if not suggested:
+            return
+        try:
+            cleaned = self.store.rename_session(session_id, suggested)
+        except ValueError:
+            return
+        if self._session_id == session_id:
+            self._session_title = cleaned
+        if self._trans_state.get("sessionId") == session_id:
+            self._trans_state["file"] = cleaned
 
     def _identify_voices(self, path: str, segments: list[dict]) -> tuple[list[dict], str, str]:
         """Определить говорящих выбранным движком.

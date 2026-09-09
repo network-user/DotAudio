@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="DotAudio">
+  <title>DotAudio</title>
+  <rect x="16" y="16" width="224" height="224" rx="52" fill="#0a0b0d"/>
+  <rect x="16.5" y="16.5" width="223" height="223" rx="51.5" fill="none" stroke="#f3f3f1" stroke-opacity=".16"/>
+  <g fill="#f3f3f1">
+    <rect x="64" y="110" width="18" height="36" rx="9"/>
+    <rect x="94" y="86" width="18" height="84" rx="9"/>
+    <rect x="124" y="58" width="18" height="140" rx="9"/>
+    <rect x="154" y="92" width="18" height="72" rx="9"/>
+    <rect x="184" y="118" width="18" height="28" rx="9"/>
+  </g>
+</svg>

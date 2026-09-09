@@ -10,7 +10,7 @@ Item {
         spacing: 14
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 220
+            Layout.preferredHeight: 248
             radius: Theme.radiusXl
             color: Theme.surface
             border.width: 1
@@ -87,11 +87,46 @@ Item {
                 }
                 RowLayout {
                     Layout.fillWidth: true
+                    spacing: Theme.gapSm
+                    Dropdown {
+                        id: micChooser
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: 280
+                        enabled: !bridge.recording && !bridge.busy
+                        model: [{ name: "Системный микрофон", id: "" }].concat(bridge.devices)
+                        textRole: "name"
+                        currentIndex: {
+                            var selected = String(bridge.settings.input_device)
+                            for (var i = 0; i < model.length; i++) {
+                                if (String(model[i].id) === selected) return i
+                            }
+                            return 0
+                        }
+                        onActivated: function(index) {
+                            var device = micChooser.model[index]
+                            bridge.setSetting("input_device", String(device.id))
+                        }
+                    }
+                    PillButton {
+                        text: {
+                            var phase = String(bridge.deviceTest.phase || "")
+                            if (phase === "listening" || phase === "starting") return "Слушаю…"
+                            if (phase === "playing") return "Играю…"
+                            return "Проверить"
+                        }
+                        enabled: !bridge.recording && !bridge.busy
+                                 && bridge.deviceTest.phase !== "listening"
+                                 && bridge.deviceTest.phase !== "starting"
+                                 && bridge.deviceTest.phase !== "playing"
+                        onClicked: bridge.testMicrophone()
+                        ToolTip.visible: hovered
+                        ToolTip.text: "Как в Discord: говорите, затем услышите себя"
+                    }
                     PillButton { text: bridge.recording ? "Стоп" : bridge.busy ? "Остановить" : "Диктовать"; primary: true; onClicked: bridge.toggleRecording() }
                     PillButton { text: "Копировать"; enabled: bridge.text.length > 0; onClicked: bridge.copyText() }
                     PillButton { text: "Вставить последний"; enabled: bridge.lastTranscript.length > 0 && !bridge.recording; onClicked: bridge.pasteLastTranscript() }
                     Item { Layout.fillWidth: true }
-                    Waveform { Layout.preferredWidth: 180; bars: 22; barH: 18 }
+                    Waveform { Layout.preferredWidth: 140; bars: 18; barH: 18 }
                 }
             }
         }

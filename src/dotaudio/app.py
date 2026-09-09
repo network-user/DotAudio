@@ -8,25 +8,16 @@ from pathlib import Path
 
 from platformdirs import user_data_path
 from PySide6.QtCore import QTimer, QUrl
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from dotaudio.assistant_controller import AssistantController
+from dotaudio.branding import apply_dark_titlebar, apply_windows_app_identity, load_app_icon
 from dotaudio.controller import Controller
 from dotaudio.cuda_runtime import register_cuda_dll_directories
 from dotaudio.desktop import Desktop
-
-
-def _tray_icon() -> QIcon:
-    pixmap = QPixmap(32, 32)
-    pixmap.fill(QColor("#0a0b0d"))
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    painter.setPen(QPen(QColor("#f3f3f1"), 2))
-    painter.drawRoundedRect(6, 8, 20, 16, 4, 4)
-    painter.end()
-    return QIcon(pixmap)
+from dotaudio.setup_controller import SetupController
 
 
 def _register_ui_fonts():
@@ -49,9 +40,15 @@ def main():
     parser.add_argument("--screenshot", type=Path, help="Save a screenshot and exit; no audio capture")
     args = parser.parse_args()
     os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
+    # До создания окон: иначе Windows группирует процесс как python.exe.
+    apply_windows_app_identity()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("DotAudio")
+    app.setApplicationDisplayName("DotAudio")
     app.setOrganizationName("DotCore")
+    app_icon = load_app_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
     _register_ui_fonts()
     app.setFont(QFont("Segoe UI", 10))
     palette = QPalette()
@@ -67,6 +64,7 @@ def main():
     # Ассистент - отдельный объект с собственным состоянием: поток токенов не
     # должен заставлять интерфейс записи пересчитывать свои привязки.
     assistant = AssistantController(data_dir, controller.store, controller)
+    setup = SetupController(data_dir, controller, assistant)
 
     # Экстренный выход. Ctrl+C / Ctrl+Break в консоли запуска (python -m
     # dotaudio, dotaudio.exe) и глобальная Ctrl+Alt+X обязаны закрыть программу
@@ -117,25 +115,47 @@ def main():
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("bridge", controller)
     engine.rootContext().setContextProperty("assistant", assistant)
+    engine.rootContext().setContextProperty("setup", setup)
     engine.load(QUrl.fromLocalFile(str(Path(__file__).parent / "qml" / "MainMvp.qml")))
     if not engine.rootObjects():
         desktop.close()
         return 1
     window = engine.rootObjects()[0]
+    if not app_icon.isNull():
+        window.setIcon(app_icon)
     controller.set_window(window)
+    # Тёмный системный заголовок под палитру приложения (рамка есть только в app).
+    def refresh_titlebar():
+        try:
+            apply_dark_titlebar(int(window.winId()))
+        except (RuntimeError, TypeError, ValueError):
+            pass
+
+    QTimer.singleShot(0, refresh_titlebar)
     tray = None
     if QSystemTrayIcon.isSystemTrayAvailable() and not args.smoke_test and not args.screenshot:
-        tray = QSystemTrayIcon(_tray_icon(), app)
+        tray = QSystemTrayIcon(app_icon if not app_icon.isNull() else load_app_icon(), app)
         menu = QMenu()
         show_island = menu.addAction("Остров")
         show_app = menu.addAction("Окно")
         menu.addSeparator()
         quit_action = menu.addAction("Выйти")
-        show_island.triggered.connect(lambda: window.setProperty("shellMode", "island"))
-        show_app.triggered.connect(lambda: window.setProperty("shellMode", "app"))
+        def show_island_shell():
+            # Трей обходит enterShell: выставляем пару свойств сами.
+            window.setProperty("stayOnTop", True)
+            window.setProperty("shellMode", "island")
+
+        def show_app_shell():
+            window.setProperty("stayOnTop", False)
+            window.setProperty("shellMode", "app")
+            QTimer.singleShot(0, refresh_titlebar)
+
+        show_island.triggered.connect(show_island_shell)
+        show_app.triggered.connect(show_app_shell)
         quit_action.triggered.connect(app.quit)
         tray.setContextMenu(menu)
         tray.setToolTip("DotAudio")
+        tray.setIcon(app_icon)
         tray.show()
         window.setProperty("trayPresent", True)
     # По умолчанию - полное окно (навигация + главная страница Live).
@@ -154,16 +174,21 @@ def main():
                 h = int(window.property("height") or 790)
                 window.setProperty("x", max(40, (geo.width() - w) // 2 + geo.x()))
                 window.setProperty("y", max(40, (geo.height() - h) // 2 + geo.y()))
+            QTimer.singleShot(0, refresh_titlebar)
     controller.shutdownReady.connect(app.quit)
     app.aboutToQuit.connect(desktop.close)
     app.aboutToQuit.connect(assistant.shutdown)
     app.aboutToQuit.connect(controller.shutdown)
     # Warm the selected local model after the UI is ready.  Preparation runs in
     # Controller's worker thread and never blocks the Qt event loop.  Smoke
-    # tests and screenshots must remain model/network free.
+    # tests and screenshots must remain model/network free.  First-run setup
+    # takes over downloads when the wizard is still needed.
     if not args.smoke_test and not args.screenshot:
-        controller.enableModelWarmup()
-        QTimer.singleShot(0, controller.prepareSelectedModel)
+        if setup.needed:
+            QTimer.singleShot(0, setup.begin)
+        else:
+            controller.enableModelWarmup()
+            QTimer.singleShot(0, controller.prepareSelectedModel)
     if args.smoke_test or args.screenshot:
         def finish():
             if args.screenshot:
