@@ -335,11 +335,6 @@ Rectangle {
     }
 
     function syncPlayIndex() {
-        if (!player.playing) {
-            if (view.playIndex !== -1)
-                view.playIndex = -1
-            return
-        }
         var t = Number(player.position) / 1000
         var found = -1
         for (var i = 0; i < view.segs.length; ++i) {
@@ -349,10 +344,18 @@ Rectangle {
                 break
             }
         }
-        if (found === view.playIndex)
-            return
-        view.playIndex = found
-        if (found < 0 || view.focusKey !== 0)
+        // Между фразами: ближайшая уже начавшаяся (для паузы/скролла по шкале).
+        if (found < 0 && view.segs.length > 0 && t > 0) {
+            for (var j = view.segs.length - 1; j >= 0; --j) {
+                if (t >= Number(view.segs[j].start)) {
+                    found = j
+                    break
+                }
+            }
+        }
+        if (found !== view.playIndex)
+            view.playIndex = found
+        if (!player.playing || found < 0 || view.focusKey !== 0)
             return
         segList.positionViewAtIndex(found, ListView.Contain)
     }
@@ -444,9 +447,80 @@ Rectangle {
 
     readonly property real chromeShare: view.segs.length > 0 ? 0.40 : 0.55
 
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: Theme.gapSm
+
+        // Текущий текст по таймкоду плеера - всегда в самом верху страницы.
+        Rectangle {
+            Layout.fillWidth: true
+            visible: view.segs.length > 0 && view.activePhrase !== null
+            implicitHeight: liveCaptionCol.implicitHeight + 2 * Theme.padCard
+            radius: Theme.radiusLg
+            color: player.playing ? Theme.liveSurface : Theme.surface3
+            border.width: player.playing ? 2 : 1
+            border.color: player.playing ? Theme.liveBorder : Theme.borderHi
+            Behavior on color { ColorAnimation { duration: Theme.fastMs } }
+            Rectangle {
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                width: 4
+                radius: 2
+                visible: player.playing
+                color: Theme.liveBar
+            }
+            ColumnLayout {
+                id: liveCaptionCol
+                anchors.fill: parent
+                anchors.margins: Theme.padCard
+                anchors.leftMargin: Theme.padCard + (player.playing ? 6 : 0)
+                spacing: 4
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.gapSm
+                    Label {
+                        text: player.playing ? "Сейчас звучит" : "По таймкоду"
+                        color: player.playing ? Theme.text : Theme.muted
+                        font.pixelSize: Theme.fsMicro
+                        font.weight: Font.DemiBold
+                    }
+                    Label {
+                        visible: view.activePhrase && String(view.activePhrase.speaker || "").length > 0
+                        text: view.activePhrase ? String(view.activePhrase.speaker) : ""
+                        color: Theme.speakerInk(view.activePhrase ? view.activePhrase.role : 0)
+                        font.pixelSize: Theme.fsSmall
+                        font.weight: Font.DemiBold
+                    }
+                    Item { Layout.fillWidth: true }
+                    Label {
+                        visible: view.activePhrase !== null
+                        text: view.activePhrase
+                              ? (view.timecode(view.activePhrase.start) + " - "
+                                 + view.timecode(view.activePhrase.end))
+                              : ""
+                        color: Theme.faint
+                        font.family: Theme.monoFamily
+                        font.pixelSize: Theme.fsMicro
+                    }
+                }
+                Label {
+                    Layout.fillWidth: true
+                    text: view.activePhrase ? String(view.activePhrase.text || "") : ""
+                    color: Theme.text
+                    font.pixelSize: player.playing ? Theme.fsTitle : Theme.fsLead
+                    font.weight: Font.Bold
+                    wrapMode: Text.Wrap
+                    maximumLineCount: 3
+                    elide: Text.ElideRight
+                }
+            }
+        }
+
     SplitView {
         id: mainSplit
-        anchors.fill: parent
+        Layout.fillWidth: true
+        Layout.fillHeight: true
         orientation: Qt.Vertical
         handle: Item {
             implicitWidth: 1
@@ -817,61 +891,6 @@ Rectangle {
                         view.onlyFlagged = value
                     }
                     onAssistantRequested: bridge.openTranscriptInAssistant()
-                }
-
-                // Текущая фраза синхронно со звуком - всегда над списком.
-                Rectangle {
-                    Layout.fillWidth: true
-                    visible: view.segs.length > 0 && view.activePhrase !== null
-                    implicitHeight: nowPlayingCol.implicitHeight + 2 * Theme.padCard
-                    radius: Theme.radiusLg
-                    color: Theme.surface3
-                    border.width: 1
-                    border.color: Theme.borderHi
-                    ColumnLayout {
-                        id: nowPlayingCol
-                        anchors.fill: parent
-                        anchors.margins: Theme.padCard
-                        spacing: 4
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: Theme.gapSm
-                            Label {
-                                text: player.playing ? "Сейчас звучит" : "Фраза"
-                                color: Theme.muted
-                                font.pixelSize: Theme.fsMicro
-                                font.weight: Font.DemiBold
-                            }
-                            Label {
-                                visible: view.activePhrase && String(view.activePhrase.speaker || "").length > 0
-                                text: view.activePhrase ? String(view.activePhrase.speaker) : ""
-                                color: Theme.speakerInk(view.activePhrase ? view.activePhrase.role : 0)
-                                font.pixelSize: Theme.fsSmall
-                                font.weight: Font.DemiBold
-                            }
-                            Item { Layout.fillWidth: true }
-                            Label {
-                                visible: view.activePhrase !== null
-                                text: view.activePhrase
-                                      ? (view.timecode(view.activePhrase.start) + " - "
-                                         + view.timecode(view.activePhrase.end))
-                                      : ""
-                                color: Theme.faint
-                                font.family: Theme.monoFamily
-                                font.pixelSize: Theme.fsMicro
-                            }
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            text: view.activePhrase ? String(view.activePhrase.text || "") : ""
-                            color: Theme.text
-                            font.pixelSize: Theme.fsLead
-                            font.weight: Font.DemiBold
-                            wrapMode: Text.Wrap
-                            maximumLineCount: 4
-                            elide: Text.ElideRight
-                        }
-                    }
                 }
 
                 Connections {
@@ -1251,17 +1270,24 @@ Rectangle {
                     // В полном списке index совпадает с глобальным; при фильтре
                     // подсветка markedIndex не ставится (как раньше).
                     readonly property bool playingNow: player.playing
-                        && (Number(player.position) / 1000) >= segCard.startSec
-                        && (Number(player.position) / 1000) < segCard.endSec
+                        && view.playIndex >= 0
+                        && view.playIndex === segCard.globalIndex
                     readonly property bool marked: segCard.playingNow
                         || (view.focusKey === 0 && (view.markedIndex === index || view.playIndex === index))
                     width: ListView.view.width
                     implicitHeight: segBody.implicitHeight + 24
                     radius: Theme.radiusMd
-                    color: segCard.marked ? Theme.surface3 : Theme.surface2
-                    border.width: 1
-                    border.color: segCard.marked ? Theme.borderHi : Theme.border
+                    color: segCard.playingNow
+                           ? Theme.liveSurface
+                           : (segCard.marked ? Theme.surface3 : Theme.surface2)
+                    border.width: segCard.playingNow ? 2 : 1
+                    border.color: segCard.playingNow
+                                  ? Theme.liveBorder
+                                  : (segCard.marked ? Theme.borderHi : Theme.border)
+                    opacity: player.playing && !segCard.playingNow ? Theme.historyAlpha : 1
                     Behavior on color { ColorAnimation { duration: Theme.baseMs } }
+                    Behavior on opacity { NumberAnimation { duration: Theme.fastMs } }
+                    Behavior on border.width { NumberAnimation { duration: Theme.fastMs } }
 
                     onEditingChanged: {
                         if (editing)
@@ -1347,10 +1373,11 @@ Rectangle {
                         anchors.margins: 11
                         spacing: 10
                         Rectangle {
-                            Layout.preferredWidth: 4
+                            Layout.preferredWidth: segCard.playingNow ? 7 : 4
                             Layout.fillHeight: true
                             radius: 2
-                            color: Theme.speakerInk(segCard.modelData.role)
+                            color: segCard.playingNow ? Theme.liveBar : Theme.speakerInk(segCard.modelData.role)
+                            Behavior on Layout.preferredWidth { NumberAnimation { duration: Theme.fastMs } }
                         }
                         // Клик по тексту/таймкоду - воспроизвести фразу.
                         // Отдельный MouseArea, чтобы не перехватывать кнопки и поля.
@@ -1397,7 +1424,8 @@ Rectangle {
                                     visible: !segCard.editing
                                     text: segCard.modelData.text || "-"
                                     color: Theme.text
-                                    font.pixelSize: Theme.fsBody
+                                    font.pixelSize: segCard.playingNow ? Theme.fsCompact : Theme.fsBody
+                                    font.weight: segCard.playingNow ? Font.Bold : Font.Normal
                                     wrapMode: Text.Wrap
                                     textFormat: Text.PlainText
                                 }
@@ -1582,5 +1610,6 @@ Rectangle {
                 font.pixelSize: Theme.fsMicro
             }
         }
+    }
     }
 }
