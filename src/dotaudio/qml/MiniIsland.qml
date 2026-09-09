@@ -322,7 +322,7 @@ Rectangle {
                     spacing: 8
                     Label {
                         text: root.phase === "result"
-                              ? (Boolean(bridge.settings.auto_paste) ? "В буфере и вставлено" : "В буфере")
+                              ? "В буфере"
                               : (bridge.status.length ? bridge.status : "Уточняем…")
                         color: Theme.muted
                         font.pixelSize: Theme.fsSmall
@@ -330,7 +330,7 @@ Rectangle {
                     }
                     Label {
                         visible: root.phase === "result" && bridge.lastTranscript.length > 0
-                        text: "Вставить ещё раз"
+                        text: "Вставить"
                         color: Theme.text
                         font.pixelSize: Theme.fsSmall
                         font.weight: Font.DemiBold

@@ -199,6 +199,26 @@ def test_keyword_events_are_stored_and_filtered(tmp_path: Path) -> None:
     assert len(store.list_keyword_events(limit=10)) == 2
 
 
+def test_replace_segments_swaps_draft_for_refined(tmp_path: Path) -> None:
+    store = Store(tmp_path / "dotaudio.sqlite3")
+    sid = store.create_session("Диктовка", "dictation", "mic", "base")
+    store.append_segments(
+        sid,
+        [{"start": 0.0, "end": 1.0, "text": "черновик"}],
+    )
+    ids = store.replace_segments(
+        sid,
+        [
+            {"start": 0.0, "end": 1.2, "text": "уточнённый"},
+            {"start": 1.2, "end": 2.0, "text": "текст"},
+        ],
+    )
+    session = store.get_session(sid)
+    assert session is not None
+    assert [row["text"] for row in session["segments"]] == ["уточнённый", "текст"]
+    assert ids == [row["id"] for row in session["segments"]]
+
+
 def test_list_recoverable_sessions_needs_audio_or_segments(tmp_path: Path) -> None:
     path = tmp_path / "dotaudio.sqlite3"
     store = Store(path)

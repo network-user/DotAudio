@@ -116,7 +116,9 @@ ApplicationWindow {
     readonly property string islandPhase: {
         if (islandModesOpen && !bridge.recording && !bridge.busy)
             return "modePick"
-        if (bridge.notice.length > 0 && !bridge.recording && !bridge.busy)
+        // После удачной диктовки notice про буфер не должен прятать результат.
+        if (bridge.notice.length > 0 && !bridge.recording && !bridge.busy
+                && !(bridge.page === "dictation" && bridge.lastTranscript.length))
             return "error"
         if (bridge.liveActive && bridge.displayCaption.length)
             return "caption"
@@ -126,15 +128,17 @@ ApplicationWindow {
             return "process"
         if (bridge.liveActive)
             return "listen"
-        if (bridge.recording && bridge.caption.length)
+        if (bridge.recording && (bridge.text.length || bridge.partialCaption.length || bridge.caption.length))
             return "caption"
         if (bridge.recording && quietHeld && bridge.inputState === "Нет входного сигнала")
             return "quiet"
         if (bridge.recording)
             return "listen"
+        if (!bridge.recording && bridge.busy && (bridge.text.length || bridge.partialCaption.length || bridge.caption.length))
+            return "caption"
         if (!bridge.recording && bridge.busy)
             return "process"
-        if (bridge.page === "dictation" && bridge.caption.length && !bridge.busy)
+        if (bridge.page === "dictation" && (bridge.lastTranscript.length || bridge.caption.length || bridge.text.length) && !bridge.busy)
             return "result"
         return "ready"
     }

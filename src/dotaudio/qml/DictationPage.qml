@@ -66,8 +66,8 @@ Item {
                         Text {
                             Layout.fillWidth: true
                             text: Boolean(bridge.settings.dictate_hold)
-                                  ? "Удерживайте " + bridge.settings.dictate_hotkey + ", чтобы диктовать. Отпустите - текст попадёт в буфер. Вставка последнего: " + bridge.settings.paste_last_hotkey + "."
-                                  : "После остановки расшифровка сохранится в истории. Горячая клавиша: " + bridge.settings.dictate_hotkey + ". Вставка последнего: " + bridge.settings.paste_last_hotkey + "."
+                                  ? "Удерживайте " + bridge.settings.dictate_hotkey + ", чтобы диктовать. Остров покажет запись; после отпускания текст уточнится и попадёт в буфер. Вставка последнего: " + bridge.settings.paste_last_hotkey + "."
+                                  : "Горячая клавиша " + bridge.settings.dictate_hotkey + " поднимает остров. После остановки запись уточняется, текст копируется и при автовставке уходит в активное поле. Вставка последнего: " + bridge.settings.paste_last_hotkey + "."
                             color: Theme.muted
                             font.pixelSize: Theme.fsBody
                             wrapMode: Text.Wrap

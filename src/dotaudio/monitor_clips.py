@@ -53,6 +53,23 @@ class PcmRing:
         self._write_pos = (self._write_pos + chunk.size) % self._capacity
         self._total_samples += chunk.size
 
+    def dump(self) -> np.ndarray:
+        """Return the samples still held by the ring, oldest first.
+
+        Used by dictation refine: the whole take is re-decoded after Stop, then
+        this buffer is dropped so the temporary audio never stays on disk.
+        """
+
+        if self._total_samples == 0:
+            return np.zeros(0, dtype=np.float32)
+        kept = min(self._total_samples, self._capacity)
+        if kept < self._capacity:
+            return self._buffer[:kept].astype(np.float32, copy=True)
+        start = self._write_pos
+        return np.concatenate(
+            (self._buffer[start:], self._buffer[:start])
+        ).astype(np.float32, copy=True)
+
     def slice(self, start_sec: float, end_sec: float, *, stream_end_sec: float) -> np.ndarray | None:
         if end_sec <= start_sec or self._total_samples == 0:
             return None

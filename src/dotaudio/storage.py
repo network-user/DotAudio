@@ -405,6 +405,37 @@ class Store:
                 identifiers.append(int(cursor.lastrowid))
         return identifiers
 
+    def replace_segments(
+        self,
+        session_id: str,
+        segments: Iterable[dict[str, Any]],
+    ) -> list[int]:
+        """Drop draft segments and write a refined take in one transaction.
+
+        Dictation keeps streaming finals only as an on-screen draft. After Stop
+        the full PCM is re-decoded; this replaces that draft so history matches
+        the refined text the user receives.
+        """
+
+        rows = [_validate_segment(segment) for segment in segments]
+        identifiers: list[int] = []
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM segments WHERE session_id = ?", (str(session_id),)
+            )
+            for start, end, text, words, speaker in rows:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO segments (
+                        session_id, start, end, text, original_text, words_json, speaker
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (str(session_id), start, end, text, text, words, speaker),
+                )
+                identifiers.append(int(cursor.lastrowid))
+        return identifiers
+
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             session = connection.execute(

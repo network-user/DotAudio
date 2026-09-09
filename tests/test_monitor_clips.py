@@ -9,6 +9,20 @@ import pytest
 from dotaudio.monitor_clips import SAMPLE_RATE, PcmRing, extract_match_clip, write_wav
 
 
+def test_pcm_ring_dump_returns_oldest_first() -> None:
+    ring = PcmRing(seconds=1.0, sample_rate=10)
+    ring.write(np.arange(15, dtype=np.float32))
+    dumped = ring.dump()
+    # Capacity 10: keep samples 5..14.
+    np.testing.assert_array_equal(dumped, np.arange(5, 15, dtype=np.float32))
+
+
+def test_pcm_ring_dump_before_wrap() -> None:
+    ring = PcmRing(seconds=1.0, sample_rate=10)
+    ring.write(np.arange(4, dtype=np.float32))
+    np.testing.assert_array_equal(ring.dump(), np.arange(4, dtype=np.float32))
+
+
 def test_pcm_ring_tracks_written_seconds() -> None:
     ring = PcmRing(seconds=1.0, sample_rate=100)
     ring.write(np.ones(50, dtype=np.float32))

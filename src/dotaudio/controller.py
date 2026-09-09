@@ -2357,6 +2357,8 @@ class Controller(QObject):
         if not self._jobs:
             self._page = "dictation"
             self.desktop.remember_target()
+            # Остров должен появиться сразу: иначе hotkey «молчит» в чужом окне.
+            self.islandRequested.emit()
         hold = bool(self._settings.get("dictate_hold")) and self.desktop.available
         if hold and self._state != "recording":
             self._hold_active = True
@@ -2395,7 +2397,10 @@ class Controller(QObject):
         if self._state == "recording":
             self._stop_hold()
             self._state = "processing"
-            self._status = "Завершаем последние фразы…"
+            if any(job.get("mode") == "dictation" for job in self._jobs.values()):
+                self._status = "Уточняем запись…"
+            else:
+                self._status = "Завершаем последние фразы…"
             if any(job.get("mode") == "live" for job in self._jobs.values()):
                 self._live_phase = "stopping"
                 self.liveStateChanged.emit()
@@ -2522,7 +2527,7 @@ class Controller(QObject):
                 _emit_segment,
                 self.statusArrived.emit,
                 lambda error, cancelled, sid=sid: self.jobFinished.emit(sid, error, cancelled),
-                on_partial=_emit_partial if mode == "live" else None,
+                on_partial=_emit_partial if mode in ("live", "dictation") else None,
                 catch_up=(mode == "live"),
             )
             self._jobs[sid] = {"live": live, "mode": mode, "name": name, "hotkey": hotkey, "engine": engine_now, "vosk": use_vosk}
@@ -2541,6 +2546,12 @@ class Controller(QObject):
                         self.captureStarted.emit(sid, time.monotonic() - len(audio) / SAMPLE_RATE)
                     if mode == "monitor":
                         ring = self._pcm_rings.setdefault(sid, PcmRing(seconds=90.0))
+                        ring.write(audio)
+                    elif mode == "dictation":
+                        # Полный take для refine после Stop; WAV на диск не пишем.
+                        ring = self._pcm_rings.setdefault(
+                            sid, PcmRing(seconds=DICTATION_PCM_SECONDS)
+                        )
                         ring.write(audio)
                     live.feed(audio)
 
@@ -2827,6 +2838,11 @@ class Controller(QObject):
                 self._record_log("warning", f"Совпадение в эфире {job['name']}: {', '.join(matches)}")
         elif sid == self._session_id:
             self._record_log("success", f"Добавлен сегмент {len(self._segments)}: {segment['text'][:80]}")
+        if job["mode"] == "dictation" and sid == self._session_id:
+            # Финал вытесняет черновик preview той же фразы.
+            self._partial_caption = ""
+            self._partial_source = ""
+            self._preview_stable = ""
         self._status = "Слушаю" if self.recording else "Распознаём…"
         # Готовая фраза меняет строку состояния, журнал и подпись - но не
         # настройки, устройства и карточки моделей. При длинной речи общий
@@ -2911,18 +2927,27 @@ class Controller(QObject):
         self.segmentsChanged.emit()
 
     def _on_partial(self, sid, segment):
-        """Accept a disposable Live preview without persisting it.
+        """Accept a disposable preview without persisting it.
 
-        The worker emits full phrase snapshots.  On screen the snapshot follows
-        the unfinished sentence from the finals before it, so the reader sees
-        one sentence growing rather than a new scrap every few seconds.
+        Live keeps a LocalAgreement draft ahead of the last final. Dictation
+        reuses the same pipeline so the island shows what is being said before
+        the full-take refine runs after Stop.
         """
 
         job = self._jobs.get(sid)
-        if job is None or job.get("mode") != "live" or sid != self._session_id:
+        if job is None or sid != self._session_id:
             return
         text = str(segment.get("text", "")).strip()
         if not text:
+            return
+        if job.get("mode") == "dictation":
+            self._partial_source = text
+            self._preview_stable = str(segment.get("stable_text", "")).strip()
+            self._partial_caption = text
+            self._caption_revision += 1
+            self.captionChanged.emit()
+            return
+        if job.get("mode") != "live":
             return
         self._last_caption_at = time.monotonic()
         end = float(segment.get("end", 0.0))
@@ -2937,41 +2962,147 @@ class Controller(QObject):
         self._refresh_live_caption()
         self.liveStateChanged.emit()
 
+    def _on_dictation_refine_progress(self, sid, segments, status):
+        """Show an intermediate refine pass on the island and in history draft."""
+
+        if sid != self._session_id:
+            return
+        rows = list(segments or [])
+        identifiers = self.store.replace_segments(sid, rows)
+        self._segments = [
+            {**dict(segment), "id": identifiers[index]}
+            for index, segment in enumerate(rows)
+        ]
+        self._partial_caption = ""
+        self._partial_source = ""
+        self._preview_stable = ""
+        self._status = STATUS_LABELS.get(status, status)
+        self._caption_revision += 1
+        self.segmentsChanged.emit()
+        self.captionChanged.emit()
+        self.statusChanged.emit()
+        self.changed.emit()
+
+    def _start_dictation_refine(self, sid, audio, *, hotkey: bool) -> None:
+        """Re-decode the whole take in two passes, then paste and drop PCM."""
+
+        cancel = threading.Event()
+        self._jobs[sid] = {
+            "cancel": cancel,
+            "mode": "dictation_refine",
+            "hotkey": bool(hotkey),
+            "name": "Диктовка",
+        }
+        self._state = "processing"
+        self._status = STATUS_LABELS["dictation_refine_1"]
+        self._partial_caption = ""
+        self._partial_source = ""
+        self.changed.emit()
+
+        def process(sid=sid, samples=audio, cancel=cancel):
+            error = ""
+            try:
+                passes = (
+                    ("dictation_refine_1", replace(self._config(), profile="fast")),
+                    ("dictation_refine_2", self._config()),
+                )
+                for status, config in passes:
+                    if cancel.is_set():
+                        break
+                    self.statusArrived.emit(status)
+                    collected: list[dict] = []
+
+                    def on_segment(segment, bucket=collected):
+                        bucket.append(self._translate_segment(dict(segment)))
+
+                    self.engine.transcribe(
+                        samples, config, cancel, on_segment, self.statusArrived.emit
+                    )
+                    if cancel.is_set():
+                        break
+                    self.dictationRefineProgress.emit(sid, collected, status)
+            except Exception as exc:
+                error = str(exc)
+            self.jobFinished.emit(sid, error, cancel.is_set())
+
+        threading.Thread(target=process, daemon=True).start()
+
+    def _deliver_dictation_text(self, sid, *, hotkey: bool) -> bool:
+        """Copy refined text to clipboard and optionally paste into the target.
+
+        Returns True when the take was empty (silent cancel: no clipboard noise).
+        """
+
+        session = self.store.get_session(sid)
+        raw_text = " ".join(
+            str(item.get("text", "")).strip()
+            for item in (session or {}).get("segments", [])
+            if str(item.get("text", "")).strip()
+        )
+        text = self._apply_dictation_rules(raw_text)
+        if not text:
+            self._notice = ""
+            self._record_log("info", "Пустая диктовка: в буфер ничего не записано.")
+            return True
+        QApplication.clipboard().setText(text)
+        self._last_transcript = text
+        changed = text != raw_text
+        self._notice = "Текст скопирован в буфер обмена." + (
+            " Применены ваши локальные правила." if changed else ""
+        )
+        if self._settings.get("auto_paste", True) and hotkey:
+            QTimer.singleShot(250, self._paste)
+        return False
+
     def _on_finished(self, sid, error, cancelled):
         job = self._jobs.pop(sid, None)
         if job is None:
             return
-        self.store.finish_session(sid, "error" if error else "cancelled" if cancelled else "completed")
-        if not error and not cancelled:
+        mode = job.get("mode")
+        if mode == "dictation" and not cancelled and not error:
+            ring = self._pcm_rings.pop(sid, None)
+            audio = ring.dump() if ring is not None else None
+            min_samples = int(DICTATION_REFINE_MIN_SECONDS * SAMPLE_RATE)
+            if audio is not None and audio.size >= min_samples:
+                self._start_dictation_refine(sid, audio, hotkey=bool(job.get("hotkey")))
+                return
+            empty_dictation = self._deliver_dictation_text(
+                sid, hotkey=bool(job.get("hotkey"))
+            )
+            self.store.finish_session(sid, "completed")
+            if not empty_dictation:
+                self._maybe_autotitle_session(sid)
+            self._finish_job_ui(
+                job, error="", cancelled=False, empty_dictation=empty_dictation
+            )
+            return
+
+        self._pcm_rings.pop(sid, None)
+        finish_status = "error" if error else "cancelled" if cancelled else "completed"
+        self.store.finish_session(sid, finish_status)
+        if not error and not cancelled and mode in (
+            "dictation", "dictation_refine", "live", "media", "monitor",
+        ):
             self._maybe_autotitle_session(sid)
         if error:
             self._notice = error
             self._record_log("error", error)
         empty_dictation = False
-        if job["mode"] == "dictation" and not cancelled and not error:
-            session = self.store.get_session(sid)
-            raw_text = " ".join(s["text"].strip() for s in session["segments"])
-            text = self._apply_dictation_rules(raw_text)
-            if text:
-                QApplication.clipboard().setText(text)
-                self._last_transcript = text
-                changed = text != raw_text
-                self._notice = "Текст скопирован в буфер обмена." + (
-                    " Применены ваши локальные правила." if changed else ""
-                )
-                if self._settings["auto_paste"] and job.get("hotkey"):
-                    QTimer.singleShot(250, self._paste)
-            else:
-                # PasteTalk: silent cancel when nothing was said — no clipboard noise.
-                empty_dictation = True
-                self._notice = ""
-                self._record_log("info", "Пустая диктовка: в буфер ничего не записано.")
+        if mode in ("dictation", "dictation_refine") and not cancelled and not error:
+            empty_dictation = self._deliver_dictation_text(
+                sid, hotkey=bool(job.get("hotkey"))
+            )
+        self._finish_job_ui(
+            job, error=error, cancelled=cancelled, empty_dictation=empty_dictation
+        )
+
+    def _finish_job_ui(self, job, *, error: str, cancelled: bool, empty_dictation: bool) -> None:
         if not self._jobs:
             self._state = "idle"
             self._level = 0
             self._input_state = self.inputState
             self.levelChanged.emit()
-            if job["mode"] == "live":
+            if job.get("mode") == "live":
                 self._close_open_phrase()
                 self._confirmed_caption = ""
                 self._partial_caption = ""
@@ -2982,6 +3113,11 @@ class Controller(QObject):
                 self._caption_revision += 1
                 self.captionChanged.emit()
                 self.liveStateChanged.emit()
+            if job.get("mode") in ("dictation", "dictation_refine"):
+                self._partial_caption = ""
+                self._partial_source = ""
+                self._preview_stable = ""
+                self.captionChanged.emit()
             if empty_dictation:
                 self._status = "Ничего не сказано"
             else:

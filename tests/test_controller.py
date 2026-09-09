@@ -84,6 +84,42 @@ def test_dictation_defaults_enable_auto_paste() -> None:
     assert DEFAULTS["dictate_hotkey"] == "Ctrl+Alt+Space"
 
 
+def test_dictation_refine_progress_replaces_segments(tmp_path) -> None:
+    from dotaudio.storage import Store
+
+    store = Store(tmp_path / "dotaudio.sqlite3")
+    sid = store.create_session("Диктовка", "dictation", "mic", "base")
+    store.append_segments(sid, [{"start": 0.0, "end": 1.0, "text": "черновик"}])
+
+    controller = Controller.__new__(Controller)
+    controller._session_id = sid
+    controller.store = store
+    controller._segments = [{"id": 1, "start": 0.0, "end": 1.0, "text": "черновик"}]
+    controller._partial_caption = "черновик"
+    controller._partial_source = "черновик"
+    controller._preview_stable = ""
+    controller._status = ""
+    controller._caption_revision = 0
+    controller.segmentsChanged = _Counting()
+    controller.captionChanged = _Counting()
+    controller.statusChanged = _Counting()
+    controller.changed = _Counting()
+
+    Controller._on_dictation_refine_progress(
+        controller,
+        sid,
+        [{"start": 0.0, "end": 1.5, "text": "уточнённый текст"}],
+        "dictation_refine_2",
+    )
+
+    session = store.get_session(sid)
+    assert session is not None
+    assert [row["text"] for row in session["segments"]] == ["уточнённый текст"]
+    assert controller._segments[0]["text"] == "уточнённый текст"
+    assert controller._partial_caption == ""
+    assert controller._status.startswith("Уточняем")
+
+
 def test_dictation_rules_preserve_raw_text_until_explicit_final_processing() -> None:
     rules = type(
         "Rules",
