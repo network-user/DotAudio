@@ -48,7 +48,6 @@ from dotaudio.speaker_labels import (
 from dotaudio.storage import Store
 from dotaudio.transcripts import (
     apply_keyword_cooldown,
-    blend_fragments,
     continues_sentence,
     export_transcript,
     join_fragments,
@@ -98,8 +97,7 @@ DEFAULTS = {
     "model": "small", "device": "auto", "language": "ru", "task": "transcribe",
     # Режимы речи для Live / диктовки / транскрибации. language+task
     # остаются полями RecognitionConfig и синхронизируются с speech_mode.
-    # ru_en - Whisper Translate (только в английский); en_ru - ASR en +
-    # сетевой текстовый перевод (тестово, см. translate.py).
+    # en_ru - Whisper language=en + локальный OPUS-MT EN→RU (см. translate.py).
     "speech_mode": "ru",
     "backend": "local", "server_url": "http://127.0.0.1:8765", "source": "microphone",
     "live_source": "system",
@@ -447,8 +445,11 @@ class Controller(QObject):
         self._vosk_engine: VoskEngine | None = None
         self._vosk_size: str = ""
         self._settings = {**DEFAULTS, **self.store.get_settings()}
-        self._translator = Translator()
+        self._translator = Translator(data_dir=data_dir)
         self._translate_notice_shown = False
+        self._translate_preparing = False
+        self._translate_cancel = threading.Event()
+        self._translate_state = dict(self._translator.status())
         self._sync_speech_mode_settings(persist=False)
         saved_bindings = {
             "dictate": resolve_hotkey(str(self._settings["dictate_hotkey"])),
@@ -1124,6 +1125,70 @@ class Controller(QObject):
     def speechModeHint(self):
         return speech_mode_hint(self._settings.get("speech_mode"))
 
+    @Property("QVariantMap", notify=changed)
+    def translateModelState(self):
+        return dict(self._translate_state)
+
+    @Property(bool, notify=changed)
+    def translateModelReady(self):
+        return bool(self._translate_state.get("ready"))
+
+    @Slot()
+    def prepareTranslateModel(self):
+        """Скачать и подготовить локальный EN→RU, если его ещё нет."""
+
+        if self._translate_preparing:
+            return
+        if self._translator.ready():
+            self._translate_state = dict(self._translator.status())
+            self.changed.emit()
+            return
+        self._translate_preparing = True
+        self._translate_cancel.clear()
+        self._translate_state = {
+            "ready": False,
+            "phase": "download",
+            "message": "Скачиваем локальную модель перевода…",
+            "ratio": 0.0,
+        }
+        self.changed.emit()
+
+        def progress(payload: dict) -> None:
+            message = str(payload.get("message") or self._translate_state.get("message") or "")
+            self._translate_state = {
+                "ready": False,
+                "phase": str(payload.get("phase") or "download"),
+                "message": message,
+                "ratio": float(payload.get("ratio") or 0.0),
+            }
+            self.changed.emit()
+
+        def work() -> None:
+            error = ""
+            try:
+                self._translator.ensure(on_progress=progress, cancel=self._translate_cancel)
+            except Exception as exc:  # noqa: BLE001
+                error = str(exc) or exc.__class__.__name__
+            self._translate_preparing = False
+            if error:
+                self._translate_state = {
+                    "ready": False,
+                    "phase": "error",
+                    "message": error,
+                    "ratio": 0.0,
+                }
+                self.logArrived.emit("error", f"Переводчик: {error}")
+            else:
+                self._translate_state = dict(self._translator.status())
+                self._record_log("success", "Локальный переводчик EN→RU готов.")
+            self.changed.emit()
+
+        threading.Thread(target=work, name="dotaudio-mt-prepare", daemon=True).start()
+
+    @Slot()
+    def cancelTranslateModel(self):
+        self._translate_cancel.set()
+
     @Slot()
     def cycleSpeechMode(self):
         if self._jobs:
@@ -1138,7 +1203,7 @@ class Controller(QObject):
 
         raw = self.store.get_settings() if hasattr(self, "store") else {}
         saved_mode = raw.get("speech_mode") if isinstance(raw, dict) else None
-        if saved_mode not in ("ru", "en", "ru_en", "en_ru"):
+        if saved_mode not in ("ru", "en", "en_ru", "ru_en"):
             mode = speech_mode_from_language_task(
                 self._settings.get("language"), self._settings.get("task")
             )
@@ -1156,6 +1221,15 @@ class Controller(QObject):
 
         mode = self._settings.get("speech_mode")
         if not needs_post_translate(mode):
+            return segment
+        if not self._translator.ready():
+            if not self._translate_notice_shown:
+                self._translate_notice_shown = True
+                self.logArrived.emit(
+                    "warning",
+                    "Режим EN→RU без локальной модели: показан английский текст. "
+                    "Скачайте переводчик в настройках.",
+                )
             return segment
         updated = apply_post_translate(segment, mode, translator=self._translator)
         error = self._translator.last_error
@@ -1270,7 +1344,7 @@ class Controller(QObject):
             "model": ("tiny", "base", "small", "medium", "large-v3", "turbo"),
             "device": ("auto", "cpu", "cuda"), "language": ("auto", "ru", "en", "de", "es", "fr", "zh"),
             "task": ("transcribe", "translate"), "backend": ("local", "remote"),
-            "speech_mode": ("ru", "en", "ru_en", "en_ru"),
+            "speech_mode": ("ru", "en", "en_ru"),
             "source": ("microphone", "system"), "live_source": ("microphone", "system", "mixed"),
             "live_sensitivity": ("speech", "everything"),
             "live_engine": ("vosk", "whisper"),
@@ -1309,6 +1383,8 @@ class Controller(QObject):
             self._settings["task"] = task
             self._translate_notice_shown = False
             self._translator.clear()
+            if value == "en_ru" and not self._translator.ready():
+                QTimer.singleShot(0, self.prepareTranslateModel)
         elif name in ("language", "task"):
             # Старый UI и тесты ещё пишут language/task напрямую.
             # en_ru из пары language+task не восстанавливается - остаётся en.
@@ -2468,6 +2544,10 @@ class Controller(QObject):
             self._status = "Слушаю · модель загрузится при первой фразе"
         self._last_status = ""
         self._record_log("info", f"Запущен режим: {mode}.")
+        if normalize_speech_mode(self._settings.get("speech_mode")) == "en_ru":
+            if not self._translator.ready():
+                self.prepareTranslateModel()
+                self._notice = "Готовим локальный переводчик EN→RU…"
         kind, _device = source_for_mode(mode, self._settings)
         sources = [({
             "microphone": "Микрофон",

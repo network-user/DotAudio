@@ -5,6 +5,10 @@ import "Theme.js" as Theme
 
 // Страница настроек: устройства, Live, субтитры зала, горячие клавиши.
 Item {
+    readonly property bool setupAlive: setup !== null && setup !== undefined
+    readonly property bool setupVisible: setupAlive && Boolean(setup.visible)
+    readonly property bool setupBusy: setupAlive && Boolean(setup.busy)
+
     Flickable {
         anchors.fill: parent
         contentWidth: width
@@ -43,13 +47,14 @@ Item {
                         Layout.fillWidth: true
                         spacing: Theme.gapSm
                         PillButton {
-                            text: setup.visible ? "Идёт настройка…" : "Запустить снова"
-                            primary: !setup.visible
-                            enabled: !setup.busy && !bridge.recording && !bridge.busy
-                            onClicked: setup.reopen()
+                            text: setupVisible ? "Идёт настройка…" : "Запустить снова"
+                            primary: !setupVisible
+                            enabled: !setupBusy && !(bridge && bridge.recording) && !(bridge && bridge.busy)
+                            onClicked: if (setup) setup.reopen()
                         }
                         Label {
-                            text: Boolean(bridge.settings.setup_completed) ? "Уже проходили" : "Ещё не завершена"
+                            text: (bridge && bridge.settings && Boolean(bridge.settings.setup_completed))
+                                  ? "Уже проходили" : "Ещё не завершена"
                             color: Theme.faint
                             font.pixelSize: Theme.fsSmall
                         }
@@ -212,7 +217,7 @@ Item {
                     Label { text: "Язык и перевод"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
                     Text {
                         Layout.fillWidth: true
-                        text: "Один режим для Live, диктовки и транскрибации. RU→EN - Whisper Translate. EN→RU - распознавание английского и тестовый сетевой перевод в русский."
+                        text: "Один режим для Live, диктовки и транскрибации. EN→RU распознаёт английскую речь и переводит текст локально (модель скачивается один раз)."
                         color: Theme.muted
                         font.pixelSize: Theme.fsLabel
                         wrapMode: Text.Wrap
@@ -231,28 +236,40 @@ Item {
                             onClicked: bridge.setSetting("speech_mode", "en")
                         }
                         PillButton {
-                            text: "RU → EN"
-                            primary: String(bridge.settings.speech_mode) === "ru_en"
-                            onClicked: bridge.setSetting("speech_mode", "ru_en")
-                            ToolTip.visible: hovered
-                            ToolTip.text: "Русская речь → английский текст"
-                        }
-                        PillButton {
                             text: "EN → RU"
                             primary: String(bridge.settings.speech_mode) === "en_ru"
                             onClicked: bridge.setSetting("speech_mode", "en_ru")
                             ToolTip.visible: hovered
-                            ToolTip.text: "Английская речь → русский текст (нужен интернет)"
+                            ToolTip.text: "Английская речь → русский текст, всё на этом компьютере"
                         }
                         Item { Layout.fillWidth: true }
                     }
-                    Text {
+                    RowLayout {
                         Layout.fillWidth: true
                         visible: String(bridge.settings.speech_mode) === "en_ru"
-                        text: "EN→RU пока тестовый: после Whisper текст уходит в онлайн-переводчик. Без сети останется английский."
-                        color: Theme.faint
-                        font.pixelSize: Theme.fsSmall
-                        wrapMode: Text.Wrap
+                        spacing: Theme.gapSm
+                        Text {
+                            Layout.fillWidth: true
+                            text: String(bridge.translateModelState.message || "")
+                            color: bridge.translateModelReady ? Theme.muted : Theme.faint
+                            font.pixelSize: Theme.fsSmall
+                            wrapMode: Text.Wrap
+                        }
+                        PillButton {
+                            text: bridge.translateModelReady ? "Готово" : "Скачать модель"
+                            enabled: !bridge.translateModelReady
+                                     && String(bridge.translateModelState.phase || "") !== "download"
+                                     && String(bridge.translateModelState.phase || "") !== "extract"
+                                     && String(bridge.translateModelState.phase || "") !== "convert"
+                            onClicked: bridge.prepareTranslateModel()
+                        }
+                        PillButton {
+                            text: "Отмена"
+                            visible: String(bridge.translateModelState.phase || "") === "download"
+                                     || String(bridge.translateModelState.phase || "") === "extract"
+                                     || String(bridge.translateModelState.phase || "") === "convert"
+                            onClicked: bridge.cancelTranslateModel()
+                        }
                     }
                 }
             }

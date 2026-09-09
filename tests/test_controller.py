@@ -471,9 +471,14 @@ def test_speech_mode_sets_language_task_and_config() -> None:
     controller._translator = type(
         "T",
         (),
-        {"clear": staticmethod(lambda: None), "last_error": ""},
+        {
+            "clear": staticmethod(lambda: None),
+            "last_error": "",
+            "ready": staticmethod(lambda: True),
+        },
     )()
     controller._translate_notice_shown = False
+    controller._translate_state = {"ready": True, "phase": "ready", "message": ""}
     controller._warmup_enabled = False
     controller._prepared_model = "small"
     controller.store = type("Store", (), {"save_settings": staticmethod(lambda _s: None)})()
@@ -481,26 +486,21 @@ def test_speech_mode_sets_language_task_and_config() -> None:
     controller.changed = _Signal()
 
     assert DEFAULTS["speech_mode"] == "ru"
-    Controller.setSetting(controller, "speech_mode", "ru_en")
-    assert controller._settings["language"] == "ru"
-    assert controller._settings["task"] == "translate"
-    language, task = language_task_for(controller._settings["speech_mode"])
-    assert (language, task) == ("ru", "translate")
+    Controller.setSetting(controller, "speech_mode", "en")
+    assert controller._settings["language"] == "en"
+    assert controller._settings["task"] == "transcribe"
 
     Controller.cycleSpeechMode(controller)
     assert controller._settings["speech_mode"] == "en_ru"
     assert controller._settings["language"] == "en"
     assert controller._settings["task"] == "transcribe"
     assert Controller.speechModeLabel.fget(controller) == "EN → RU"
+    language, task = language_task_for(controller._settings["speech_mode"])
+    assert (language, task) == ("en", "transcribe")
 
     from dotaudio.translate import Translator
 
-    controller._translator = Translator(
-        fetch=lambda _t: {
-            "responseData": {"translatedText": "Привет"},
-            "responseStatus": 200,
-        }
-    )
+    controller._translator = Translator(translate_fn=lambda text, *_: "Привет")
     controller.logArrived = _Signal()
     translated = Controller._translate_segment(
         controller,
