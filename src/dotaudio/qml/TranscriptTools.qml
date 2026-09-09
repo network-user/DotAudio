@@ -9,7 +9,6 @@ Rectangle {
     id: root
     property bool busy: false
     property var quality: ({ total: 0, flagged: 0, checked: 0, meanConfidence: -1 })
-    property var presets: []
     property var compare: ({ phase: "idle", message: "", report: {} })
     property bool canUndo: false
     property bool canRedo: false
@@ -21,46 +20,10 @@ Rectangle {
     signal redoRequested()
     signal replaceRequested(string find, string replace)
     signal dictionaryRequested()
-    signal exportPresetRequested(string key, var options)
+    signal exportRequested()
     signal compareRequested()
     signal onlyFlaggedToggled(bool value)
     signal assistantRequested()
-
-    property bool exportTimestamps: true
-    property bool exportSpeakers: true
-    property bool exportConfidence: false
-    property bool exportReviewFlags: false
-    property bool exportHeader: false
-    property bool exportPhraseNumbers: false
-
-    function syncExportFromPreset() {
-        var item = root.presets[presetPick.currentIndex]
-        if (!item)
-            return
-        if (item.include_timestamps !== undefined)
-            root.exportTimestamps = Boolean(item.include_timestamps)
-        if (item.include_speakers !== undefined)
-            root.exportSpeakers = Boolean(item.include_speakers)
-        if (item.include_confidence !== undefined)
-            root.exportConfidence = Boolean(item.include_confidence)
-        if (item.include_review_flags !== undefined)
-            root.exportReviewFlags = Boolean(item.include_review_flags)
-        if (item.include_header !== undefined)
-            root.exportHeader = Boolean(item.include_header)
-        if (item.include_phrase_numbers !== undefined)
-            root.exportPhraseNumbers = Boolean(item.include_phrase_numbers)
-    }
-
-    function exportOptions() {
-        return {
-            include_timestamps: root.exportTimestamps,
-            include_speakers: root.exportSpeakers,
-            include_confidence: root.exportConfidence,
-            include_review_flags: root.exportReviewFlags,
-            include_header: root.exportHeader,
-            include_phrase_numbers: root.exportPhraseNumbers
-        }
-    }
 
     radius: Theme.radiusLg
     color: Theme.surface
@@ -176,24 +139,15 @@ Rectangle {
                 font.pixelSize: Theme.fsLabel
                 verticalAlignment: Text.AlignVCenter
             }
-            Dropdown {
-                id: presetPick
-                width: Math.min(260, Math.max(180, col.width * 0.4))
-                enabled: !root.busy
-                model: root.presets
-                textRole: "label"
-                onCurrentIndexChanged: root.syncExportFromPreset()
-                Component.onCompleted: root.syncExportFromPreset()
-            }
+            // Один путь сохранения на страницу: окно с форматами и
+            // предпросмотром. Прежние пресеты стали видами файла в нём.
             PillButton {
-                text: "Сохранить пресет…"
+                text: "Сохранить…"
                 primary: true
-                enabled: !root.busy && root.presets.length > 0
-                onClicked: {
-                    var item = root.presets[presetPick.currentIndex]
-                    if (item)
-                        root.exportPresetRequested(String(item.key), root.exportOptions())
-                }
+                enabled: !root.busy
+                onClicked: root.exportRequested()
+                ToolTip.visible: hovered
+                ToolTip.text: "Формат файла, таймкоды, предпросмотр"
             }
             ToggleSwitch {
                 text: "Только проблемные"

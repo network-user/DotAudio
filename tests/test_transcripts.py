@@ -12,8 +12,10 @@ from dotaudio.transcripts import (
     blend_fragments,
     continues_sentence,
     export_transcript,
+    format_time,
     join_fragments,
     match_keywords,
+    quantise_seconds,
     regroup_for_subtitles,
     sentence_open,
     split_caption_window,
@@ -90,6 +92,39 @@ def test_exports_use_expected_timestamp_formats() -> None:
     assert "00:01:00.000 --> 00:01:01.500" in vtt
     assert export_transcript(SEGMENTS, "txt") == "Привет, мир\nВторая строка"
     assert json.loads(export_transcript(SEGMENTS, "json")) == SEGMENTS
+
+
+def test_time_precision_rounds_and_carries_into_minutes() -> None:
+    assert format_time(16.084, precision="seconds") == "00:16"
+    assert format_time(16.084, precision="tenths") == "00:16.1"
+    assert format_time(16.084, precision="hundredths") == "00:16.08"
+    assert format_time(16.084, precision="millis") == "00:16.084"
+    # Округление вверх переносится в минуты, а не даёт «00:60».
+    assert format_time(59.96, precision="tenths") == "01:00.0"
+    # Часы: только при нужде, всегда или никогда - минуты продолжают счёт.
+    assert format_time(3616.4, precision="seconds") == "01:00:16"
+    assert format_time(16.4, precision="seconds", hours="always") == "00:00:16"
+    assert format_time(3616.4, precision="seconds", hours="never") == "60:16"
+    assert quantise_seconds(16.084, "seconds") == 16.0
+    with pytest.raises(ValueError):
+        format_time(-0.5)
+    with pytest.raises(ValueError):
+        format_time(1.0, precision="nanoseconds")
+
+
+def test_text_export_follows_requested_time_precision() -> None:
+    rows = [{"start": 16.084, "end": 20.116, "text": "фраза"}]
+    assert export_transcript(
+        rows,
+        "txt",
+        include_timestamps=True,
+        time_precision="seconds",
+        time_mode="range",
+        time_hours="auto",
+    ) == "[00:16 - 00:20] фраза"
+    # Субтитрам миллисекунды нужны всегда, огрубление только округляет время.
+    srt = export_transcript(rows, "srt", time_precision="seconds")
+    assert "00:00:16,000 --> 00:00:20,000" in srt
 
 
 def test_export_filters_timestamps_speakers_and_markdown() -> None:

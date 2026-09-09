@@ -6,11 +6,15 @@ them directly.
 
 from __future__ import annotations
 
+import csv
+import io
 import math
 import re
 from copy import deepcopy
 from difflib import SequenceMatcher
 from typing import Any
+
+from dotaudio.transcripts import TIME_PRECISION_DIGITS, format_time
 
 # Lower confidence → "needs review". Mapped from Whisper avg_logprob.
 LOW_CONFIDENCE = 0.55
@@ -94,6 +98,618 @@ _OPTION_KEYS = (
     "include_header",
     "include_phrase_numbers",
 )
+
+# Каталог видов файла. `times: "locked"` - формат не существует без
+# таймкодов, переключатель в окне сохранения выключен. `precision` -
+# точность, которую формат требует и не отдаёт пользователю.
+EXPORT_FORMATS: tuple[dict[str, Any], ...] = (
+    {
+        "key": "txt",
+        "ext": "txt",
+        "label": "TXT · простой текст",
+        "hint": "Фраза в строке. Годится для чтения и правки в любом редакторе.",
+        "filter": "Текст (*.txt)",
+        "times": "optional",
+        "speakers": True,
+        "header": True,
+        "numbers": True,
+        "layout": False,
+        "notes": True,
+        "subtitles": False,
+        "table": False,
+    },
+    {
+        "key": "line",
+        "ext": "txt",
+        "label": "Строка · время, голос, текст",
+        "hint": "00:16 - 00:20 [Диктор 2] текст. Разделители и вид имени настраиваются.",
+        "filter": "Текст (*.txt)",
+        "times": "optional",
+        "speakers": True,
+        "header": False,
+        "numbers": True,
+        "layout": True,
+        "notes": True,
+        "subtitles": False,
+        "table": False,
+    },
+    {
+        "key": "protocol",
+        "ext": "txt",
+        "label": "Реплики · по ролям",
+        "hint": "Имя голоса строкой, под ним реплика. Читается как пьеса.",
+        "filter": "Текст (*.txt)",
+        "times": "optional",
+        "speakers": True,
+        "header": False,
+        "numbers": False,
+        "layout": False,
+        "notes": True,
+        "subtitles": False,
+        "table": False,
+    },
+    {
+        "key": "court",
+        "ext": "txt",
+        "label": "Протокол · суд и заседание",
+        "hint": "Формальный документ: шапка, номера фраз, говорящие, отметки проверки.",
+        "filter": "Текст (*.txt)",
+        "times": "optional",
+        "speakers": True,
+        "header": True,
+        "numbers": True,
+        "layout": False,
+        "notes": True,
+        "subtitles": False,
+        "table": False,
+    },
+    {
+        "key": "md",
+        "ext": "md",
+        "label": "MD · Markdown",
+        "hint": "Заголовки говорящих и таймкоды кодом. Для заметок и статей.",
+        "filter": "Markdown (*.md)",
+        "times": "optional",
+        "speakers": True,
+        "header": True,
+        "numbers": True,
+        "layout": False,
+        "notes": True,
+        "subtitles": False,
+        "table": False,
+    },
+    {
+        "key": "srt",
+        "ext": "srt",
+        "label": "SRT · субтитры",
+        "hint": "Реплики режутся под строку субтитра. Миллисекунды обязательны.",
+        "filter": "Субтитры SRT (*.srt)",
+        "times": "locked",
+        "precision": "millis",
+        "speakers": True,
+        "header": False,
+        "numbers": False,
+        "layout": False,
+        "notes": True,
+        "subtitles": True,
+        "table": False,
+    },
+    {
+        "key": "vtt",
+        "ext": "vtt",
+        "label": "VTT · веб-субтитры",
+        "hint": "То же, что SRT, но для браузера и HTML5-плеера.",
+        "filter": "Субтитры VTT (*.vtt)",
+        "times": "locked",
+        "precision": "millis",
+        "speakers": True,
+        "header": False,
+        "numbers": False,
+        "layout": False,
+        "notes": True,
+        "subtitles": True,
+        "table": False,
+    },
+    {
+        "key": "csv",
+        "ext": "csv",
+        "label": "CSV · таблица",
+        "hint": "Колонки для Excel и обработки: время, голос, текст, уверенность.",
+        "filter": "Таблица CSV (*.csv)",
+        "times": "optional",
+        "speakers": True,
+        "header": True,
+        "numbers": True,
+        "layout": False,
+        "notes": True,
+        "subtitles": False,
+        "table": True,
+    },
+    {
+        "key": "json",
+        "ext": "json",
+        "label": "JSON · данные",
+        "hint": "Полные поля со словами: для своих скриптов и пайплайнов.",
+        "filter": "JSON (*.json)",
+        "times": "optional",
+        "speakers": True,
+        "header": False,
+        "numbers": False,
+        "layout": False,
+        "notes": True,
+        "subtitles": False,
+        "table": False,
+    },
+    {
+        "key": "lrc",
+        "ext": "lrc",
+        "label": "LRC · для плеера",
+        "hint": "Текст с таймкодом строки: плееры и караоке. Точность - сотые.",
+        "filter": "Текст песни LRC (*.lrc)",
+        "times": "locked",
+        "precision": "hundredths",
+        "speakers": True,
+        "header": True,
+        "numbers": False,
+        "layout": False,
+        "notes": False,
+        "subtitles": False,
+        "table": False,
+    },
+)
+
+EXPORT_FORMAT_KEYS = tuple(item["key"] for item in EXPORT_FORMATS)
+
+# Точность таймкода. Пользователь просил не сыпать миллисекундами в тексте,
+# поэтому по умолчанию целые секунды; субтитры получают свою точность сами.
+TIME_PRECISION_LABELS = {
+    "seconds": "Секунды · 00:16",
+    "tenths": "Десятые · 00:16.1",
+    "hundredths": "Сотые · 00:16.08",
+    "millis": "Миллисекунды · 00:16.080",
+}
+
+TIME_MODE_LABELS = {
+    "range": "Начало и конец",
+    "start": "Только начало",
+    "none": "Без времени в строке",
+}
+
+TIME_HOURS_LABELS = {
+    "auto": "Часы, когда нужны",
+    "always": "Всегда часы · 00:00:16",
+    "never": "Без часов · 75:20",
+}
+
+# Разделитель между полями строки: время, голос, текст.
+FIELD_SEPARATORS = {
+    "space": " ",
+    "dash": " - ",
+    "pipe": " | ",
+    "colon": ":",
+    "colon_space": ": ",
+    "middot": " · ",
+    "tab": "\t",
+}
+
+FIELD_SEPARATOR_LABELS = {
+    "space": "Пробел",
+    "dash": "Тире · время - голос - текст",
+    "pipe": "Вертикальная черта",
+    "colon": "Двоеточие · время:голос:текст",
+    "colon_space": "Двоеточие с пробелом",
+    "middot": "Точка по центру",
+    "tab": "Табуляция",
+}
+
+# Разделитель начала и конца внутри таймкода.
+RANGE_SEPARATORS = {
+    "dash": " - ",
+    "arrow": " --> ",
+    "comma": ", ",
+    "space": " ",
+    "slash": " / ",
+}
+
+RANGE_SEPARATOR_LABELS = {
+    "dash": "00:16 - 00:20",
+    "arrow": "00:16 --> 00:20",
+    "comma": "00:16, 00:20",
+    "space": "00:16 00:20",
+    "slash": "00:16 / 00:20",
+}
+
+SPEAKER_STYLE_LABELS = {
+    "bracket": "[Диктор 2]",
+    "angle": "<Диктор 2>",
+    "paren": "(Диктор 2)",
+    "colon": "Диктор 2:",
+    "plain": "Диктор 2",
+    "none": "Без имени",
+}
+
+CSV_DELIMITERS = {"comma": ",", "semicolon": ";", "tab": "\t"}
+
+CSV_DELIMITER_LABELS = {
+    "comma": "Запятая",
+    "semicolon": "Точка с запятой · Excel RU",
+    "tab": "Табуляция",
+}
+
+_BOOL_OPTIONS: dict[str, bool] = {
+    "include_timestamps": False,
+    "include_speakers": True,
+    "include_confidence": False,
+    "include_review_flags": False,
+    "include_header": False,
+    "include_phrase_numbers": False,
+    "only_flagged": False,
+    "speaker_once": False,
+    "merge_turns": False,
+    "blank_between": False,
+    "skip_empty": True,
+    "include_duration": False,
+    "csv_bom": True,
+}
+
+_ENUM_OPTIONS: dict[str, tuple[dict[str, Any], str]] = {
+    "time_precision": (TIME_PRECISION_DIGITS, "seconds"),
+    "time_mode": (TIME_MODE_LABELS, "range"),
+    "time_hours": (TIME_HOURS_LABELS, "auto"),
+    "field_separator": (FIELD_SEPARATORS, "space"),
+    "range_separator": (RANGE_SEPARATORS, "dash"),
+    "speaker_style": (SPEAKER_STYLE_LABELS, "bracket"),
+    "csv_delimiter": (CSV_DELIMITERS, "comma"),
+}
+
+SUBTITLE_CHAR_LIMITS = (24, 200)
+SUBTITLE_DURATION_LIMITS = (1.0, 30.0)
+
+
+def export_format(key: str) -> dict[str, Any]:
+    """Metadata of one file kind; unknown keys fall back to TXT."""
+
+    want = str(key or "txt").strip().lower()
+    for item in EXPORT_FORMATS:
+        if item["key"] == want:
+            return dict(item)
+    return dict(EXPORT_FORMATS[0])
+
+
+def export_format_list() -> list[dict[str, Any]]:
+    """Catalogue for the save dialog: label, hint and what the format allows."""
+
+    return [dict(item) for item in EXPORT_FORMATS]
+
+
+def export_option_choices() -> dict[str, list[dict[str, str]]]:
+    """Dropdown contents for the save dialog, keyed by option name."""
+
+    def rows(labels: dict[str, str]) -> list[dict[str, str]]:
+        return [{"key": key, "label": label} for key, label in labels.items()]
+
+    return {
+        "time_precision": rows(TIME_PRECISION_LABELS),
+        "time_mode": rows(TIME_MODE_LABELS),
+        "time_hours": rows(TIME_HOURS_LABELS),
+        "field_separator": rows(FIELD_SEPARATOR_LABELS),
+        "range_separator": rows(RANGE_SEPARATOR_LABELS),
+        "speaker_style": rows(SPEAKER_STYLE_LABELS),
+        "csv_delimiter": rows(CSV_DELIMITER_LABELS),
+    }
+
+
+def normalise_export_options(options: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Validate and complete the save options coming from the UI or settings.
+
+    Every renderer reads the result, so an unknown value never reaches a
+    document: it falls back to the default. Formats that cannot exist without
+    timings get them forced on, together with the precision they require.
+    """
+
+    raw = dict(options or {})
+    fmt = str(raw.get("format") or "txt").strip().lower()
+    if fmt not in EXPORT_FORMAT_KEYS:
+        raise ValueError(f"unsupported transcript format: {fmt}")
+    meta = export_format(fmt)
+    opts: dict[str, Any] = {"format": fmt}
+    for name, fallback in _BOOL_OPTIONS.items():
+        value = raw.get(name, fallback)
+        opts[name] = bool(value)
+    for name, (allowed, fallback) in _ENUM_OPTIONS.items():
+        value = str(raw.get(name, fallback) or fallback).strip().lower()
+        opts[name] = value if value in allowed else fallback
+
+    if meta["times"] == "locked":
+        opts["include_timestamps"] = True
+    forced = meta.get("precision")
+    if forced:
+        opts["time_precision"] = str(forced)
+    if not opts["include_timestamps"]:
+        opts["time_mode"] = "none"
+    elif opts["time_mode"] == "none":
+        opts["time_mode"] = "start"
+
+    try:
+        speaker_key = int(raw.get("speaker_key") or 0)
+    except (TypeError, ValueError):
+        speaker_key = 0
+    opts["speaker_key"] = max(0, speaker_key)
+
+    low, high = SUBTITLE_CHAR_LIMITS
+    try:
+        chars = int(raw.get("subtitle_max_chars", 42))
+    except (TypeError, ValueError):
+        chars = 42
+    opts["subtitle_max_chars"] = max(low, min(high, chars))
+    low_d, high_d = SUBTITLE_DURATION_LIMITS
+    try:
+        span = float(raw.get("subtitle_max_duration", 6.0))
+    except (TypeError, ValueError):
+        span = 6.0
+    if not math.isfinite(span):
+        span = 6.0
+    opts["subtitle_max_duration"] = round(max(low_d, min(high_d, span)), 2)
+
+    for name in ("title", "source", "model"):
+        opts[name] = str(raw.get(name) or "")
+
+    opts["ext"] = str(meta["ext"])
+    opts["label"] = str(meta["label"])
+    opts["filter"] = str(meta["filter"])
+    # Excel читает кириллицу в CSV только с BOM; остальные форматы - чистый UTF-8.
+    opts["encoding"] = (
+        "utf-8-sig" if fmt == "csv" and opts["csv_bom"] else "utf-8"
+    )
+    return opts
+
+
+def _stamp_options(
+    precision: str = "millis",
+    mode: str = "range",
+    hours: str = "auto",
+    separator: str = "dash",
+) -> dict[str, Any]:
+    """Minimal option set that ``_time_token`` needs, with safe fallbacks."""
+
+    return {
+        "time_precision": (
+            precision if precision in TIME_PRECISION_DIGITS else "millis"
+        ),
+        "time_mode": mode if mode in TIME_MODE_LABELS else "range",
+        "time_hours": hours if hours in TIME_HOURS_LABELS else "auto",
+        "range_separator": separator if separator in RANGE_SEPARATORS else "dash",
+    }
+
+
+def _time_token(row: dict[str, Any], opts: dict[str, Any]) -> str:
+    mode = str(opts["time_mode"])
+    if mode == "none":
+        return ""
+    start = float(row.get("start", 0.0))
+    head = format_time(
+        start,
+        precision=str(opts["time_precision"]),
+        hours=str(opts["time_hours"]),
+    )
+    if mode != "range":
+        return head
+    end = float(row.get("end", start))
+    tail = format_time(
+        max(start, end),
+        precision=str(opts["time_precision"]),
+        hours=str(opts["time_hours"]),
+    )
+    return f"{head}{RANGE_SEPARATORS[str(opts['range_separator'])]}{tail}"
+
+
+def _speaker_token(name: str, style: str) -> str:
+    label = str(name or "").strip()
+    if not label or style == "none":
+        return ""
+    if style == "bracket":
+        return f"[{label}]"
+    if style == "angle":
+        return f"<{label}>"
+    if style == "paren":
+        return f"({label})"
+    if style == "colon":
+        return f"{label}:"
+    return label
+
+
+def merge_speaker_turns(
+    segments: list[dict[str, Any]],
+    *,
+    max_gap: float | None = None,
+) -> list[dict[str, Any]]:
+    """Join neighbouring phrases of one speaker into a single turn.
+
+    A turn keeps the first start and the last end; confidence drops to the
+    weakest known value, because the whole turn is only as reliable as its
+    worst phrase.
+    """
+
+    rows: list[dict[str, Any]] = []
+    for row in segments or []:
+        item = dict(row)
+        if not rows:
+            rows.append(item)
+            continue
+        previous = rows[-1]
+        same_voice = str(previous.get("speaker") or "").strip() == str(
+            item.get("speaker") or ""
+        ).strip() and int(previous.get("role") or 0) == int(item.get("role") or 0)
+        gap = float(item.get("start", 0.0)) - float(previous.get("end", 0.0))
+        if not same_voice or (max_gap is not None and gap > float(max_gap)):
+            rows.append(item)
+            continue
+        text = " ".join(
+            part
+            for part in (
+                str(previous.get("text") or "").strip(),
+                str(item.get("text") or "").strip(),
+            )
+            if part
+        )
+        left = segment_confidence(previous)
+        right = segment_confidence(item)
+        if left >= 0 and right >= 0:
+            confidence = min(left, right)
+        else:
+            confidence = left if left >= 0 else right
+        previous.update(
+            {
+                "end": max(float(previous.get("end", 0.0)), float(item.get("end", 0.0))),
+                "text": text,
+                "words": list(previous.get("words") or []) + list(item.get("words") or []),
+                "confidence": confidence,
+                "reviewed": bool(previous.get("reviewed")) and bool(item.get("reviewed")),
+            }
+        )
+    return rows
+
+
+def line_document(
+    segments: list[dict[str, Any]],
+    options: dict[str, Any] | None = None,
+) -> str:
+    """One phrase per line: time, speaker and text joined by chosen separators."""
+
+    opts = normalise_export_options({**(options or {}), "format": "line"})
+    joiner = FIELD_SEPARATORS[str(opts["field_separator"])]
+    style = str(opts["speaker_style"])
+    lines: list[str] = []
+    previous_speaker: str | None = None
+    for index, row in enumerate(segments, start=1):
+        text = str(row.get("text") or "").strip()
+        if not text and opts["skip_empty"]:
+            previous_speaker = None
+            continue
+        speaker = str(row.get("speaker") or "").strip()
+        show_speaker = bool(opts["include_speakers"])
+        if show_speaker and opts["speaker_once"] and speaker == previous_speaker:
+            show_speaker = False
+        fields: list[str] = []
+        if opts["include_phrase_numbers"]:
+            fields.append(f"{index}.")
+        stamp = _time_token(row, opts)
+        if stamp:
+            fields.append(stamp)
+        if opts["include_duration"]:
+            span = max(0.0, float(row.get("end", 0.0)) - float(row.get("start", 0.0)))
+            fields.append(f"({span:.1f} с)")
+        if show_speaker:
+            token = _speaker_token(speaker, style)
+            if token:
+                fields.append(token)
+        fields.append(
+            _annotate_text(
+                text,
+                row,
+                include_confidence=bool(opts["include_confidence"]),
+                include_review_flags=bool(opts["include_review_flags"]),
+            )
+        )
+        lines.append(joiner.join(field for field in fields if field))
+        if opts["blank_between"]:
+            lines.append("")
+        previous_speaker = speaker
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def table_document(
+    segments: list[dict[str, Any]],
+    options: dict[str, Any] | None = None,
+) -> str:
+    """CSV/TSV rows for spreadsheets: only the requested columns appear."""
+
+    opts = normalise_export_options({**(options or {}), "format": "csv"})
+    delimiter = CSV_DELIMITERS[str(opts["csv_delimiter"])]
+    columns: list[str] = []
+    if opts["include_phrase_numbers"]:
+        columns.append("№")
+    if opts["include_timestamps"]:
+        columns.append("начало")
+        if str(opts["time_mode"]) == "range":
+            columns.append("конец")
+    if opts["include_duration"]:
+        columns.append("длительность")
+    if opts["include_speakers"]:
+        columns.append("голос")
+    columns.append("текст")
+    if opts["include_confidence"]:
+        columns.append("уверенность")
+    if opts["include_review_flags"]:
+        columns.append("проверено")
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, delimiter=delimiter, lineterminator="\n")
+    if opts["include_header"]:
+        writer.writerow(columns)
+    precision = str(opts["time_precision"])
+    hours = str(opts["time_hours"])
+    for index, row in enumerate(segments, start=1):
+        text = str(row.get("text") or "").strip()
+        if not text and opts["skip_empty"]:
+            continue
+        start = float(row.get("start", 0.0))
+        end = max(start, float(row.get("end", start)))
+        cells: list[str] = []
+        if opts["include_phrase_numbers"]:
+            cells.append(str(index))
+        if opts["include_timestamps"]:
+            cells.append(format_time(start, precision=precision, hours=hours))
+            if str(opts["time_mode"]) == "range":
+                cells.append(format_time(end, precision=precision, hours=hours))
+        if opts["include_duration"]:
+            cells.append(f"{end - start:.2f}")
+        if opts["include_speakers"]:
+            cells.append(str(row.get("speaker") or "").strip())
+        cells.append(text)
+        if opts["include_confidence"]:
+            score = segment_confidence(row)
+            cells.append("" if score < 0 else f"{score:.3f}")
+        if opts["include_review_flags"]:
+            flagged = needs_review(row) and not bool(row.get("reviewed"))
+            cells.append("нет" if flagged else "да")
+        writer.writerow(cells)
+    return buffer.getvalue()
+
+
+def lrc_document(
+    segments: list[dict[str, Any]],
+    options: dict[str, Any] | None = None,
+) -> str:
+    """Lyrics timing file: ``[mm:ss.xx]`` and the phrase, as players expect."""
+
+    opts = normalise_export_options({**(options or {}), "format": "lrc"})
+    lines: list[str] = []
+    if opts["include_header"]:
+        title = str(opts.get("title") or "").strip()
+        if title:
+            lines.append(f"[ti:{title}]")
+        model = str(opts.get("model") or "").strip()
+        if model:
+            lines.append(f"[re:DotAudio Whisper {model}]")
+    style = str(opts["speaker_style"])
+    for row in segments:
+        text = str(row.get("text") or "").strip()
+        if not text and opts["skip_empty"]:
+            continue
+        # Плееры читают только mm:ss.xx без часов, длинная запись копит минуты.
+        stamp = format_time(
+            float(row.get("start", 0.0)), precision="hundredths", hours="never"
+        )
+        body = text
+        if opts["include_speakers"]:
+            token = _speaker_token(str(row.get("speaker") or ""), style)
+            if token:
+                body = f"{token} {text}".strip()
+        lines.append(f"[{stamp}]{body}")
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def resolve_export_options(
@@ -402,9 +1018,14 @@ def court_document(
     include_review_flags: bool = True,
     include_header: bool = True,
     include_phrase_numbers: bool = True,
+    time_precision: str = "millis",
+    time_mode: str = "range",
+    time_hours: str = "auto",
+    range_separator: str = "dash",
 ) -> str:
     """Formal transcript for court / hearing protocol use."""
 
+    stamp = _stamp_options(time_precision, time_mode, time_hours, range_separator)
     lines: list[str] = []
     if include_header:
         lines.extend(["ПРОТОКОЛ РАСШИФРОВКИ АУДИОЗАПИСИ", ""])
@@ -433,7 +1054,8 @@ def court_document(
         if include_phrase_numbers:
             head_parts.append(f"{index}.")
         if include_timestamps:
-            head_parts.append(_fmt_range(start, end))
+            head_parts.append(_time_token({"start": start, "end": end}, stamp))
+        head_parts = [part for part in head_parts if part]
         if head_parts:
             lines.append(" ".join(head_parts))
         flag = ""
@@ -460,9 +1082,14 @@ def protocol_document(
     include_speakers: bool = True,
     include_confidence: bool = False,
     include_review_flags: bool = False,
+    time_precision: str = "millis",
+    time_mode: str = "range",
+    time_hours: str = "auto",
+    range_separator: str = "dash",
 ) -> str:
     """Speaker-labelled protocol; optional timestamps and confidence notes."""
 
+    stamp = _stamp_options(time_precision, time_mode, time_hours, range_separator)
     blocks: list[str] = []
     previous = None
     for row in segments:
@@ -472,12 +1099,13 @@ def protocol_document(
             continue
         notes: list[str] = []
         if include_timestamps:
-            notes.append(_fmt_range(float(row.get("start", 0.0)), float(row.get("end", 0.0))))
+            notes.append(_time_token(row, stamp))
         conf = segment_confidence(row)
         if include_review_flags and needs_review(row) and not row.get("reviewed"):
             notes.append("на проверку")
         elif include_confidence and conf >= 0:
             notes.append(f"{conf:.0%}")
+        notes = [note for note in notes if note]
         suffix = f" ({'; '.join(notes)})" if notes else ""
         if include_speakers:
             if speaker != previous:
@@ -526,6 +1154,25 @@ def filter_export_rows(
     return rows
 
 
+def export_rows(
+    segments: list[dict[str, Any]],
+    options: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Phrases the current options actually save, after filters and merging."""
+
+    opts = normalise_export_options(options)
+    rows = filter_export_rows(
+        list(segments or []),
+        speaker_key=int(opts["speaker_key"]),
+        only_flagged=bool(opts["only_flagged"]),
+    )
+    if opts["skip_empty"]:
+        rows = [row for row in rows if str(row.get("text") or "").strip()]
+    if opts["merge_turns"]:
+        rows = merge_speaker_turns(rows)
+    return rows
+
+
 def formatted_document(
     segments: list[dict[str, Any]],
     *,
@@ -538,10 +1185,22 @@ def formatted_document(
     include_review_flags: bool = False,
     include_header: bool = True,
     include_phrase_numbers: bool = True,
+    time_precision: str = "millis",
+    time_mode: str = "range",
+    time_hours: str = "auto",
+    range_separator: str = "dash",
 ) -> str:
     """Readable TXT/MD dump driven by the same save toggles as the preview."""
 
     kind = str(fmt or "txt").strip().lower()
+    stamp_options = {
+        "time_mode": str(time_mode),
+        "time_precision": str(time_precision),
+        "time_hours": str(time_hours),
+        "range_separator": (
+            range_separator if range_separator in RANGE_SEPARATORS else "dash"
+        ),
+    }
     lines: list[str] = []
     if include_header:
         if kind == "md":
@@ -577,8 +1236,8 @@ def formatted_document(
         if include_phrase_numbers:
             head_parts.append(f"{index}.")
         if include_timestamps:
-            head_parts.append(_fmt_range(start, end))
-        head = " ".join(head_parts)
+            head_parts.append(_time_token({"start": start, "end": end}, stamp_options))
+        head = " ".join(part for part in head_parts if part)
         if kind == "md":
             who = f"**{speaker}.** " if include_speakers and speaker else ""
             prefix = f"{head} " if head else ""
@@ -603,31 +1262,69 @@ def render_export(
 ) -> tuple[str, str]:
     """Build the saved document from format + filter toggles.
 
-    Returns ``(text, format_ext)``. Empty text means no phrases matched.
+    Returns ``(text, file_extension)``. Empty text means no phrases matched.
     """
 
     from dotaudio.transcripts import export_transcript, regroup_for_subtitles
 
-    opts = dict(options or {})
-    fmt = str(opts.get("format") or "txt").strip().lower()
-    if fmt not in ("txt", "md", "srt", "vtt", "json"):
-        raise ValueError(f"unsupported transcript format: {fmt}")
-    rows = filter_export_rows(
-        list(segments or []),
-        speaker_key=int(opts.get("speaker_key") or 0),
-        only_flagged=bool(opts.get("only_flagged")),
-    )
+    opts = normalise_export_options(options)
+    fmt = str(opts["format"])
+    ext = str(opts["ext"])
+    rows = export_rows(segments, opts)
     if not rows:
-        return "", fmt
+        return "", ext
 
-    with_times = bool(opts.get("include_timestamps"))
-    with_speakers = bool(opts.get("include_speakers"))
-    with_conf = bool(opts.get("include_confidence"))
-    with_flags = bool(opts.get("include_review_flags"))
-    with_header = bool(opts.get("include_header"))
-    with_numbers = bool(opts.get("include_phrase_numbers"))
-    if fmt in ("srt", "vtt"):
-        with_times = True
+    with_times = bool(opts["include_timestamps"])
+    with_speakers = bool(opts["include_speakers"])
+    with_conf = bool(opts["include_confidence"])
+    with_flags = bool(opts["include_review_flags"])
+    with_header = bool(opts["include_header"])
+    with_numbers = bool(opts["include_phrase_numbers"])
+    precision = str(opts["time_precision"])
+    time_mode = str(opts["time_mode"])
+    time_hours = str(opts["time_hours"])
+
+    if fmt == "line":
+        return line_document(rows, opts), ext
+    if fmt == "csv":
+        return table_document(rows, opts), ext
+    if fmt == "lrc":
+        return lrc_document(rows, opts), ext
+    if fmt == "court":
+        return (
+            court_document(
+                rows,
+                title=str(opts.get("title") or ""),
+                source=str(opts.get("source") or ""),
+                model=str(opts.get("model") or ""),
+                include_timestamps=with_times,
+                include_speakers=with_speakers,
+                include_confidence=with_conf,
+                include_review_flags=with_flags,
+                include_header=with_header,
+                include_phrase_numbers=with_numbers,
+                time_precision=precision,
+                time_mode=time_mode,
+                time_hours=time_hours,
+                range_separator=str(opts["range_separator"]),
+            ),
+            ext,
+        )
+    if fmt == "protocol":
+        return (
+            protocol_document(
+                rows,
+                include_timestamps=with_times,
+                include_speakers=with_speakers,
+                include_confidence=with_conf,
+                include_review_flags=with_flags,
+                time_precision=precision,
+                time_mode=time_mode,
+                time_hours=time_hours,
+                range_separator=str(opts["range_separator"]),
+            ),
+            ext,
+        )
 
     if fmt in ("txt", "md") and (with_header or with_numbers):
         return (
@@ -642,12 +1339,20 @@ def render_export(
                 include_review_flags=with_flags,
                 include_header=with_header,
                 include_phrase_numbers=with_numbers,
+                time_precision=precision,
+                time_mode=time_mode,
+                time_hours=time_hours,
+                range_separator=str(opts["range_separator"]),
             ),
-            fmt,
+            ext,
         )
 
     if fmt in ("srt", "vtt"):
-        cues = regroup_for_subtitles(rows)
+        cues = regroup_for_subtitles(
+            rows,
+            max_chars=int(opts["subtitle_max_chars"]),
+            max_duration=float(opts["subtitle_max_duration"]),
+        )
         enriched: list[dict[str, Any]] = []
         for cue in cues:
             mid = (float(cue["start"]) + float(cue["end"])) / 2.0
@@ -672,8 +1377,9 @@ def render_export(
                 fmt,
                 include_timestamps=True,
                 include_speakers=with_speakers,
+                time_precision=precision,
             ),
-            fmt,
+            ext,
         )
 
     annotated = []
@@ -695,8 +1401,12 @@ def render_export(
             include_speakers=with_speakers,
             include_confidence=with_conf if fmt == "json" else False,
             include_review_flags=with_flags if fmt == "json" else False,
+            time_precision=precision,
+            time_mode=time_mode,
+            time_hours=time_hours,
+            range_join=RANGE_SEPARATORS[str(opts["range_separator"])],
         ),
-        fmt,
+        ext,
     )
 
 
@@ -849,20 +1559,6 @@ def serialize_compare_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _fmt_range(start: float, end: float) -> str:
-    return f"{_fmt_ts(start)} - {_fmt_ts(end)}"
-
-
-def _fmt_ts(seconds: float) -> str:
-    total_ms = int(math.floor(max(0.0, float(seconds)) * 1000 + 0.5))
-    hours, rem = divmod(total_ms, 3_600_000)
-    minutes, rem = divmod(rem, 60_000)
-    secs, ms = divmod(rem, 1000)
-    if hours:
-        return f"{hours:02d}:{minutes:02d}:{secs:02d}.{ms:03d}"
-    return f"{minutes:02d}:{secs:02d}.{ms:03d}"
-
-
 def preset_list() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for key, meta in EXPORT_PRESETS.items():
@@ -874,6 +1570,8 @@ def preset_list() -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "EXPORT_FORMATS",
+    "EXPORT_FORMAT_KEYS",
     "EXPORT_PRESETS",
     "LOW_CONFIDENCE",
     "WARN_CONFIDENCE",
@@ -881,12 +1579,20 @@ __all__ = [
     "confidence_from_logprob",
     "court_document",
     "diff_transcripts",
+    "export_format",
+    "export_format_list",
+    "export_option_choices",
+    "export_rows",
     "export_with_preset",
     "filter_problematic",
     "find_replace",
+    "line_document",
+    "lrc_document",
     "mark_reviewed",
     "merge_segments",
+    "merge_speaker_turns",
     "needs_review",
+    "normalise_export_options",
     "preset_defaults",
     "preset_list",
     "protocol_document",
@@ -896,4 +1602,5 @@ __all__ = [
     "serialize_compare_report",
     "set_phrase_window",
     "split_segment",
+    "table_document",
 ]

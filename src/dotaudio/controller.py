@@ -48,12 +48,17 @@ from dotaudio.speaker_labels import (
 )
 from dotaudio.storage import Store
 from dotaudio.transcript_pro import (
+    EXPORT_FORMAT_KEYS,
     apply_dictionary,
     diff_transcripts,
+    export_format_list,
+    export_option_choices,
+    export_rows,
     export_with_preset,
     find_replace,
     mark_reviewed,
     merge_segments,
+    normalise_export_options,
     preset_list,
     quality_stats,
     render_export,
@@ -187,6 +192,51 @@ DEFAULTS = {
     "export_header": False,
     "export_phrase_numbers": False,
     "export_flagged_only": False,
+    # Вид таймкода в сохранённом файле. Миллисекунды в читаемом тексте мешают,
+    # поэтому по умолчанию целые секунды; субтитрам точность задаёт формат.
+    "export_time_precision": "seconds",
+    "export_time_mode": "range",
+    "export_time_hours": "auto",
+    "export_range_separator": "dash",
+    "export_field_separator": "space",
+    "export_speaker_style": "bracket",
+    "export_speaker_once": False,
+    "export_merge_turns": False,
+    "export_blank_between": False,
+    "export_skip_empty": True,
+    "export_duration": False,
+    "export_csv_delimiter": "comma",
+    "export_csv_bom": True,
+    "export_subtitle_chars": 42,
+    "export_subtitle_seconds": 6.0,
+}
+
+# Настройка приложения -> ключ опции экспорта. Обе стороны читают только эту
+# таблицу, чтобы новый параметр не пришлось дописывать в трёх местах.
+EXPORT_SETTING_KEYS = {
+    "export_format": "format",
+    "export_timestamps": "include_timestamps",
+    "export_speakers": "include_speakers",
+    "export_confidence": "include_confidence",
+    "export_review_flags": "include_review_flags",
+    "export_header": "include_header",
+    "export_phrase_numbers": "include_phrase_numbers",
+    "export_flagged_only": "only_flagged",
+    "export_time_precision": "time_precision",
+    "export_time_mode": "time_mode",
+    "export_time_hours": "time_hours",
+    "export_range_separator": "range_separator",
+    "export_field_separator": "field_separator",
+    "export_speaker_style": "speaker_style",
+    "export_speaker_once": "speaker_once",
+    "export_merge_turns": "merge_turns",
+    "export_blank_between": "blank_between",
+    "export_skip_empty": "skip_empty",
+    "export_duration": "include_duration",
+    "export_csv_delimiter": "csv_delimiter",
+    "export_csv_bom": "csv_bom",
+    "export_subtitle_chars": "subtitle_max_chars",
+    "export_subtitle_seconds": "subtitle_max_duration",
 }
 
 # Подписи движков голосов для интерфейса и журнала.
@@ -5370,70 +5420,114 @@ class Controller(QObject):
                 self.store.update_segment(session_id, item_id, new_text)
 
     def _export_options_from_map(self, options=None) -> dict:
-        raw = dict(options or {})
-        fmt = str(raw.get("format") or self._settings.get("export_format") or "txt")
-        fmt = fmt.strip().lower()
-        if fmt not in ("txt", "md", "srt", "vtt", "json"):
-            fmt = "txt"
-        times = bool(raw.get("include_timestamps", self._settings.get("export_timestamps")))
-        if fmt in ("srt", "vtt"):
-            times = True
-        return {
-            "format": fmt,
-            "include_timestamps": times,
-            "include_speakers": bool(
-                raw.get("include_speakers", self._settings.get("export_speakers", True))
-            ),
-            "include_confidence": bool(
-                raw.get("include_confidence", self._settings.get("export_confidence"))
-            ),
-            "include_review_flags": bool(
-                raw.get("include_review_flags", self._settings.get("export_review_flags"))
-            ),
-            "include_header": bool(
-                raw.get("include_header", self._settings.get("export_header"))
-            ),
-            "include_phrase_numbers": bool(
-                raw.get("include_phrase_numbers", self._settings.get("export_phrase_numbers"))
-            ),
-            "speaker_key": int(raw.get("speaker_key") or 0),
-            "only_flagged": bool(raw.get("only_flagged", False)),
-            "title": str(self._trans_state.get("file") or ""),
-            "source": str(self._trans_state.get("path") or ""),
-            "model": str(self._settings.get("model") or ""),
+        """Слить сохранённые настройки с тем, что прислало окно сохранения."""
+
+        raw = {
+            option: self._settings.get(setting, DEFAULTS.get(setting))
+            for setting, option in EXPORT_SETTING_KEYS.items()
         }
+        for key, value in dict(options or {}).items():
+            if value is not None:
+                raw[str(key)] = value
+        raw.setdefault("format", "txt")
+        if str(raw.get("format") or "").strip().lower() not in EXPORT_FORMAT_KEYS:
+            raw["format"] = "txt"
+        opts = normalise_export_options(raw)
+        opts["title"] = str(self._trans_state.get("file") or "")
+        opts["source"] = str(self._trans_state.get("path") or "")
+        opts["model"] = str(self._settings.get("model") or "")
+        return opts
 
     def _persist_export_options(self, options: dict) -> None:
         mapping = {
-            "export_format": str(options.get("format") or "txt"),
-            "export_timestamps": bool(options.get("include_timestamps")),
-            "export_speakers": bool(options.get("include_speakers")),
-            "export_confidence": bool(options.get("include_confidence")),
-            "export_review_flags": bool(options.get("include_review_flags")),
-            "export_header": bool(options.get("include_header")),
-            "export_phrase_numbers": bool(options.get("include_phrase_numbers")),
-            "export_flagged_only": bool(options.get("only_flagged")),
+            setting: options[option]
+            for setting, option in EXPORT_SETTING_KEYS.items()
+            if option in options
         }
         self._settings.update(mapping)
         self.store.save_settings(self._settings)
 
-    @Slot("QVariantMap", result=str)
-    def transcriptExportPreview(self, options=None) -> str:
-        """Собрать текст файла по фильтрам, без диалога и без записи на диск."""
+    def _export_file_stem(self) -> str:
+        """Имя файла по имени записи, чтобы не сохранять всё как transcript."""
+
+        source = str(self._trans_state.get("path") or "")
+        title = str(self._trans_state.get("file") or "")
+        stem = Path(source).stem if source else Path(title).stem
+        cleaned = re.sub(r'[\\/:*?"<>|]+', "_", stem).strip(" ._")
+        return cleaned or "transcript"
+
+    @Property("QVariantList", notify=changed)
+    def transcriptExportFormats(self):
+        """Каталог видов файла: подпись, подсказка и что формат разрешает."""
+
+        return export_format_list()
+
+    @Property("QVariantMap", notify=changed)
+    def transcriptExportChoices(self):
+        """Содержимое выпадающих списков окна сохранения."""
+
+        return export_option_choices()
+
+    @Slot("QVariantMap", result="QVariantMap")
+    def transcriptExportInfo(self, options=None):
+        """Предпросмотр файла и его размер: без диалога и без записи на диск.
+
+        Считается по тем же правилам, что и сохранение, поэтому в окне видно
+        именно то, что попадёт в файл. Возвращает обрезанный для показа текст
+        и полные счётчики.
+        """
 
         segments = list(self._trans_state.get("segments") or [])
+        empty = {
+            "text": "",
+            "notice": "",
+            "lines": 0,
+            "chars": 0,
+            "phrases": 0,
+            "truncated": False,
+            "format": "txt",
+            "ext": "txt",
+            "filename": f"{self._export_file_stem()}.txt",
+        }
         if not segments:
-            return "Нет фраз для сохранения."
+            return {**empty, "notice": "Нет фраз для сохранения."}
         try:
-            text, _fmt = render_export(segments, self._export_options_from_map(options))
+            opts = self._export_options_from_map(options)
+            body, ext = render_export(segments, opts)
         except ValueError as exc:
-            return str(exc)
-        if not text.strip():
-            return "Нет фраз с выбранными фильтрами."
-        lines = text.splitlines()
-        if len(lines) > 28:
-            return "\n".join(lines[:28]) + "\n…"
-        return text
+            return {**empty, "notice": str(exc)}
+        info = {
+            "text": "",
+            "notice": "",
+            "lines": 0,
+            "chars": len(body),
+            "phrases": 0,
+            "truncated": False,
+            "format": str(opts["format"]),
+            "ext": ext,
+            "filename": f"{self._export_file_stem()}.{ext}",
+        }
+        if not body.strip():
+            return {**info, "notice": "Нет фраз с выбранными фильтрами."}
+        lines = body.splitlines()
+        limit = int((options or {}).get("preview_lines") or 200)
+        limit = max(10, min(2000, limit))
+        info["lines"] = len(lines)
+        info["phrases"] = len(export_rows(segments, opts))
+        if len(lines) > limit:
+            info["text"] = "\n".join(lines[:limit]) + "\n…"
+            info["truncated"] = True
+        else:
+            info["text"] = body
+        return info
+
+    @Slot("QVariantMap", result=str)
+    def transcriptExportPreview(self, options=None) -> str:
+        """Короткий предпросмотр строкой: остался для прежних вызовов из QML."""
+
+        info = self.transcriptExportInfo({**dict(options or {}), "preview_lines": 28})
+        notice = str(info.get("notice") or "")
+        return notice or str(info.get("text") or "")
 
     @Slot("QVariantMap")
     def transcriptExportWithOptions(self, options=None):
@@ -5442,9 +5536,9 @@ class Controller(QObject):
         segments = list(self._trans_state.get("segments") or [])
         if not segments:
             return
-        opts = self._export_options_from_map(options)
         try:
-            body, fmt = render_export(segments, opts)
+            opts = self._export_options_from_map(options)
+            body, ext = render_export(segments, opts)
         except ValueError as exc:
             self.transcribeStatus.emit(str(exc))
             self.transcribeChanged.emit()
@@ -5453,25 +5547,20 @@ class Controller(QObject):
             self.transcribeStatus.emit("Нет фраз с выбранными фильтрами.")
             self.transcribeChanged.emit()
             return
-        filters = {
-            "txt": "Текст (*.txt)",
-            "md": "Markdown (*.md)",
-            "srt": "Субтитры SRT (*.srt)",
-            "vtt": "Субтитры VTT (*.vtt)",
-            "json": "JSON (*.json)",
-        }
         path, _ = QFileDialog.getSaveFileName(
             None,
             "Сохранить транскрибацию",
-            f"transcript.{fmt}",
-            filters[fmt],
+            f"{self._export_file_stem()}.{ext}",
+            str(opts["filter"]),
         )
         if not path:
             return
-        if Path(path).suffix.lower() != f".{fmt}":
-            path = str(Path(path).with_suffix(f".{fmt}"))
+        if Path(path).suffix.lower() != f".{ext}":
+            path = str(Path(path).with_suffix(f".{ext}"))
         try:
-            Path(path).write_text(body, encoding="utf-8")
+            # CSV с кириллицей Excel открывает верно только с BOM; остальное
+            # пишется чистым UTF-8.
+            Path(path).write_text(body, encoding=str(opts["encoding"]))
         except OSError as exc:
             self.transcribeStatus.emit(f"Не удалось сохранить: {exc}")
             self.transcribeChanged.emit()

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import pytest
+
 from dotaudio.transcript_pro import (
     apply_dictionary,
     confidence_from_logprob,
     diff_transcripts,
+    export_format_list,
+    export_option_choices,
+    export_rows,
     export_with_preset,
     find_replace,
     merge_segments,
     needs_review,
+    normalise_export_options,
     preset_list,
     quality_stats,
     render_export,
@@ -220,6 +226,152 @@ def test_render_export_honours_save_filters() -> None:
     assert ext == "json"
     assert '"confidence"' in payload
     assert '"start"' not in payload
+
+
+LINE_ROWS = [
+    {
+        "start": 16.084,
+        "end": 20.116,
+        "text": "потихонечку сокращается.",
+        "speaker": "Диктор 2",
+        "role": 2,
+        "confidence": 0.93,
+    },
+    {
+        "start": 20.5,
+        "end": 24.0,
+        "text": "а вот и ответ.",
+        "speaker": "Диктор 2",
+        "role": 2,
+        "confidence": 0.88,
+    },
+]
+
+
+def test_line_format_writes_time_speaker_and_text_in_one_row() -> None:
+    body, ext = render_export(
+        LINE_ROWS,
+        {
+            "format": "line",
+            "include_timestamps": True,
+            "include_speakers": True,
+            "time_precision": "millis",
+        },
+    )
+    assert ext == "txt"
+    assert body.splitlines()[0] == "00:16.084 - 00:20.116 [Диктор 2] потихонечку сокращается."
+
+    # Секундная точность - то, чего просили вместо миллисекунд по умолчанию.
+    rough, _ = render_export(
+        LINE_ROWS,
+        {"format": "line", "include_timestamps": True, "include_speakers": True},
+    )
+    assert rough.splitlines()[0] == "00:16 - 00:20 [Диктор 2] потихонечку сокращается."
+
+    # время:голос:текст одной строкой без диапазона.
+    colon, _ = render_export(
+        LINE_ROWS,
+        {
+            "format": "line",
+            "include_timestamps": True,
+            "include_speakers": True,
+            "time_mode": "start",
+            "field_separator": "colon",
+            "speaker_style": "plain",
+        },
+    )
+    assert colon.splitlines()[0] == "00:16:Диктор 2:потихонечку сокращается."
+
+    # Имя только при смене голоса: у второй фразы тот же говорящий.
+    once, _ = render_export(
+        LINE_ROWS,
+        {
+            "format": "line",
+            "include_timestamps": False,
+            "include_speakers": True,
+            "speaker_once": True,
+        },
+    )
+    assert once.splitlines() == ["[Диктор 2] потихонечку сокращается.", "а вот и ответ."]
+
+
+def test_table_and_lrc_formats_keep_their_own_rules() -> None:
+    table, ext = render_export(
+        LINE_ROWS,
+        {
+            "format": "csv",
+            "include_timestamps": True,
+            "include_speakers": True,
+            "include_header": True,
+            "include_confidence": True,
+            "csv_delimiter": "semicolon",
+        },
+    )
+    assert ext == "csv"
+    rows = table.splitlines()
+    assert rows[0] == "начало;конец;голос;текст;уверенность"
+    assert rows[1] == "00:16;00:20;Диктор 2;потихонечку сокращается.;0.930"
+
+    lrc, ext_lrc = render_export(LINE_ROWS, {"format": "lrc", "time_precision": "seconds"})
+    assert ext_lrc == "lrc"
+    # Плеер ждёт сотые в mm:ss.xx, поэтому формат не отдаёт точность наружу.
+    assert lrc.splitlines()[0] == "[00:16.08][Диктор 2] потихонечку сокращается."
+
+
+def test_export_options_are_validated_and_formats_force_what_they_need() -> None:
+    loose = normalise_export_options(
+        {
+            "format": "srt",
+            "include_timestamps": False,
+            "time_precision": "seconds",
+            "speaker_style": "неизвестно",
+            "subtitle_max_chars": 5000,
+            "subtitle_max_duration": "nope",
+        }
+    )
+    assert loose["include_timestamps"] is True
+    assert loose["time_precision"] == "millis"
+    assert loose["speaker_style"] == "bracket"
+    assert loose["subtitle_max_chars"] == 200
+    assert loose["subtitle_max_duration"] == 6.0
+    assert loose["ext"] == "srt"
+
+    # Без таймкодов строка не должна получить режим диапазона.
+    silent = normalise_export_options({"format": "line", "include_timestamps": False})
+    assert silent["time_mode"] == "none"
+    # Excel читает кириллицу в CSV только с меткой UTF-8.
+    assert normalise_export_options({"format": "csv"})["encoding"] == "utf-8-sig"
+    assert normalise_export_options({"format": "csv", "csv_bom": False})["encoding"] == "utf-8"
+    assert normalise_export_options({"format": "txt"})["encoding"] == "utf-8"
+
+    with pytest.raises(ValueError):
+        normalise_export_options({"format": "docx"})
+
+    keys = {item["key"] for item in export_format_list()}
+    assert {"txt", "line", "csv", "lrc", "srt", "json"} <= keys
+    choices = export_option_choices()
+    assert {row["key"] for row in choices["time_precision"]} == {
+        "seconds",
+        "tenths",
+        "hundredths",
+        "millis",
+    }
+
+
+def test_merged_turns_join_one_voice_and_keep_the_weakest_confidence() -> None:
+    rows = export_rows(
+        [
+            *LINE_ROWS,
+            {"start": 24.5, "end": 25.0, "text": "", "speaker": "Диктор 1", "role": 1},
+            {"start": 25.0, "end": 26.0, "text": "Другой голос.", "speaker": "Диктор 1", "role": 1},
+        ],
+        {"format": "line", "merge_turns": True},
+    )
+    assert len(rows) == 2
+    assert rows[0]["text"] == "потихонечку сокращается. а вот и ответ."
+    assert rows[0]["end"] == 24.0
+    assert rows[0]["confidence"] == 0.88
+    assert rows[1]["text"] == "Другой голос."
 
 
 def test_model_diff_picks_winner() -> None:

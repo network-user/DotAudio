@@ -17,7 +17,7 @@ ComboBox {
         leftPadding: 13
         rightPadding: 32
         text: control.displayText
-        color: Theme.text
+        color: control.enabled ? Theme.text : Theme.muted
         font: control.font
         verticalAlignment: Text.AlignVCenter
         elide: Text.ElideRight
@@ -29,7 +29,8 @@ ComboBox {
         width: 14
         height: 14
         name: "expand"
-        ink: control.hovered || control.popup.visible ? Theme.text : Theme.muted
+        ink: !control.enabled ? Theme.faint
+             : control.hovered || control.popup.visible ? Theme.text : Theme.muted
         rotation: control.popup.visible ? 180 : 0
         Behavior on rotation {
             NumberAnimation {

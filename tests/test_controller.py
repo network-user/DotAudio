@@ -3,6 +3,7 @@ import time
 from dotaudio.capture import next_live_source
 from dotaudio.controller import (
     DEFAULTS,
+    EXPORT_SETTING_KEYS,
     HOTKEY_OPTIONS,
     MODEL_BY_PROFILE,
     QUIT_HOTKEY_OPTIONS,
@@ -14,6 +15,7 @@ from dotaudio.controller import (
     sensitivity_label,
 )
 from dotaudio.engine import Engine
+from dotaudio.transcript_pro import EXPORT_FORMAT_KEYS, normalise_export_options
 from dotaudio.translate import language_task_for
 
 
@@ -62,6 +64,26 @@ def test_parse_and_normalise_free_exit_hotkey() -> None:
 def test_default_exit_combo_is_registered_as_a_normal_option() -> None:
     assert "Ctrl+Alt+X" in QUIT_HOTKEY_OPTIONS
     assert parse_hotkey("Ctrl+Alt+X") == QUIT_HOTKEY_OPTIONS["Ctrl+Alt+X"]
+
+
+def test_saved_export_settings_survive_the_option_check() -> None:
+    """Каждая сохранённая настройка сохранения должна быть валидной опцией.
+
+    Опечатка в DEFAULTS иначе молча заменялась бы значением по умолчанию, и
+    окно сохранения открывалось бы не с тем, что человек выбрал в прошлый раз.
+    """
+    saved = {
+        option: DEFAULTS[setting] for setting, option in EXPORT_SETTING_KEYS.items()
+    }
+    # Таймкоды включены: иначе вид отметки честно схлопывается в «без времени»
+    # и сравнивать его с сохранённым «начало и конец» нечестно.
+    checked = normalise_export_options({**saved, "include_timestamps": True})
+    saved["include_timestamps"] = True
+    for option, value in saved.items():
+        assert checked[option] == value, option
+    assert checked["format"] in EXPORT_FORMAT_KEYS
+    # Настройка без опции (и наоборот) означала бы потерянный параметр.
+    assert set(EXPORT_SETTING_KEYS) <= set(DEFAULTS)
 
 
 def test_segments_have_a_dedicated_qt_notify_signal() -> None:

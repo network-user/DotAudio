@@ -314,19 +314,83 @@ def regroup_for_subtitles(
     return result
 
 
-def timestamp(seconds: float, separator: str = ",") -> str:
-    """Format seconds as an SRT/VTT timestamp, rounding to milliseconds."""
-    seconds = float(seconds)
-    if not math.isfinite(seconds) or seconds < 0:
+# Знаков после запятой у таймкода. Миллисекунды нужны субтитрам, но в
+# читаемом тексте они мешают: там обычно достаточно целых секунд.
+TIME_PRECISION_DIGITS = {
+    "seconds": 0,
+    "tenths": 1,
+    "hundredths": 2,
+    "millis": 3,
+}
+
+
+def _precision_digits(precision: str) -> int:
+    digits = TIME_PRECISION_DIGITS.get(str(precision or "millis").strip().lower())
+    if digits is None:
+        raise ValueError(f"unsupported time precision: {precision}")
+    return digits
+
+
+def quantise_seconds(seconds: float, precision: str = "millis") -> float:
+    """Round seconds to the requested precision, keeping a float."""
+
+    value = float(seconds)
+    if not math.isfinite(value) or value < 0:
         raise ValueError("timestamp seconds must be a non-negative finite value")
-    total_ms = int(math.floor(seconds * 1000 + 0.5))
-    hours, remainder = divmod(total_ms, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    whole_seconds, milliseconds = divmod(remainder, 1000)
-    return (
-        f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}"
-        f"{separator}{milliseconds:03d}"
-    )
+    scale = 10 ** _precision_digits(precision)
+    return math.floor(value * scale + 0.5) / scale
+
+
+def format_time(
+    seconds: float,
+    *,
+    precision: str = "millis",
+    hours: str = "auto",
+    decimal: str = ".",
+) -> str:
+    """Format seconds as ``[HH:]MM:SS[.frac]``.
+
+    ``precision`` picks the fraction (``seconds``, ``tenths``, ``hundredths``,
+    ``millis``); rounding carries into minutes, so 59.96 s at tenths is
+    ``01:00.0``. ``hours`` is ``auto`` (only past an hour), ``always`` or
+    ``never`` (minutes keep counting up).
+    """
+
+    value = float(seconds)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("timestamp seconds must be a non-negative finite value")
+    digits = _precision_digits(precision)
+    scale = 10**digits
+    units = int(math.floor(value * scale + 0.5))
+    whole, fraction = divmod(units, scale)
+    hour_part, remainder = divmod(whole, 3600)
+    minutes, whole_seconds = divmod(remainder, 60)
+    mode = str(hours or "auto").strip().lower()
+    if mode == "never":
+        head = f"{minutes + hour_part * 60:02d}:{whole_seconds:02d}"
+    elif mode == "always" or hour_part:
+        head = f"{hour_part:02d}:{minutes:02d}:{whole_seconds:02d}"
+    else:
+        head = f"{minutes:02d}:{whole_seconds:02d}"
+    if digits == 0:
+        return head
+    return f"{head}{decimal}{fraction:0{digits}d}"
+
+
+def timestamp(
+    seconds: float,
+    separator: str = ",",
+    *,
+    precision: str = "millis",
+) -> str:
+    """Format seconds as an SRT/VTT timestamp, rounding to milliseconds.
+
+    The field always keeps three fraction digits because the subtitle formats
+    require them; ``precision`` only decides what is rounded away first.
+    """
+
+    rounded = quantise_seconds(seconds, precision)
+    return format_time(rounded, precision="millis", hours="always", decimal=separator)
 
 
 def _speaker_label(segment: dict[str, Any]) -> str:
@@ -356,6 +420,10 @@ def export_transcript(
     include_speakers: bool = False,
     include_confidence: bool = False,
     include_review_flags: bool = False,
+    time_precision: str = "millis",
+    time_mode: str = "start",
+    time_hours: str = "always",
+    range_join: str = " - ",
 ) -> str:
     """Export segments as TXT, MD, SRT, VTT or a compact JSON document.
 
@@ -364,8 +432,22 @@ def export_transcript(
     affects whether a line-prefix time is added to plain text and whether
     JSON rows keep ``start``/``end``.
     ``include_speakers`` prefixes ``[speaker]`` when the segment has a label.
+    ``time_precision`` rounds every printed time; ``time_mode`` picks ``start``
+    or the ``range`` for the TXT/MD line prefix.
     """
     source_segments = list(segments)
+
+    def stamp(start: float, end: float) -> str:
+        head = format_time(
+            start, precision=time_precision, hours=time_hours, decimal="."
+        )
+        if str(time_mode).strip().lower() != "range":
+            return head
+        tail = format_time(
+            end, precision=time_precision, hours=time_hours, decimal="."
+        )
+        return f"{head}{range_join}{tail}"
+
     prepared = [_segment_values(segment) for segment in source_segments]
     speakers = [_speaker_label(segment) for segment in source_segments]
     output_format = format.strip().upper()
@@ -374,25 +456,25 @@ def export_transcript(
         with_times = False if include_timestamps is None else bool(include_timestamps)
         if output_format == "TXT":
             lines: list[str] = []
-            for (start, _end, text), speaker in zip(prepared, speakers, strict=True):
+            for (start, end, text), speaker in zip(prepared, speakers, strict=True):
                 body = _line_text(text, speaker=speaker, include_speakers=include_speakers)
                 if with_times:
-                    stamp = timestamp(start, ".")
-                    lines.append(f"[{stamp}] {body}".strip() if body else f"[{stamp}]")
+                    mark = stamp(start, end)
+                    lines.append(f"[{mark}] {body}".strip() if body else f"[{mark}]")
                 else:
                     lines.append(body)
             return "\n".join(lines)
         # Markdown: optional speaker headings when labels are requested.
         blocks: list[str] = []
         previous = None
-        for (start, _end, text), speaker in zip(prepared, speakers, strict=True):
+        for (start, end, text), speaker in zip(prepared, speakers, strict=True):
             body = text.strip()
             if include_speakers and speaker and speaker != previous:
                 blocks.append(f"### {speaker}")
                 previous = speaker
             if with_times:
-                stamp = timestamp(start, ".")
-                blocks.append(f"`{stamp}` {body}".strip() if body else f"`{stamp}`")
+                mark = stamp(start, end)
+                blocks.append(f"`{mark}` {body}".strip() if body else f"`{mark}`")
             else:
                 blocks.append(body)
         return "\n\n".join(part for part in blocks if part)
@@ -409,8 +491,14 @@ def export_transcript(
                 ),
             }
             if with_times:
-                row["start"] = start
-                row["end"] = end
+                # A data format keeps the measured float; a coarser precision
+                # is an explicit request to round the numbers too.
+                if _precision_digits(time_precision) < 3:
+                    row["start"] = quantise_seconds(start, time_precision)
+                    row["end"] = quantise_seconds(end, time_precision)
+                else:
+                    row["start"] = start
+                    row["end"] = end
             if include_speakers and speaker:
                 row["speaker"] = speaker
             if include_confidence:
@@ -434,8 +522,9 @@ def export_transcript(
         zip(prepared, speakers, strict=True), start=1
     ):
         body = _line_text(text, speaker=speaker, include_speakers=include_speakers)
-        timing = f"{timestamp(start, '.' if output_format == 'VTT' else ',')} --> "
-        timing += timestamp(end, '.' if output_format == 'VTT' else ',')
+        decimal = "." if output_format == "VTT" else ","
+        timing = f"{timestamp(start, decimal, precision=time_precision)} --> "
+        timing += timestamp(end, decimal, precision=time_precision)
         if output_format == "SRT":
             cues.append(f"{index}\n{timing}\n{body}")
         elif output_format == "VTT":

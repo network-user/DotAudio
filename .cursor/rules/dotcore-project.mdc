@@ -21,6 +21,10 @@ Lint: `.venv\Scripts\python.exe -m ruff check src tests`.
 `assistant.py` (части записи, выжимки, поиск), `assistant_controller.py` (мост).
 Нативная сборка `llama-cpp-python` необязательна и ставится extra `llm`.
 В Q_PROPERTY не обращаться к диску и сети - считать в воркере.
+Сохранение расшифровки: каталог форматов и проверка опций - `transcript_pro.py`
+(`EXPORT_FORMATS`, `normalise_export_options`, `render_export`), формат таймкода -
+`transcripts.format_time`, окно - `qml/TranscriptExportDialog.qml`. Предпросмотр и
+запись идут через один рендер; новый формат добавлять в каталог, а не в QML.
 Окно app — системная рамка Windows; остров/сцена безрамные. Иконка: `assets/`, `branding.py`.
 Первый запуск: `setup.py` / `setup_controller.py` / `SetupWizard.qml` — опрос, брифинг, фоновая загрузка.
 
