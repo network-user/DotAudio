@@ -6,7 +6,10 @@ import "Theme.js" as Theme
 // Страница диктовки: запись, готовый текст и список фраз.
 // SplitView: шапка и лента фраз тянутся ручкой при низком окне.
 Item {
+    id: root
+
     SplitView {
+        id: mainSplit
         anchors.fill: parent
         orientation: Qt.Vertical
         handle: Item {
@@ -24,7 +27,7 @@ Item {
         Rectangle {
             SplitView.preferredHeight: 248
             SplitView.minimumHeight: 160
-            SplitView.maximumHeight: Math.max(180, parent.height - 120)
+            SplitView.maximumHeight: Math.max(180, mainSplit.height - 120)
             radius: Theme.radiusXl
             color: Theme.surface
             border.width: 1

@@ -1210,69 +1210,57 @@ ApplicationWindow {
                         onRequestIsland: root.collapse()
                         onRequestApp: {}
                     }
-                    // Страница создаётся при первом открытии и дальше живёт: пока раздел
-                    // не открывали, его привязки не считаются вовсе.
-                    Loader {
-                        readonly property bool current: StackLayout.isCurrentItem
-                        property bool wanted: false
-                        asynchronous: true
-                        active: wanted
-                        source: "DictationPage.qml"
-                        onCurrentChanged: if (current) wanted = true
-                        Component.onCompleted: if (current) wanted = true
-                    }
+                    // Синхронно, как Live/Transcript: async Loader на PySide6/Qt 6.11
+                    // повторно ставит типы в sealed QtQuick (PointerDevice/StandardKey…)
+                    // и вкладка остаётся пустой.
+                    DictationPage { }
                     TranscriptView { Layout.fillWidth: true; Layout.fillHeight: true }
                     // Караоке UI скрыт 2026-09-09 — Loader убран из стека, чтобы индексы
                     // pageKeys совпадали. Файл MediaPage.qml не удалять.
-                    // Включение: вернуть Loader ниже и "media" в pageKeys/nav.
+                    // Включение: вернуть Loader ниже и "media" в pageKeys/nav
+                    // (asynchronous: false - иначе sealed QtQuick на PySide6/Qt 6.11).
                     // Loader {
                     //     readonly property bool current: StackLayout.isCurrentItem
                     //     property bool wanted: false
-                    //     asynchronous: true
+                    //     asynchronous: false
                     //     active: wanted
                     //     source: "MediaPage.qml"
                     //     onCurrentChanged: if (current) wanted = true
                     //     Component.onCompleted: if (current) wanted = true
                     // }
-                    // Страница создаётся при первом открытии и дальше живёт: пока раздел
-                    // не открывали, его привязки не считаются вовсе.
+                    // Ленивая загрузка без фоновой компиляции: asynchronous:true
+                    // на этой связке Qt даёт "Cannot install element into protected module".
                     Loader {
                         readonly property bool current: StackLayout.isCurrentItem
                         property bool wanted: false
-                        asynchronous: true
+                        asynchronous: false
                         active: wanted
                         source: "AssistantPage.qml"
                         onCurrentChanged: if (current) wanted = true
                         Component.onCompleted: if (current) wanted = true
                     }
-                    // Страница создаётся при первом открытии и дальше живёт: пока раздел
-                    // не открывали, его привязки не считаются вовсе.
                     Loader {
                         readonly property bool current: StackLayout.isCurrentItem
                         property bool wanted: false
-                        asynchronous: true
+                        asynchronous: false
                         active: wanted
                         source: "HistoryPage.qml"
                         onCurrentChanged: if (current) wanted = true
                         Component.onCompleted: if (current) wanted = true
                     }
-                    // Страница создаётся при первом открытии и дальше живёт: пока раздел
-                    // не открывали, его привязки не считаются вовсе.
                     Loader {
                         readonly property bool current: StackLayout.isCurrentItem
                         property bool wanted: false
-                        asynchronous: true
+                        asynchronous: false
                         active: wanted
                         source: "ModelsPage.qml"
                         onCurrentChanged: if (current) wanted = true
                         Component.onCompleted: if (current) wanted = true
                     }
-                    // Страница создаётся при первом открытии и дальше живёт: пока раздел
-                    // не открывали, его привязки не считаются вовсе.
                     Loader {
                         readonly property bool current: StackLayout.isCurrentItem
                         property bool wanted: false
-                        asynchronous: true
+                        asynchronous: false
                         active: wanted
                         source: "SettingsPage.qml"
                         onCurrentChanged: if (current) wanted = true
