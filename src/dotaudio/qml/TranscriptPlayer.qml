@@ -43,25 +43,42 @@ Rectangle {
             + ":" + (seconds < 10 ? "0" : "") + seconds
     }
 
-    readonly property string rateLabel: {
-        var r = root.playbackRate
-        if (Math.abs(r - 1.0) < 0.01)
+    readonly property var rateChoices: [
+        0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0
+    ]
+
+    readonly property string rateLabel: root.formatRate(root.playbackRate)
+
+    function formatRate(value) {
+        var r = Number(value)
+        if (!isFinite(r) || r <= 0)
             return "1×"
-        if (Math.abs(r - 0.75) < 0.01)
-            return "0.75×"
-        if (Math.abs(r - 1.25) < 0.01)
-            return "1.25×"
-        return Number(r).toFixed(2).replace(/\.?0+$/, "") + "×"
+        if (Math.abs(r - 1.0) < 0.01)
+            return "Обычная"
+        var labels = {
+            "0.25": "0.25×", "0.5": "0.5×", "0.75": "0.75×",
+            "1.25": "1.25×", "1.5": "1.5×", "1.75": "1.75×", "2": "2×"
+        }
+        for (var i = 0; i < root.rateChoices.length; ++i) {
+            var choice = root.rateChoices[i]
+            if (Math.abs(choice - r) < 0.01) {
+                var key = String(choice)
+                return labels[key] || (choice + "×")
+            }
+        }
+        return r.toFixed(2).replace(/\.?0+$/, "") + "×"
     }
 
-    function cyclePlaybackRate() {
-        var r = media.playbackRate
-        if (Math.abs(r - 0.75) < 0.01)
-            media.playbackRate = 1.0
-        else if (Math.abs(r - 1.0) < 0.01)
-            media.playbackRate = 1.25
-        else
-            media.playbackRate = 0.75
+    function setPlaybackRate(value) {
+        var r = Number(value)
+        if (!isFinite(r) || r <= 0)
+            return
+        media.playbackRate = Math.max(0.25, Math.min(2.0, r))
+        rateMenu.close()
+    }
+
+    function rateSelected(value) {
+        return Math.abs(Number(value) - root.playbackRate) < 0.01
     }
 
     function play() {
@@ -193,11 +210,96 @@ Rectangle {
             }
 
             PillButton {
-                text: root.rateLabel
+                id: rateBtn
+                text: root.rateLabel === "Обычная" ? "1×" : root.rateLabel
                 compact: true
-                onClicked: root.cyclePlaybackRate()
-                ToolTip.visible: hovered
+                onClicked: rateMenu.open()
+                ToolTip.visible: hovered && !rateMenu.visible
                 ToolTip.text: "Скорость воспроизведения"
+            }
+
+            Popup {
+                id: rateMenu
+                parent: Overlay.overlay
+                x: {
+                    var pos = rateBtn.mapToItem(Overlay.overlay, 0, 0)
+                    return Math.max(8, Math.min(pos.x, Overlay.overlay.width - implicitWidth - 8))
+                }
+                y: {
+                    var below = rateBtn.mapToItem(Overlay.overlay, 0, rateBtn.height).y + 6
+                    if (below + implicitHeight <= Overlay.overlay.height - 8)
+                        return below
+                    return Math.max(8, rateBtn.mapToItem(Overlay.overlay, 0, 0).y - implicitHeight - 6)
+                }
+                padding: 6
+                modal: false
+                focus: true
+                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                implicitWidth: 132
+                background: Rectangle {
+                    radius: Theme.radiusMd
+                    color: Theme.surface
+                    border.width: 1
+                    border.color: Theme.borderHi
+                }
+                contentItem: ColumnLayout {
+                    spacing: 2
+                    Label {
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 8
+                        Layout.rightMargin: 8
+                        Layout.topMargin: 4
+                        Layout.bottomMargin: 2
+                        text: "Скорость"
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsMicro
+                        font.weight: Font.DemiBold
+                    }
+                    Repeater {
+                        model: root.rateChoices
+                        delegate: Item {
+                            id: rateRow
+                            required property real modelData
+                            Layout.fillWidth: true
+                            implicitHeight: 32
+                            readonly property bool selected: root.rateSelected(rateRow.modelData)
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: Theme.radiusSm
+                                color: rateRow.selected ? Theme.fillHi
+                                       : (rateHover.containsMouse ? Theme.fill : "transparent")
+                                Behavior on color { ColorAnimation { duration: Theme.fastMs } }
+                            }
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                spacing: Theme.gapSm
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: root.formatRate(rateRow.modelData)
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fsLabel
+                                    font.weight: rateRow.selected ? Font.DemiBold : Font.Normal
+                                }
+                                Icon {
+                                    visible: rateRow.selected
+                                    name: "check"
+                                    width: 14
+                                    height: 14
+                                    ink: Theme.text
+                                }
+                            }
+                            MouseArea {
+                                id: rateHover
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.setPlaybackRate(rateRow.modelData)
+                            }
+                        }
+                    }
+                }
             }
 
             Label {
