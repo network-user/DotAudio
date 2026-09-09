@@ -1250,6 +1250,36 @@ Behavior по width/height убран (ломал layout); вместо него
 Live-сцена и зал — только `startSystemMove` с удержанием `dragging` до
 отпускания кнопки.
 
+## Караоке UI скрыт, 2026-09-09
+
+По запросу пользователя раздел **Караоке** временно убран из интерфейса.
+Код **не удалён** - только закомментирован / отключён флагом.
+
+### Как включить обратно
+
+1. `src/dotaudio/controller.py`: `KARAOKE_PAGE_ENABLED = True`
+2. `src/dotaudio/qml/MainMvp.qml`: раскомментировать
+   - `"media"` в `pageKeys`
+   - `media: "Караоке-студия"` в `pageTitle`
+   - пункт `{ key: "media", … title: "Караоке" … }` в `primaryModel`
+   - `Loader { … source: "MediaPage.qml" … }` в `StackLayout` (между
+     TranscriptView и AssistantPage; индексы должны совпасть с `pageKeys`)
+3. Опционально legacy `Main.qml`: раскомментировать `media` в `pages`/`titles`
+4. Вернуть assert `_page == "media"` в `tests/test_controller.py`
+   (`test_open_session_at_sets_page_and_pending_seek`), если снова открываем
+   media-сессии на странице караоке
+
+### Что осталось на месте
+
+- `qml/MediaPage.qml`, `KaraokeEditor.qml`, `KaraokePreview.qml`,
+  `MediaTimeline.qml`
+- `karaoke.py`, `karaoke_edit.py`, `karaoke_align.py` и тесты
+- Слоты контроллера (`importFile`, `exportKaraoke*`, `realignKaraoke`) -
+  при `KARAOKE_PAGE_ENABLED=False` отвечают notice и не открывают UI
+
+Старые сессии mode=`media` из Истории открываются в **Транскрибации** с
+пояснением в notice.
+
 ## Решение: караоке = песни (MVP), 2026-09-09
 
 Зафиксировано по ответам пользователя:

@@ -12,8 +12,9 @@ ApplicationWindow {
     visible: true
     title: "DotAudio · основа проекта"
     color: "#111214"
-    property var pages: ["dictation", "live", "media", "monitor", "history", "settings"]
-    property var titles: ["Диктовка", "Живые субтитры", "Аудио и видео", "Мониторинг эфира", "История", "Настройки"]
+    property var pages: ["dictation", "live", /* "media", */ "monitor", "history", "settings"]
+    property var titles: ["Диктовка", "Живые субтитры", /* "Аудио и видео", */ "Мониторинг эфира", "История", "Настройки"]
+    // Караоке UI скрыт 2026-09-09 — см. docs/HANDOFF.md «Караоке UI скрыт».
     onClosing: function(close) {
         if (bridge.busy) {
             close.accepted = false

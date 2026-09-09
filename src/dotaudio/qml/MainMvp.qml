@@ -30,7 +30,8 @@ ApplicationWindow {
     readonly property string pageTitle: ({
         live: "Живые субтитры",
         dictation: "Диктовка",
-        media: "Караоке-студия",
+        // Караоке UI скрыт 2026-09-09 — см. docs/HANDOFF.md «Караоке UI скрыт».
+        // media: "Караоке-студия",
         transcript: "Транскрибация записи",
         monitor: "Мониторинг эфиров",
         models: "Модели Whisper",
@@ -55,8 +56,11 @@ ApplicationWindow {
             || [760, 440]
     }
     readonly property int liveLocked: Boolean(bridge.settings.live_locked)
+    // Без "media": раздел Караоке временно скрыт (код MediaPage.qml сохранён).
+    // Включение: раскомментировать "media" ниже, пункт в nav и Loader MediaPage;
+    // плюс KARAOKE_PAGE_ENABLED = True в controller.py. См. docs/HANDOFF.md.
     property var pageKeys: [
-        "live", "dictation", "transcript", "media", "assistant",
+        "live", "dictation", "transcript", /* "media", */ "assistant",
         "history", "models", "settings"
     ]
     // Страница не переключается в тот же кадр: содержимое сначала гаснет,
@@ -597,7 +601,8 @@ ApplicationWindow {
                             { key: "live", icon: "live", title: "Live", detail: "Субтитры" },
                             { key: "dictation", icon: "dictation", title: "Диктовка", detail: "Голос в текст" },
                             { key: "transcript", icon: "media", title: "Транскрибация", detail: "Файл + голоса" },
-                            { key: "media", icon: "media", title: "Караоке", detail: "Аудио и видео" },
+                            // Караоке UI скрыт 2026-09-09 — см. docs/HANDOFF.md «Караоке UI скрыт».
+                            // { key: "media", icon: "media", title: "Караоке", detail: "Аудио и видео" },
                             { key: "assistant", icon: "assistant", title: "Ассистент", detail: "Чат по записи" }
                         ]
                         readonly property var secondaryModel: [
@@ -1030,17 +1035,18 @@ ApplicationWindow {
                         Component.onCompleted: if (current) wanted = true
                     }
                     TranscriptView { Layout.fillWidth: true; Layout.fillHeight: true }
-                    // Страница создаётся при первом открытии и дальше живёт: пока раздел
-                    // не открывали, его привязки не считаются вовсе.
-                    Loader {
-                        readonly property bool current: StackLayout.isCurrentItem
-                        property bool wanted: false
-                        asynchronous: true
-                        active: wanted
-                        source: "MediaPage.qml"
-                        onCurrentChanged: if (current) wanted = true
-                        Component.onCompleted: if (current) wanted = true
-                    }
+                    // Караоке UI скрыт 2026-09-09 — Loader убран из стека, чтобы индексы
+                    // pageKeys совпадали. Файл MediaPage.qml не удалять.
+                    // Включение: вернуть Loader ниже и "media" в pageKeys/nav.
+                    // Loader {
+                    //     readonly property bool current: StackLayout.isCurrentItem
+                    //     property bool wanted: false
+                    //     asynchronous: true
+                    //     active: wanted
+                    //     source: "MediaPage.qml"
+                    //     onCurrentChanged: if (current) wanted = true
+                    //     Component.onCompleted: if (current) wanted = true
+                    // }
                     // Страница создаётся при первом открытии и дальше живёт: пока раздел
                     // не открывали, его привязки не считаются вовсе.
                     Loader {

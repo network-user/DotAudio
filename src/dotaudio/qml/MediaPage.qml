@@ -5,6 +5,8 @@ import QtMultimedia
 import "Theme.js" as Theme
 
 // Страница караоке: плеер, пословный редактор и экспорт.
+// ВРЕМЕННО СКРЫТА из навигации (2026-09-09): не удалять этот файл.
+// Включение — docs/HANDOFF.md «Караоке UI скрыт» + KARAOKE_PAGE_ENABLED.
 Item {
     id: page
 

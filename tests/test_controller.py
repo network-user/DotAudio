@@ -646,6 +646,6 @@ def test_open_session_at_sets_page_and_pending_seek(tmp_path) -> None:
     Controller.openSessionAt(controller, session_id, 42.0)
 
     assert controller._session_id == session_id
-    assert controller._page == "media"
+    assert controller._page == "transcript"
     assert controller._pending_seek_ms == 42000
     assert controller._media_url.startswith("file:")

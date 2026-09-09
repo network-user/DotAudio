@@ -61,6 +61,13 @@ from dotaudio.transcripts import (
 from dotaudio.vosk_engine import VoskEngine
 from dotaudio.watch_folder import WatchFolder
 
+# Караоке-UI временно скрыт (2026-09-09). Код karaoke*.py / MediaPage.qml /
+# MediaTimeline.qml не удалять. Включение:
+#   1) KARAOKE_PAGE_ENABLED = True
+#   2) раскомментировать media в MainMvp.qml (pageKeys, nav, Loader, title)
+# Запись: docs/HANDOFF.md «Караоке UI скрыт».
+KARAOKE_PAGE_ENABLED = False
+
 MODEL_BY_PROFILE = {"fast": "base", "balanced": "small", "quality": "large-v3"}
 
 # Справочные характеристики моделей Whisper из публичной документации
@@ -1149,6 +1156,10 @@ class Controller(QObject):
 
     @Slot(str)
     def selectPage(self, page):
+        if page == "media" and not KARAOKE_PAGE_ENABLED:
+            self._notice = "Караоке временно скрыто."
+            self.changed.emit()
+            return
         if page in (
             "dictation", "live", "media", "monitor", "models",
             "history", "settings", "transcript", "assistant",
@@ -2532,6 +2543,10 @@ class Controller(QObject):
 
     @Slot()
     def importFile(self):
+        if not KARAOKE_PAGE_ENABLED:
+            self._notice = "Караоке временно скрыто. Импорт медиа для караоке недоступен."
+            self.changed.emit()
+            return
         if self._jobs:
             return
         path, _ = QFileDialog.getOpenFileName(None, "Открыть аудио или видео", "",
@@ -2553,6 +2568,10 @@ class Controller(QObject):
 
     @Slot(str)
     def transcribePath(self, path):
+        if not KARAOKE_PAGE_ENABLED:
+            self._notice = "Караоке временно скрыто."
+            self.changed.emit()
+            return
         if self._jobs:
             return
         if path.startswith("file:"):
@@ -2996,8 +3015,13 @@ class Controller(QObject):
                 self._clear_media_peaks()
             if is_media and source and not self._media_url:
                 self._notice = "Исходный медиафайл не найден. Расшифровку всё ещё можно редактировать и экспортировать."
-            if session["mode"] == "transcript":
+            if session["mode"] == "transcript" or (
+                session["mode"] == "media" and not KARAOKE_PAGE_ENABLED
+            ):
                 self._open_transcript_session(session)
+                if session["mode"] == "media" and not KARAOKE_PAGE_ENABLED:
+                    note = "Караоке временно скрыто — запись открыта в транскрибации."
+                    self._notice = f"{self._notice} {note}".strip() if self._notice else note
             else:
                 self._page = session["mode"] if session["mode"] in (
                     "dictation", "live", "media", "monitor"
@@ -3015,7 +3039,10 @@ class Controller(QObject):
         self.openSession(sid)
         if self._session_id != sid:
             return
-        self._page = "media" if self._media_url else "transcript"
+        if KARAOKE_PAGE_ENABLED and self._media_url:
+            self._page = "media"
+        else:
+            self._page = "transcript"
         self._pending_seek_ms = max(0, int(float(seconds) * 1000))
         self.changed.emit()
 
@@ -3280,6 +3307,10 @@ class Controller(QObject):
         quiet moment.  Results persist row-by-row and re-emit ``segments``, so
         the editor, preview and ASS/MP4 export all follow the refined timing.
         """
+        if not KARAOKE_PAGE_ENABLED:
+            self._notice = "Караоке временно скрыто."
+            self.changed.emit()
+            return
         if self._aligning or self._rendering or self._jobs:
             return
         if not self._media_url:
@@ -3428,6 +3459,10 @@ class Controller(QObject):
 
     @Slot()
     def exportKaraokeFile(self):
+        if not KARAOKE_PAGE_ENABLED:
+            self._notice = "Караоке временно скрыто."
+            self.changed.emit()
+            return
         if not self._segments:
             return
         path, _ = QFileDialog.getSaveFileName(
@@ -3458,6 +3493,10 @@ class Controller(QObject):
 
     @Slot()
     def exportKaraokeVideo(self):
+        if not KARAOKE_PAGE_ENABLED:
+            self._notice = "Караоке временно скрыто."
+            self.changed.emit()
+            return
         if not self._segments or not self._media_url or self._rendering:
             return
         source = QUrl(self._media_url).toLocalFile()
