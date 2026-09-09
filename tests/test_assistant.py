@@ -436,9 +436,12 @@ def test_free_chat_includes_attached_text_file() -> None:
 
     assert answer.mode == "chat"
     assert answer.text == "В файле смета"
-    assert "notes.txt" in seen[0][-2]["content"]
-    assert "Смета выросла" in seen[0][-2]["content"]
-    assert seen[0][-1]["content"] == "О чём файл?"
+    assert len(seen[0]) == 2
+    assert seen[0][0]["role"] == "system"
+    assert seen[0][1]["role"] == "user"
+    assert "notes.txt" in seen[0][1]["content"]
+    assert "Смета выросла" in seen[0][1]["content"]
+    assert "О чём файл?" in seen[0][1]["content"]
 
 
 def test_history_keeps_attachment_text_for_the_model() -> None:

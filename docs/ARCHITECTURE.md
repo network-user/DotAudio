@@ -21,8 +21,13 @@ src/dotaudio/
   capture.py      микрофон, loopback, прямой эфир через FFmpeg
   pipeline.py     буфер речи, ограниченная очередь, live-session
   engine.py       локальный/удалённый ASR, выбор устройства
-  storage.py      SQLite: сессии, сегменты, настройки
+  storage.py      SQLite: сессии, сегменты, настройки, чат, выжимки
   transcripts.py экспорт и сопоставление ключевых фраз
+  assistant.py    части записи, выжимки, поиск, действия (Qt-free)
+  llm.py          каталог LLM, llama.cpp и Ollama (Qt-free)
+  llm_worker.py   subprocess llama.cpp, JSON-lines протокол
+  vram_arbiter.py mutex ASR↔LLM, вытеснение моделей из VRAM
+  assistant_controller.py  мост ассистента: воркеры и сигналы
   server.py       необязательный FastAPI-сервис
 tests/            проверки с подставными моделями/устройствами
 deploy/           CPU Docker-заготовка, loopback-порт
@@ -159,6 +164,70 @@ Windows в его матрице поддержки помечен как «No s
 с таймкодами остаётся, а причина показывается пользователю. Sortformer
 различает не больше четырёх голосов; это ограничение модели, и его нельзя
 обойти настройкой.
+
+## Локальный ассистент по записям
+
+Qt-free ядро - `assistant.py` и `llm.py`. Controller и QML только переводят
+действия пользователя в вызовы сервисов и показывают готовые значения.
+
+**Границы:**
+
+- `assistant.py` режет расшифровку на части, строит выжимки, ищет релевантные
+  куски (`selective_hits`, `score_chunks`), формирует промпты действий. Не
+  импортирует Qt.
+- `llm.py` - каталог моделей, подбор под железо, рантаймы llama.cpp и Ollama,
+  `/no_think` и фильтр служебных блоков Qwen3. Inference и release модели - вне
+  GUI thread.
+- `llm_worker.py` - отдельный процесс llama.cpp: JSON-lines по stdin/stdout.
+  Режим по умолчанию в `auto`/`llama_cpp`; падение нативной сборки не роняет
+  Qt-процесс. In-process путь (`llama_inplace`) остаётся для отладки.
+- `assistant_controller.py` - очередь задач с приоритетами (ответ и действие
+  пользователя выше фоновой индексации), daemon-потоки, узкие сигналы. В
+  Q_PROPERTY и notify-геттерах нет обращений к диску, сети и подпроцессам:
+  готовность модели, каталог и probe Ollama считаются в воркере и кешируются.
+  Поток токенов идёт через `pendingReply` с троттлингом, а не через
+  `messagesChanged` на каждый токен.
+
+**Хранение (schema 6):**
+
+- `chat_messages` - переписка по записи и общий чат (`GENERAL_CHAT_ID`).
+- `transcript_digests` - выжимки частей с `content_hash`: правка расшифровки
+  или смена роли говорящего не оставляет устаревшее описание.
+- `transcript_embeddings` - hash-эмбеддинги частей (`embed_text`, feature
+  hashing стемов, dim=256); не нейросеть, а дешёвый семантический слой для
+  `score_chunks` вместе с лексическим поиском.
+- Колонка `model` у digests/embeddings: смена LLM инвалидирует карту текущей
+  записи; PK остаётся `(session_id, chunk_index)`.
+
+**StoreDigests** - обёртка над `transcript_digests` в контроллере: load/save/clear,
+кеш в памяти, фильтр по `model_id`, инвалидация по хешу текста части.
+
+**Очередь и фоновая карта:**
+
+- `_task_queue` с одним `_current_task`; срочный вопрос отменяет фоновую
+  индексацию (`index`).
+- После успешного `jobFinished` транскрибации файла в очередь ставится
+  `_ensure_index`: выжимки и embeddings для всех частей без участия GUI.
+
+**VRAM arbiter (`vram_arbiter.py`):**
+
+- Mutex «asr» / «llm»; при `acquire` второй потребитель вызывает evict у первого.
+- `engine.py` и `llm.py` регистрируют release/evict, чтобы Whisper и llama.cpp
+  не держали VRAM одновременно на одной видеокарте.
+
+**Переход по таймкоду:**
+
+- `Controller.openSessionAt(session_id, seconds)` открывает media/transcript и
+  ставит `_pending_seek_ms`.
+- QML (`MediaPage` / `TranscriptPlayer`) читает `pendingSeekMs`, ставит
+  `MediaPlayer.position` и вызывает `clearPendingSeek`. Клик по таймкоду в
+  чате ассистента идёт через `AssistantController.openTimestamp`.
+
+**Ограничения продукта:**
+
+- Ответ LLM не пишется в `segments` и не подменяет расшифровку.
+- LLM не стартует сама при открытии записи; только явное действие пользователя
+  и фоновая индексация уже завершённой транскрибации.
 
 ## Аналоги
 

@@ -370,28 +370,65 @@ def _fold_system_into_user(messages: list[dict]) -> list[dict]:
     return [{"role": "user", "content": instruction}, *rest]
 
 
+def _coalesce_turns(messages: list[dict]) -> list[dict]:
+    """Слить соседние сообщения с одной ролью.
+
+    Шаблон Gemma требует строгое чередование user/assistant. Два user подряд
+    (файл + вопрос, оборванная история) дают TemplateError. Для Qwen склейка
+    тоже безопасна и не меняет смысл.
+    """
+
+    out: list[dict] = []
+    for item in messages:
+        role = str(item.get("role") or "")
+        content = str(item.get("content") or "")
+        if role not in ("system", "user", "assistant") or not content.strip():
+            continue
+        if out and out[-1].get("role") == role:
+            prev = str(out[-1].get("content") or "")
+            out[-1]["content"] = f"{prev}\n\n{content}" if prev else content
+            continue
+        out.append({"role": role, "content": content})
+    return out
+
+
+def _ensure_user_first(messages: list[dict]) -> list[dict]:
+    """После снятия system диалог должен начинаться с user (Gemma)."""
+
+    if not messages:
+        return messages
+    if messages[0].get("role") == "user":
+        return messages
+    if messages[0].get("role") == "system":
+        return messages
+    # История без вопроса: редкий случай, но шаблон иначе падает.
+    return [{"role": "user", "content": "."}, *messages]
+
+
 def shape_messages(
     messages: Sequence[dict],
     model: ChatModel,
     options: GenerationOptions,
 ) -> list[dict]:
-    """Подготовить сообщения под особенности модели.
+    """Подготовить сообщения под особенности модели из каталога.
 
-    Убирает роль system у моделей без неё и отключает размышление у Qwen3,
-    если оно не запрошено явно.
+    - Gemma 2/3 (и Vikhr): нет роли system, строгое чередование ходов.
+    - Qwen3: system оставляем; по умолчанию гасим размышление через /no_think.
     """
 
     payload = [dict(item) for item in messages]
     if not model.system_role:
         payload = _fold_system_into_user(payload)
-    if not model.thinking or options.thinking:
-        return payload
-    for item in reversed(payload):
-        if item.get("role") == "user":
-            content = str(item.get("content") or "")
-            if NO_THINK_SWITCH not in content:
-                item["content"] = f"{content}\n\n{NO_THINK_SWITCH}"
-            return payload
+    payload = _coalesce_turns(payload)
+    if not model.system_role:
+        payload = _ensure_user_first(payload)
+    if model.thinking and not options.thinking:
+        for item in reversed(payload):
+            if item.get("role") == "user":
+                content = str(item.get("content") or "")
+                if NO_THINK_SWITCH not in content:
+                    item["content"] = f"{content}\n\n{NO_THINK_SWITCH}"
+                break
     return payload
 
 

@@ -1744,7 +1744,6 @@ class AssistantController(QObject):
         if not digests:
             self._set_notice("Карта записи ещё не собрана.")
             return False
-        title = self.recordTitle.replace("/", "-").replace("\\", "-")
         ordered = [digests[index] for index in sorted(digests)]
         body = "\n".join(
             [

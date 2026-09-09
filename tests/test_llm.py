@@ -59,6 +59,112 @@ def test_catalog_entries_are_complete_and_unique() -> None:
         assert model.layers > 0
         assert model.context >= 4096
         assert model.tier in llm.TIER_LABELS
+        # Флаги шаблона должны совпадать с семейством, иначе чат падает на
+        # первой же реплике с system / размышлением.
+        if model.family.lower().startswith("gemma"):
+            assert model.system_role is False
+            assert model.thinking is False
+        if model.family.startswith("Qwen3"):
+            assert model.system_role is True
+            assert model.thinking is True
+
+
+def test_shape_messages_adapts_every_catalog_model() -> None:
+    """Типичный запрос ассистента не должен оставлять system у Gemma
+    и не должен давать два user подряд ни одной модели."""
+
+    raw = [
+        {"role": "system", "content": "Ты помощник по расшифровкам."},
+        {"role": "user", "content": "Привет"},
+        {"role": "assistant", "content": "Здравствуй"},
+        {"role": "user", "content": "Файл:\nданные"},
+        {"role": "user", "content": "О чём это?"},
+    ]
+    for model in llm.CHAT_MODELS:
+        shaped = llm.shape_messages(raw, model, llm.GenerationOptions())
+        roles = [item["role"] for item in shaped]
+        assert roles, model.id
+        assert roles[0] in ("system", "user"), model.id
+        if not model.system_role:
+            assert "system" not in roles, model.id
+            assert roles[0] == "user", model.id
+        else:
+            assert roles[0] == "system", model.id
+        for left, right in zip(roles, roles[1:]):
+            assert left != right, (model.id, roles)
+        if model.thinking:
+            last_user = next(
+                item["content"] for item in reversed(shaped) if item["role"] == "user"
+            )
+            assert last_user.rstrip().endswith(llm.NO_THINK_SWITCH), model.id
+
+
+def test_gemma_folds_system_role_into_first_user_turn() -> None:
+    """Шаблон Gemma падает на role=system: инструкцию переносим в user."""
+
+    gemma = llm.MODELS_BY_ID["vikhr-gemma-2b"]
+    assert gemma.system_role is False
+    shaped = llm.shape_messages(
+        [
+            {"role": "system", "content": "Ты помощник."},
+            {"role": "user", "content": "Привет"},
+            {"role": "assistant", "content": "Здравствуй"},
+            {"role": "user", "content": "Как дела?"},
+        ],
+        gemma,
+        llm.GenerationOptions(),
+    )
+    assert [item["role"] for item in shaped] == ["user", "assistant", "user"]
+    assert shaped[0]["content"].startswith("Ты помощник.")
+    assert shaped[0]["content"].endswith("Привет")
+    assert "system" not in {item["role"] for item in shaped}
+
+
+def test_gemma3_also_rejects_system_role() -> None:
+    shaped = llm.shape_messages(
+        [
+            {"role": "system", "content": "Правила"},
+            {"role": "user", "content": "Вопрос"},
+        ],
+        llm.MODELS_BY_ID["gemma-3-4b"],
+        llm.GenerationOptions(),
+    )
+    assert [item["role"] for item in shaped] == ["user"]
+    assert "Правила" in shaped[0]["content"]
+    assert "Вопрос" in shaped[0]["content"]
+
+
+def test_qwen_keeps_system_role() -> None:
+    shaped = llm.shape_messages(
+        [
+            {"role": "system", "content": "Инструкция"},
+            {"role": "user", "content": "Вопрос"},
+        ],
+        llm.MODELS_BY_ID["qwen3-4b"],
+        llm.GenerationOptions(),
+    )
+    assert shaped[0]["role"] == "system"
+    assert shaped[0]["content"] == "Инструкция"
+    assert shaped[1]["content"].endswith(llm.NO_THINK_SWITCH)
+
+
+def test_adjacent_user_turns_are_merged_for_strict_templates() -> None:
+    shaped = llm.shape_messages(
+        [
+            {"role": "system", "content": "Правила"},
+            {"role": "user", "content": "файл"},
+            {"role": "user", "content": "вопрос"},
+        ],
+        llm.MODELS_BY_ID["gemma-3-4b"],
+        llm.GenerationOptions(),
+    )
+    assert [item["role"] for item in shaped] == ["user"]
+    assert "файл" in shaped[0]["content"]
+    assert "вопрос" in shaped[0]["content"]
+
+
+def test_strip_thinking_cleans_a_finished_answer() -> None:
+    assert llm.strip_thinking("<think>шум</think>  Ответ ") == "Ответ"
 
 
 def test_ram_requirement_grows_with_the_file() -> None:
@@ -155,45 +261,6 @@ def test_unclosed_thinking_block_does_not_leak_into_the_answer() -> None:
     visible = filtered.feed("<think>думаю и не закрыл") + filtered.flush()
 
     assert visible == ""
-
-
-def test_strip_thinking_cleans_a_finished_answer() -> None:
-    assert llm.strip_thinking("<think>шум</think>  Ответ ") == "Ответ"
-
-
-def test_gemma_folds_system_role_into_first_user_turn() -> None:
-    """Шаблон Gemma падает на role=system: инструкцию переносим в user."""
-
-    gemma = llm.MODELS_BY_ID["vikhr-gemma-2b"]
-    assert gemma.system_role is False
-    shaped = llm.shape_messages(
-        [
-            {"role": "system", "content": "Ты помощник."},
-            {"role": "user", "content": "Привет"},
-            {"role": "assistant", "content": "Здравствуй"},
-            {"role": "user", "content": "Как дела?"},
-        ],
-        gemma,
-        llm.GenerationOptions(),
-    )
-    assert [item["role"] for item in shaped] == ["user", "assistant", "user"]
-    assert shaped[0]["content"].startswith("Ты помощник.")
-    assert shaped[0]["content"].endswith("Привет")
-    assert "system" not in {item["role"] for item in shaped}
-
-
-def test_qwen_keeps_system_role() -> None:
-    shaped = llm.shape_messages(
-        [
-            {"role": "system", "content": "Инструкция"},
-            {"role": "user", "content": "Вопрос"},
-        ],
-        llm.MODELS_BY_ID["qwen3-4b"],
-        llm.GenerationOptions(),
-    )
-    assert shaped[0]["role"] == "system"
-    assert shaped[0]["content"] == "Инструкция"
-    assert shaped[1]["content"].endswith(llm.NO_THINK_SWITCH)
 
 
 class _FakeRuntime:

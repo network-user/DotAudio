@@ -433,6 +433,16 @@ Item {
                             text: assistant.status
                             color: Theme.muted
                             font.pixelSize: Theme.fsSmall
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+                        Label {
+                            visible: typeof assistant.queueStatus === "string"
+                                     && assistant.queueStatus.length > 0
+                            text: assistant.queueStatus
+                            color: Theme.faint
+                            font.pixelSize: Theme.fsMicro
+                            elide: Text.ElideRight
                         }
                         Label {
                             visible: assistant.busy && assistant.stage.length > 0

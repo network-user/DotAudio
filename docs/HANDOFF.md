@@ -1250,6 +1250,39 @@ Behavior по width/height убран (ломал layout); вместо него
 Live-сцена и зал — только `startSystemMove` с удержанием `dragging` до
 отпускания кнопки.
 
+## Решение: караоке = песни (MVP), 2026-09-09
+
+Зафиксировано по ответам пользователя:
+
+1. **Основной сценарий MVP** - музыка / песни: таймкоды слов → karaoke
+   preview → ASS/MP4. Подкасты не целевой сценарий редактора.
+2. **Эталонный текст** опционален. Два пути: (A) править ASR words /
+   фразу; (B) вставить lyrics и выровнять к ASR (идея как у DotSound,
+   без копирования закрытого кода .звук). Путь B - P1.
+3. **ASS без words**: по умолчанию **фразовый** Dialogue (без silent
+   fake-split). Равномерный `\\k` только с явным `uniform_karaoke=True`.
+
+### Итерация P0 «аудио-CapCut для песен» (этот проход)
+
+Сделано:
+
+- `sync_words_to_text` + `editSegment`: правка фразы синхронизирует words
+  (SequenceMatcher), без words остаётся phrase-only.
+- QML: поле фразы, `setPhraseWindow` (поля + «окно ←/→» к playhead).
+- `MediaTimeline.qml`: peaks в воркере (`compute_peaks`), клик/seek,
+  подсветка активного слова; `Waveform.qml` Live не тронут.
+- Realign karaoke пишется в undo-стек батчем; undo/redo - батчи.
+- ASS: phrase fallback; предупреждение при экспорте без words.
+
+Не в этом проходе (next / P1):
+
+- Split/merge сегментов у playhead / границы слова.
+- Drag-trim краёв слова на waveform (сейчас поля + snap к курсору).
+- P1 hooks: Demucs opt-in, `sync_quality`, optional lyrics align
+  (opcode / stable-ts) - не начинать без отдельного запроса.
+
+Проверки: точечные karaoke/storage + полный pytest и ruff по затронутому.
+
 ## Итерация startSystemMove для острова, 2026-09-09
 
 Пользователь: окно при передвижении дёргается и фризит.
@@ -1262,3 +1295,82 @@ Live-сцена и зал — только `startSystemMove` с удержани
 снимается на жест, конец по `primaryButtonDown` (не по MouseArea Released:
 он приходит сразу после передачи жеста системе). HWND острова снова
 фиксирован 552×108.
+
+## Итерация ассистента по записям, 2026-09-09
+
+Продолжение итерации локального ассистента (2026-09-08): доведены контракты,
+фоновая индексация, VRAM, subprocess-рантайм и переход по таймкодам из чата.
+
+### Что реализовано (15 пунктов)
+
+1. **Чат по записи и общий чат** - `chat_messages`, вкладки «Записи» / «Чаты»,
+   история на сессию, прикрепление `.txt` к вопросу (`AssistantPage.qml`).
+2. **Карта записи (digests)** - части ~2,5 мин по границам фраз, выжимка
+   каждой части один раз, свёртка длинной карты (`assistant.py`).
+3. **Поиск релевантных частей** - `selective_hits` по редким словам,
+   `score_chunks` (лексика + hash-эмбеддинги), до двух раундов с соседними
+   частями.
+4. **Готовые действия** - изложение, главные мысли, задачи/договорённости,
+   темы (`ACTION_PROMPTS`, `runAction`).
+5. **Экспорт** - переписка и карта записи в Markdown/текст (`exportChat`,
+   `exportDigests`).
+6. **Кликабельные таймкоды** - `[MM:SS]` / `[H:MM:SS]` в ответе,
+   `linkifyTimestamps` в QML, переход через `openTimestamp` /
+   `openSessionAt`.
+7. **Ответы с учётом говорящих** - метки «Голос N» в частях и промптах;
+   смена роли инвалидирует `content_hash` (`speaker_labels.py`).
+8. **Фоновая карта после транскрибации** - по успешному `jobFinished`
+   ставится задача `index`; выжимки и embeddings считаются в daemon-потоке.
+9. **StoreDigests** - кеш выжимок в памяти, load/save/clear, фильтр по
+   `model_id`, инвалидация по хешу текста части.
+10. **Без I/O в Q_PROPERTY** - `modelReady`, каталог и probe Ollama в
+    воркере; узкие сигналы; поток токенов через `pendingReply`, не через
+    `messagesChanged` на каждый токен.
+11. **Очередь задач LLM** - приоритет ответа/действия над названием и
+    фоновой индексацией; `queueStatus`; срочная задача отменяет `index`.
+12. **Hash-эмбеддинги** - `embed_text` (feature hashing, dim=256), таблица
+    `transcript_embeddings`; не нейросеть, а дешёвый слой для `score_chunks`.
+13. **VRAM arbiter** - mutex «asr» / «llm», evict через callback;
+    `engine.py` и `llm.py` регистрируют release (`vram_arbiter.py`).
+14. **Subprocess llama worker** - `llm_worker.py`, JSON-lines stdin/stdout;
+    режим по умолчанию в `auto`/`llama_cpp`; in-process путь для отладки.
+15. **Seek из чата** - `Controller.openSessionAt`, `pendingSeekMs`,
+    `seekMediaTo` / `clearPendingSeek`; QML применяет при готовности плеера
+    (`MediaPage.qml`, `TranscriptView.qml`).
+
+### Явные ограничения
+
+- Ответ LLM не переписывает расшифровку и не пишется в `segments`.
+- LLM не запускается сама при открытии записи: только действие пользователя
+  и фоновая индексация уже завершённой транскрибации.
+- LLM-улучшение текста ASR сознательно не делаем (см. решение по PasteTalk).
+
+### Что проверить вручную
+
+- Страница «Ассистент»: выбор записи, вопрос, готовое действие, общий чат.
+- Клик по таймкоду в ответе открывает ту же запись и перематывает плеер.
+- После транскрибации длинного файла индикатор карты доходит до «готово» без
+  блокировки интерфейса; первый вопрос не ждёт полный проход, если индекс
+  успел собраться.
+- Экспорт переписки и карты в файл; копирование ответа.
+- Запись с диаризацией: в ответе видны «Голос N», смена имени говорящего
+  сбрасывает устаревшую выжимку.
+- Переключение Whisper ↔ LLM на одной видеокарте: одна модель вытесняет
+  другую, приложение не падает при неудачной CUDA-сборке llama.cpp (остаётся
+  «Процессор»). **Не заявлять** успех GPU-ускорения LLM без проверки на
+  целевом железе.
+
+### Автоматические проверки
+
+- Точечно: `pytest -q tests/test_assistant.py tests/test_assistant_controller.py
+  tests/test_assistant_qml.py tests/test_llm.py tests/test_vram_arbiter.py` -
+  **101 passed** на этой итерации.
+- Полный `pytest -q` зависит от параллельного WIP в дереве (watch_folder /
+  CaptionText и т.п.); не смешивать с этой итерацией ассистента.
+- Новые/расширенные: `tests/test_assistant.py`, `test_assistant_controller.py`,
+  `test_storage.py` (digests, embeddings), `test_vram_arbiter.py`,
+  `test_llm.py` (subprocess worker), `test_controller.py` (seek),
+  `test_assistant_qml.py` (offscreen smoke `AssistantPage.qml`).
+- Сеть, скачивание GGUF, GPU и реальная скорость генерации в unit-тестах не
+  проверяются - только контракты с подставными рантаймами.
+- `ruff check` по затронутым модулям; QML offscreen smoke-test.

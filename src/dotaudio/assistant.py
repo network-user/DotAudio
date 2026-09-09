@@ -1088,9 +1088,8 @@ class TranscriptAssistant:
     ) -> Answer:
         """Разговор без записи: обычный чат-бот на той же модели.
 
-        ``material`` - текст прикреплённого файла: он идёт отдельным
-        пользовательским сообщением перед вопросом, чтобы модель видела файл
-        целиком, а не смешанный с перепиской блок.
+        ``material`` - текст прикреплённого файла. Он и вопрос идут одним
+        user-ходом: у Gemma два user подряд ломают chat-шаблон.
         """
 
         body = (material or "").strip()
@@ -1101,10 +1100,12 @@ class TranscriptAssistant:
             messages.append(
                 {
                     "role": "user",
-                    "content": f"Прикреплённый файл «{name}»:\n\n{body}",
+                    "content": (
+                        f"Прикреплённый файл «{name}»:\n\n{body}\n\n"
+                        f"Вопрос: {question}"
+                    ),
                 }
             )
-            messages.append({"role": "user", "content": question})
         else:
             messages = [{"role": "system", "content": SYSTEM_CHAT}]
             messages.extend(_history_messages(history))

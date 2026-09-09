@@ -6,6 +6,8 @@ import threading
 import time
 from pathlib import Path
 
+from PySide6.QtWidgets import QApplication
+
 from dotaudio.assistant import Digest
 from dotaudio.assistant_controller import ACTION_LABELS, AssistantController, StoreDigests
 from dotaudio.controller import DEFAULTS
@@ -32,6 +34,7 @@ def test_frequent_updates_have_their_own_notify_signals() -> None:
         "streaming": "streamChanged",
         "indexState": "streamChanged",
         "pendingReply": "streamChanged",
+        "queueStatus": "streamChanged",
         "download": "downloadChanged",
         "install": "downloadChanged",
         "hardware": "hardwareChanged",
@@ -115,12 +118,30 @@ def test_digest_cache_survives_a_restart_through_the_database(tmp_path: Path) ->
     assert StoreDigests(store, "qwen3-4b").load("rec") == {}
 
 
+def test_digest_load_skips_rows_from_another_model(tmp_path: Path) -> None:
+    store = Store(tmp_path / "dotaudio.sqlite3")
+    store.save_digest(
+        "rec",
+        0,
+        "hash-a",
+        0.0,
+        60.0,
+        "О смете",
+        ["смета"],
+        "qwen3-4b",
+    )
+
+    assert StoreDigests(store, "qwen3-1.7b").load("rec") == {}
+    assert StoreDigests(store, "qwen3-4b").load("rec")[0].summary == "О смете"
+
+
 class _StubController:
     """Контроллер записи: ассистенту от него нужны только настройки."""
 
     def __init__(self, **settings) -> None:
         self.values = {**DEFAULTS, **settings}
         self.saved: list[tuple[str, object]] = []
+        self.open_calls: list[tuple[str, float]] = []
 
     def setting(self, name, default=None):
         return self.values.get(name, default)
@@ -128,6 +149,9 @@ class _StubController:
     def setSetting(self, name, value):  # noqa: N802 - имя как в Qt-слоте
         self.values[name] = value
         self.saved.append((name, value))
+
+    def openSessionAt(self, session_id: str, seconds: float) -> None:  # noqa: N802
+        self.open_calls.append((session_id, seconds))
 
 
 def _controller(tmp_path: Path, **settings) -> AssistantController:
@@ -321,3 +345,162 @@ def test_actions_require_a_selected_record(tmp_path: Path) -> None:
     assistant.runAction("summary")
 
     assert "выбранной записи" in assistant.notice
+
+
+def test_actions_are_hidden_without_transcript_segments(tmp_path: Path) -> None:
+    assistant = _controller(tmp_path)
+    assistant._record_id = "rec"
+    assistant._record = {"segments": 0}
+
+    assert assistant.actions == []
+
+
+def test_select_model_clears_digests_for_open_record(tmp_path: Path) -> None:
+    assistant = _controller(tmp_path, assistant_model="qwen3-1.7b")
+    session_id = assistant.store.create_session("Смета", "live", "mic", "small")
+    assistant.store.append_segments(
+        session_id, [{"start": 0.0, "end": 1.0, "text": "текст"}]
+    )
+    StoreDigests(assistant.store, "qwen3-1.7b").save(
+        session_id,
+        Digest(index=0, start=0.0, end=1.0, summary="старая", keywords=(), content_hash="a"),
+    )
+    assistant._record_id = session_id
+    assistant._catalog = [{"id": "qwen3-4b", "ready": True}]
+
+    assistant.selectModel("qwen3-4b")
+
+    assert assistant.store.list_digests(session_id) == []
+    assert StoreDigests(assistant.store, "qwen3-4b").load(session_id) == {}
+
+
+def test_rebuild_index_starts_background_indexing(tmp_path: Path, monkeypatch) -> None:
+    assistant = _controller(tmp_path, assistant_model="qwen3-1.7b")
+    session_id = assistant.store.create_session("Планёрка", "live", "mic", "small")
+    assistant.store.append_segments(
+        session_id,
+        [{"start": 0.0, "end": 120.0, "text": "обсуждали смету и сроки"}],
+    )
+    assistant._record_id = session_id
+    assistant._ready = True
+    calls: list[str] = []
+
+    def fake_complete(messages, model, options, cancel=None, on_token=None):
+        calls.append(str(messages[-1]["content"]))
+        return "краткое описание части"
+
+    monkeypatch.setattr(assistant.engine, "complete", fake_complete)
+
+    assistant.rebuildIndex()
+    if assistant._worker is not None:
+        assistant._worker.join(timeout=5)
+
+    assert calls
+    loaded = StoreDigests(assistant.store, "qwen3-1.7b").load(session_id)
+    assert loaded
+    assert assistant.store.list_embeddings(session_id)
+
+
+def test_export_chat_writes_selected_file(tmp_path: Path, monkeypatch) -> None:
+    assistant = _controller(tmp_path)
+    assistant._messages = [
+        {"role": "user", "content": "Вопрос", "meta": {}, "pending": False},
+        {"role": "assistant", "content": "Ответ", "meta": {}, "pending": False},
+    ]
+    target = tmp_path / "chat.md"
+    monkeypatch.setattr(
+        "dotaudio.assistant_controller.QFileDialog.getSaveFileName",
+        lambda *_args, **_kwargs: (str(target), "Markdown (*.md)"),
+    )
+
+    assistant.exportChat()
+
+    body = target.read_text(encoding="utf-8")
+    assert "## Вы" in body
+    assert "Вопрос" in body
+    assert "## Ассистент" in body
+    assert "Ответ" in body
+
+
+def test_export_digests_writes_outline(tmp_path: Path, monkeypatch) -> None:
+    assistant = _controller(tmp_path)
+    session_id = assistant.store.create_session("Смета", "live", "mic", "small")
+    assistant._record_id = session_id
+    assistant._record = {"title": "Смета", "displayTitle": "Смета", "segments": 1}
+    StoreDigests(assistant.store, assistant.modelId).save(
+        session_id,
+        Digest(index=0, start=0.0, end=60.0, summary="О смете", keywords=("смета",), content_hash="a"),
+    )
+    target = tmp_path / "map.md"
+    monkeypatch.setattr(
+        "dotaudio.assistant_controller.QFileDialog.getSaveFileName",
+        lambda *_args, **_kwargs: (str(target), "Markdown (*.md)"),
+    )
+
+    assistant.exportDigests()
+
+    body = target.read_text(encoding="utf-8")
+    assert "Карта записи" in body
+    assert "О смете" in body
+
+
+def test_ask_while_indexing_prioritizes_answer(tmp_path: Path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    assistant = _controller(tmp_path, assistant_model="qwen3-1.7b")
+    session_id = assistant.store.create_session("Планёрка", "live", "mic", "small")
+    assistant.store.append_segments(
+        session_id, [{"start": 0.0, "end": 120.0, "text": "длинный разговор"}]
+    )
+    assistant._record_id = session_id
+    assistant._ready = True
+    index_started = threading.Event()
+    index_cancelled = threading.Event()
+
+    def slow_index(*_args, cancel=None, **_kwargs):
+        index_started.set()
+        while cancel is not None and not cancel.is_set():
+            time.sleep(0.01)
+        index_cancelled.set()
+        from dotaudio import llm
+
+        raise llm.GenerationCancelled()
+
+    def fast_answer(*_args, cancel=None, on_token=None, **_kwargs):
+        text = "готовый ответ"
+        if on_token is not None:
+            on_token(text)
+        return text
+
+    monkeypatch.setattr(assistant.engine, "complete", slow_index)
+    assistant._enqueue("index", session_id=session_id)
+    assert index_started.wait(timeout=5)
+
+    monkeypatch.setattr(assistant.engine, "complete", fast_answer)
+    assistant.ask("Что решили?")
+
+    assert index_cancelled.wait(timeout=5)
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        app.processEvents()
+        if any(
+            item.get("role") == "assistant" and str(item.get("content") or "").strip()
+            for item in assistant.messages
+        ):
+            break
+        if assistant._worker is not None:
+            assistant._worker.join(timeout=0.1)
+        time.sleep(0.05)
+
+    assert any(item.get("role") == "assistant" for item in assistant.messages)
+    assert "ответ" in assistant.messages[-1]["content"].casefold()
+
+
+def test_open_timestamp_delegates_to_main_controller(tmp_path: Path) -> None:
+    assistant = _controller(tmp_path)
+    session_id = assistant.store.create_session("Файл", "transcript", "a.wav", "small")
+    assistant._record_id = session_id
+
+    assistant.openTimestamp(125.5)
+
+    assert assistant.controller.open_calls == [(session_id, 125.5)]

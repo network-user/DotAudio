@@ -61,6 +61,8 @@ src/dotaudio/
   adapt.py                          план Whisper/Live под класс машины
   modelhub.py                      скачивание файлов моделей с докачкой
   llm.py                           каталог языковых моделей, llama.cpp и Ollama
+  llm_worker.py                    subprocess llama.cpp (JSON-lines)
+  vram_arbiter.py                  mutex ASR↔LLM, вытеснение из VRAM
   assistant.py                     части записи, выжимки, поиск, действия
   assistant_controller.py           мост ассистента: воркеры и сигналы
   server.py                        optional FastAPI
