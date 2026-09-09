@@ -8,7 +8,9 @@ from dotaudio.transcript_pro import (
     find_replace,
     merge_segments,
     needs_review,
+    preset_list,
     quality_stats,
+    resolve_export_options,
     split_segment,
 )
 
@@ -86,6 +88,49 @@ def test_dictionary_and_court_export() -> None:
     assert "ПРОТОКОЛ" in body
     assert "Судья" in body
     assert stem == "protocol_court"
+
+
+def test_export_option_overrides() -> None:
+    rows = [
+        {
+            "start": 0,
+            "end": 1,
+            "text": "фраза",
+            "speaker": "А",
+            "confidence": 0.42,
+            "reviewed": False,
+        }
+    ]
+    defaults = resolve_export_options("protocol")
+    assert defaults["include_speakers"] is True
+    assert defaults["include_confidence"] is False
+
+    muted = resolve_export_options(
+        "protocol",
+        {"include_speakers": False, "include_confidence": True},
+    )
+    assert muted["include_speakers"] is False
+    assert muted["include_confidence"] is True
+
+    body, ext, _ = export_with_preset(
+        rows,
+        "protocol",
+        options={"include_confidence": True, "include_review_flags": True},
+    )
+    assert ext == "txt"
+    assert "на проверку" in body
+
+    body_conf, _, _ = export_with_preset(
+        [{**rows[0], "reviewed": True, "confidence": 0.91}],
+        "protocol",
+        options={"include_confidence": True, "include_review_flags": True},
+    )
+    assert "91%" in body_conf
+
+    presets = preset_list()
+    court = next(item for item in presets if item["key"] == "court")
+    assert court["include_confidence"] is True
+    assert court["include_speakers"] is True
 
 
 def test_model_diff_picks_winner() -> None:

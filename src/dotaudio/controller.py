@@ -4864,17 +4864,19 @@ class Controller(QObject):
         self._trans_state["segments"] = rows
         self.transcribeChanged.emit()
 
-    @Slot(str)
-    def transcriptExportPreset(self, preset_key: str):
+    @Slot(str, "QVariantMap")
+    def transcriptExportPreset(self, preset_key: str, options=None):
         segments = list(self._trans_state.get("segments") or [])
         if not segments:
             return
+        overrides = dict(options or {})
         body, ext, stem = export_with_preset(
             segments,
             str(preset_key or "plain"),
             title=str(self._trans_state.get("file") or ""),
             source=str(self._trans_state.get("path") or ""),
             model=str(self._settings.get("model") or ""),
+            options=overrides,
         )
         path, _ = QFileDialog.getSaveFileName(
             None,

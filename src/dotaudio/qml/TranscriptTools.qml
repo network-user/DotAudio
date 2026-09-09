@@ -21,10 +21,46 @@ Rectangle {
     signal redoRequested()
     signal replaceRequested(string find, string replace)
     signal dictionaryRequested()
-    signal exportPresetRequested(string key)
+    signal exportPresetRequested(string key, var options)
     signal compareRequested()
     signal onlyFlaggedToggled(bool value)
     signal assistantRequested()
+
+    property bool exportTimestamps: true
+    property bool exportSpeakers: true
+    property bool exportConfidence: false
+    property bool exportReviewFlags: false
+    property bool exportHeader: false
+    property bool exportPhraseNumbers: false
+
+    function syncExportFromPreset() {
+        var item = root.presets[presetPick.currentIndex]
+        if (!item)
+            return
+        if (item.include_timestamps !== undefined)
+            root.exportTimestamps = Boolean(item.include_timestamps)
+        if (item.include_speakers !== undefined)
+            root.exportSpeakers = Boolean(item.include_speakers)
+        if (item.include_confidence !== undefined)
+            root.exportConfidence = Boolean(item.include_confidence)
+        if (item.include_review_flags !== undefined)
+            root.exportReviewFlags = Boolean(item.include_review_flags)
+        if (item.include_header !== undefined)
+            root.exportHeader = Boolean(item.include_header)
+        if (item.include_phrase_numbers !== undefined)
+            root.exportPhraseNumbers = Boolean(item.include_phrase_numbers)
+    }
+
+    function exportOptions() {
+        return {
+            include_timestamps: root.exportTimestamps,
+            include_speakers: root.exportSpeakers,
+            include_confidence: root.exportConfidence,
+            include_review_flags: root.exportReviewFlags,
+            include_header: root.exportHeader,
+            include_phrase_numbers: root.exportPhraseNumbers
+        }
+    }
 
     radius: Theme.radiusLg
     color: Theme.surface
@@ -38,7 +74,7 @@ Rectangle {
         anchors.margins: Theme.padCard
         spacing: Theme.gapSm
 
-        RowLayout {
+        Flow {
             Layout.fillWidth: true
             spacing: Theme.gapSm
             Label {
@@ -46,9 +82,9 @@ Rectangle {
                 color: Theme.text
                 font.pixelSize: Theme.fsLabel
                 font.weight: Font.DemiBold
+                verticalAlignment: Text.AlignVCenter
             }
             Label {
-                Layout.fillWidth: true
                 text: {
                     var q = root.quality || {}
                     var parts = [(q.total || 0) + " фраз"]
@@ -60,7 +96,7 @@ Rectangle {
                 }
                 color: Theme.muted
                 font.pixelSize: Theme.fsMicro
-                elide: Text.ElideRight
+                verticalAlignment: Text.AlignVCenter
             }
             PillButton {
                 text: "↺"
@@ -80,12 +116,12 @@ Rectangle {
             }
         }
 
-        RowLayout {
+        Flow {
             Layout.fillWidth: true
             spacing: Theme.gapSm
             TextField {
                 id: findField
-                Layout.fillWidth: true
+                width: Math.max(140, Math.min(220, (col.width - Theme.gapSm) / 2))
                 placeholderText: "Найти в расшифровке"
                 color: Theme.text
                 placeholderTextColor: Theme.faint
@@ -101,7 +137,7 @@ Rectangle {
             }
             TextField {
                 id: replaceField
-                Layout.fillWidth: true
+                width: Math.max(140, Math.min(220, (col.width - Theme.gapSm) / 2))
                 placeholderText: "Заменить на"
                 color: Theme.text
                 placeholderTextColor: Theme.faint
@@ -131,20 +167,23 @@ Rectangle {
             }
         }
 
-        RowLayout {
+        Flow {
             Layout.fillWidth: true
             spacing: Theme.gapSm
             Label {
                 text: "Экспорт"
                 color: Theme.muted
                 font.pixelSize: Theme.fsLabel
+                verticalAlignment: Text.AlignVCenter
             }
             Dropdown {
                 id: presetPick
-                Layout.preferredWidth: 260
+                width: Math.min(260, Math.max(180, col.width * 0.4))
                 enabled: !root.busy
                 model: root.presets
                 textRole: "label"
+                onCurrentIndexChanged: root.syncExportFromPreset()
+                Component.onCompleted: root.syncExportFromPreset()
             }
             PillButton {
                 text: "Сохранить пресет…"
@@ -153,10 +192,9 @@ Rectangle {
                 onClicked: {
                     var item = root.presets[presetPick.currentIndex]
                     if (item)
-                        root.exportPresetRequested(String(item.key))
+                        root.exportPresetRequested(String(item.key), root.exportOptions())
                 }
             }
-            Item { Layout.fillWidth: true }
             ToggleSwitch {
                 text: "Только проблемные"
                 checked: root.onlyFlagged
@@ -168,7 +206,49 @@ Rectangle {
             }
         }
 
-        RowLayout {
+        Flow {
+            Layout.fillWidth: true
+            spacing: Theme.gapSm
+            visible: root.presets.length > 0
+            ToggleSwitch {
+                text: "Таймкоды"
+                checked: root.exportTimestamps
+                enabled: !root.busy
+                onToggled: root.exportTimestamps = checked
+            }
+            ToggleSwitch {
+                text: "Голоса"
+                checked: root.exportSpeakers
+                enabled: !root.busy
+                onToggled: root.exportSpeakers = checked
+            }
+            ToggleSwitch {
+                text: "Уверенность"
+                checked: root.exportConfidence
+                enabled: !root.busy
+                onToggled: root.exportConfidence = checked
+            }
+            ToggleSwitch {
+                text: "Метки проверки"
+                checked: root.exportReviewFlags
+                enabled: !root.busy
+                onToggled: root.exportReviewFlags = checked
+            }
+            ToggleSwitch {
+                text: "Шапка"
+                checked: root.exportHeader
+                enabled: !root.busy
+                onToggled: root.exportHeader = checked
+            }
+            ToggleSwitch {
+                text: "№ фраз"
+                checked: root.exportPhraseNumbers
+                enabled: !root.busy
+                onToggled: root.exportPhraseNumbers = checked
+            }
+        }
+
+        Flow {
             Layout.fillWidth: true
             spacing: Theme.gapSm
             PillButton {
@@ -184,12 +264,13 @@ Rectangle {
                 onClicked: root.assistantRequested()
             }
             Label {
-                Layout.fillWidth: true
                 visible: String(root.compare.message || "").length > 0
                 text: String(root.compare.message || "")
                 color: Theme.muted
                 font.pixelSize: Theme.fsSmall
                 elide: Text.ElideRight
+                width: Math.min(360, Math.max(120, col.width - 280))
+                verticalAlignment: Text.AlignVCenter
             }
         }
 

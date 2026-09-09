@@ -442,716 +442,735 @@ Rectangle {
         }
     }
 
-    ColumnLayout {
+    readonly property real chromeShare: view.segs.length > 0 ? 0.40 : 0.55
+
+    SplitView {
+        id: mainSplit
         anchors.fill: parent
-        spacing: Theme.gapMd
+        orientation: Qt.Vertical
+        handle: Item {
+            implicitWidth: 1
+            implicitHeight: 10
+            Rectangle {
+                anchors.centerIn: parent
+                width: 56
+                height: 3
+                radius: 1.5
+                color: SplitHandle.pressed || SplitHandle.hovered ? Theme.text : Theme.border
+            }
+        }
 
-        // Панель выбора, запуска и движка голосов.
-        Rectangle {
-            Layout.fillWidth: true
-            Layout.maximumHeight: view.segs.length > 0 ? 280 : 420
-            implicitHeight: Math.min(
-                topFlick.contentHeight + 2 * Theme.padCard,
-                view.segs.length > 0 ? 280 : 420
-            )
-            radius: Theme.radiusLg
-            color: Theme.surface
-            border.width: 1
-            border.color: Theme.border
+        // Верх: шапка, плеер, инструменты, голоса - свой скролл и высота ручкой.
+        ScrollView {
+            id: chromeScroll
+            SplitView.preferredHeight: Math.max(160, Math.round(mainSplit.height * view.chromeShare))
+            SplitView.minimumHeight: 140
+            SplitView.maximumHeight: Math.max(180, mainSplit.height - 150)
             clip: true
-            Flickable {
-                id: topFlick
-                anchors.fill: parent
-                anchors.margins: Theme.padCard
-                contentWidth: width
-                contentHeight: topRow.implicitHeight
-                clip: true
-                boundsBehavior: Flickable.StopAtBounds
-                ScrollBar.vertical: ScrollBar { policy: topFlick.contentHeight > topFlick.height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff }
-                ColumnLayout {
-                    id: topRow
-                    width: topFlick.width
-                    spacing: Theme.gapSm
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.gapSm
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 3
-                        Label {
-                            text: view.file.length ? view.file : "Расшифровка аудио или видео"
-                            color: Theme.text
-                            font.pixelSize: Theme.fsTitle
-                            font.weight: Font.DemiBold
-                            elide: Text.ElideRight
-                        }
-                        Label {
-                            text: view.file.length
-                                  ? "Обработка локально. Аудио не покидает этот компьютер."
-                                  : "Откройте запись или перетащите файл сюда. Слова с таймкодами и метки говорящих."
-                            color: Theme.muted
-                            font.pixelSize: Theme.fsSmall
-                            wrapMode: Text.Wrap
-                        }
-                    }
-                    PillButton { text: "Открыть файл"; enabled: !view.busyPhase; onClicked: bridge.pickTranscriptFile() }
-                    PillButton {
-                        text: view.busyPhase ? "Стоп" : "Расшифровать"
-                        primary: !view.busyPhase
-                        enabled: view.file.length > 0
-                        onClicked: view.busyPhase ? bridge.stopTranscript() : bridge.runTranscript()
-                    }
-                    PillButton {
-                        text: bridge.speechModeLabel
-                        enabled: !view.busyPhase
-                        onClicked: bridge.cycleSpeechMode()
-                        ToolTip.visible: hovered
-                        ToolTip.text: bridge.speechModeHint
-                    }
-                    PillButton {
-                        text: "Очистить"
-                        enabled: (view.file.length > 0 || view.segs.length > 0) && !view.busyPhase
-                        onClicked: {
-                            view.exportOpen = false
-                            bridge.clearTranscript()
-                        }
-                    }
-                    PillButton {
-                        text: view.exportOpen ? "Скрыть сохранение" : "Сохранить…"
-                        enabled: view.segs.length > 0 && !view.busyPhase
-                        onClicked: view.exportOpen = !view.exportOpen
-                    }
-                    PillButton {
-                        text: "В ассистент"
-                        primary: true
-                        visible: view.phase === "done" && view.segs.length > 0
-                                 && String(bridge.transcribeState.sessionId || "").length > 0
-                        enabled: !view.busyPhase
-                        onClicked: bridge.openTranscriptInAssistant()
-                        ToolTip.visible: hovered
-                        ToolTip.text: "Открыть эту расшифровку в чате ассистента"
-                    }
-                }
+            contentWidth: availableWidth
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ScrollBar.vertical.policy: ScrollBar.AsNeeded
 
-                // Фильтры сохранения: формат, таймкоды, голоса.
+            ColumnLayout {
+                id: chromeCol
+                width: chromeScroll.availableWidth
+                spacing: Theme.gapSm
+
+                // Панель выбора, запуска и движка голосов.
                 Rectangle {
                     Layout.fillWidth: true
-                    visible: view.exportOpen && view.segs.length > 0 && !view.busyPhase
-                    implicitHeight: exportBox.implicitHeight + 2 * Theme.padCard
-                    radius: Theme.radiusMd
-                    color: Theme.surface2
+                    implicitHeight: topRow.implicitHeight + 2 * Theme.padCard
+                    radius: Theme.radiusLg
+                    color: Theme.surface
                     border.width: 1
                     border.color: Theme.border
+                    clip: true
                     ColumnLayout {
-                        id: exportBox
+                        id: topRow
                         anchors.fill: parent
                         anchors.margins: Theme.padCard
                         spacing: Theme.gapSm
-                        Label {
-                            text: "Сохранение расшифровки"
-                            color: Theme.text
-                            font.pixelSize: Theme.fsLabel
-                            font.weight: Font.DemiBold
-                        }
-                        Label {
+                        RowLayout {
                             Layout.fillWidth: true
-                            text: "Выберите формат и что включить в файл: таймкоды, имена говорящих или только выбранный голос."
-                            color: Theme.muted
-                            font.pixelSize: Theme.fsSmall
-                            wrapMode: Text.Wrap
+                            spacing: Theme.gapSm
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 3
+                                Label {
+                                    text: view.file.length ? view.file : "Расшифровка аудио или видео"
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fsTitle
+                                    font.weight: Font.DemiBold
+                                    elide: Text.ElideRight
+                                }
+                                Label {
+                                    text: view.file.length
+                                          ? "Обработка локально. Аудио не покидает этот компьютер."
+                                          : "Откройте запись или перетащите файл сюда. Слова с таймкодами и метки говорящих."
+                                    color: Theme.muted
+                                    font.pixelSize: Theme.fsSmall
+                                    wrapMode: Text.Wrap
+                                }
+                            }
+                            PillButton { text: "Открыть файл"; enabled: !view.busyPhase; onClicked: bridge.pickTranscriptFile() }
+                            PillButton {
+                                text: view.busyPhase ? "Стоп" : "Расшифровать"
+                                primary: !view.busyPhase
+                                enabled: view.file.length > 0
+                                onClicked: view.busyPhase ? bridge.stopTranscript() : bridge.runTranscript()
+                            }
+                            PillButton {
+                                text: bridge.speechModeLabel
+                                enabled: !view.busyPhase
+                                onClicked: bridge.cycleSpeechMode()
+                                ToolTip.visible: hovered
+                                ToolTip.text: bridge.speechModeHint
+                            }
+                            PillButton {
+                                text: "Очистить"
+                                enabled: (view.file.length > 0 || view.segs.length > 0) && !view.busyPhase
+                                onClicked: {
+                                    view.exportOpen = false
+                                    bridge.clearTranscript()
+                                }
+                            }
+                            PillButton {
+                                text: view.exportOpen ? "Скрыть сохранение" : "Сохранить…"
+                                enabled: view.segs.length > 0 && !view.busyPhase
+                                onClicked: view.exportOpen = !view.exportOpen
+                            }
+                            PillButton {
+                                text: "В ассистент"
+                                primary: true
+                                visible: view.phase === "done" && view.segs.length > 0
+                                         && String(bridge.transcribeState.sessionId || "").length > 0
+                                enabled: !view.busyPhase
+                                onClicked: bridge.openTranscriptInAssistant()
+                                ToolTip.visible: hovered
+                                ToolTip.text: "Открыть эту расшифровку в чате ассистента"
+                            }
                         }
+
+                        // Фильтры сохранения: формат, таймкоды, голоса.
+                        Rectangle {
+                            Layout.fillWidth: true
+                            visible: view.exportOpen && view.segs.length > 0 && !view.busyPhase
+                            implicitHeight: exportBox.implicitHeight + 2 * Theme.padCard
+                            radius: Theme.radiusMd
+                            color: Theme.surface2
+                            border.width: 1
+                            border.color: Theme.border
+                            ColumnLayout {
+                                id: exportBox
+                                anchors.fill: parent
+                                anchors.margins: Theme.padCard
+                                spacing: Theme.gapSm
+                                Label {
+                                    text: "Сохранение расшифровки"
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fsLabel
+                                    font.weight: Font.DemiBold
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: "Выберите формат и что включить в файл: таймкоды, имена говорящих или только выбранный голос."
+                                    color: Theme.muted
+                                    font.pixelSize: Theme.fsSmall
+                                    wrapMode: Text.Wrap
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: Theme.gapSm
+                                    Label {
+                                        text: "Формат"
+                                        color: Theme.muted
+                                        font.pixelSize: Theme.fsLabel
+                                    }
+                                    Dropdown {
+                                        id: formatPick
+                                        Layout.preferredWidth: 220
+                                        model: view.exportFormats
+                                        textRole: "label"
+                                        currentIndex: view.exportFormatIndex
+                                        onActivated: function (index) {
+                                            view.exportFormatIndex = index
+                                            if (view.exportTimesForced)
+                                                view.exportTimestamps = true
+                                        }
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    PillButton {
+                                        text: "Скачать файл"
+                                        primary: true
+                                        onClicked: {
+                                            bridge.transcriptExport(
+                                                view.exportFormatKey,
+                                                view.exportTimesForced || view.exportTimestamps,
+                                                view.exportSpeakers,
+                                                view.exportFocusedOnly ? view.focusKey : 0
+                                            )
+                                        }
+                                    }
+                                }
+                                Flow {
+                                    Layout.fillWidth: true
+                                    spacing: Theme.gapMd
+                                    ToggleSwitch {
+                                        text: view.exportTimesForced
+                                              ? "Таймкоды (обязательны для субтитров)"
+                                              : "Таймкоды у строк"
+                                        checked: view.exportTimesForced || view.exportTimestamps
+                                        enabled: !view.exportTimesForced
+                                        onToggled: view.exportTimestamps = checked
+                                    }
+                                    ToggleSwitch {
+                                        text: "Имена говорящих"
+                                        checked: view.exportSpeakers
+                                        onToggled: view.exportSpeakers = checked
+                                    }
+                                    ToggleSwitch {
+                                        text: view.focusKey > 0
+                                              ? "Только выбранный голос"
+                                              : "Только выбранный голос (сначала фильтр сверху)"
+                                        checked: view.exportFocusedOnly
+                                        enabled: view.focusKey > 0
+                                        onToggled: view.exportFocusedOnly = checked
+                                    }
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: {
+                                        var parts = [view.exportFormatKey.toUpperCase()]
+                                        if (view.exportTimesForced || view.exportTimestamps)
+                                            parts.push("с таймкодами")
+                                        else
+                                            parts.push("без таймкодов")
+                                        parts.push(view.exportSpeakers ? "с голосами" : "только текст")
+                                        if (view.exportFocusedOnly && view.focusKey > 0)
+                                            parts.push("один голос")
+                                        return "Будет сохранено: " + parts.join(" · ")
+                                              + " · " + view.phrases(view.exportFocusedOnly && view.focusKey > 0
+                                                                      ? view.rows.length : view.segs.length)
+                                    }
+                                    color: Theme.faint
+                                    font.pixelSize: Theme.fsMicro
+                                    wrapMode: Text.Wrap
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.topMargin: 2
+                            implicitHeight: 1
+                            color: Theme.hairline
+                        }
+
+                        // Модель Whisper для этой расшифровки (общая настройка приложения).
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: Theme.gapSm
                             Label {
-                                text: "Формат"
+                                text: "Whisper"
                                 color: Theme.muted
                                 font.pixelSize: Theme.fsLabel
                             }
                             Dropdown {
-                                id: formatPick
-                                Layout.preferredWidth: 220
-                                model: view.exportFormats
+                                id: whisperPick
+                                Layout.preferredWidth: 210
+                                enabled: !view.busyPhase && !bridge.modelPreparing
+                                model: view.whisperModels
                                 textRole: "label"
-                                currentIndex: view.exportFormatIndex
+                                currentIndex: view.whisperModelIndex()
                                 onActivated: function (index) {
-                                    view.exportFormatIndex = index
-                                    if (view.exportTimesForced)
-                                        view.exportTimestamps = true
+                                    view.selectWhisperModel(index)
                                 }
                             }
-                            Item { Layout.fillWidth: true }
+                            StatusDot {
+                                active: Boolean(view.whisperDisk(bridge.settings.model).ready)
+                                tint: Boolean(view.whisperDisk(bridge.settings.model).ready)
+                                      ? Theme.text
+                                      : (bridge.modelPreparing
+                                         && String(bridge.modelState.model) === String(bridge.settings.model)
+                                         ? Theme.muted : Theme.rec)
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: view.whisperModelNote()
+                                color: Theme.muted
+                                font.pixelSize: Theme.fsSmall
+                                elide: Text.ElideRight
+                            }
                             PillButton {
-                                text: "Скачать файл"
-                                primary: true
-                                onClicked: {
-                                    bridge.transcriptExport(
-                                        view.exportFormatKey,
-                                        view.exportTimesForced || view.exportTimestamps,
-                                        view.exportSpeakers,
-                                        view.exportFocusedOnly ? view.focusKey : 0
-                                    )
-                                }
+                                text: "Загрузить"
+                                compact: true
+                                visible: !Boolean(view.whisperDisk(bridge.settings.model).ready)
+                                         && !(bridge.modelPreparing
+                                              && String(bridge.modelState.model) === String(bridge.settings.model))
+                                enabled: !view.busyPhase && !bridge.modelPreparing
+                                onClicked: bridge.prepareSelectedModel()
+                                ToolTip.visible: hovered
+                                ToolTip.text: "Скачать выбранную модель Whisper в локальный кеш"
+                            }
+                            PillButton {
+                                text: "Отмена"
+                                compact: true
+                                visible: bridge.modelPreparing
+                                         && String(bridge.modelState.model) === String(bridge.settings.model)
+                                onClicked: bridge.cancelModelPrepare()
                             }
                         }
-                        Flow {
+
+                        // Выбор движка голосов и его готовность.
+                        RowLayout {
                             Layout.fillWidth: true
-                            spacing: Theme.gapMd
-                            ToggleSwitch {
-                                text: view.exportTimesForced
-                                      ? "Таймкоды (обязательны для субтитров)"
-                                      : "Таймкоды у строк"
-                                checked: view.exportTimesForced || view.exportTimestamps
-                                enabled: !view.exportTimesForced
-                                onToggled: view.exportTimestamps = checked
+                            spacing: Theme.gapSm
+                            Label {
+                                text: "Голоса"
+                                color: Theme.muted
+                                font.pixelSize: Theme.fsLabel
                             }
-                            ToggleSwitch {
-                                text: "Имена говорящих"
-                                checked: view.exportSpeakers
-                                onToggled: view.exportSpeakers = checked
+                            Dropdown {
+                                id: enginePick
+                                Layout.preferredWidth: 190
+                                enabled: !view.busyPhase
+                                model: view.engines
+                                textRole: "label"
+                                currentIndex: view.engineIndex()
+                                onActivated: function (index) {
+                                    bridge.setDiarizeEngine(String(view.engines[index].key))
+                                }
                             }
-                            ToggleSwitch {
-                                text: view.focusKey > 0
-                                      ? "Только выбранный голос"
-                                      : "Только выбранный голос (сначала фильтр сверху)"
-                                checked: view.exportFocusedOnly
-                                enabled: view.focusKey > 0
-                                onToggled: view.exportFocusedOnly = checked
+                            StatusDot {
+                                active: view.voices.ready === true
+                                tint: view.voices.ready === true ? Theme.text
+                                      : view.voices.checking === true ? Theme.muted : Theme.rec
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: String(view.voices.message || "")
+                                color: view.voices.ready === true ? Theme.muted : Theme.text
+                                font.pixelSize: Theme.fsSmall
+                                elide: Text.ElideRight
+                            }
+                            PillButton {
+                                text: "Проверить снова"
+                                compact: true
+                                visible: String(view.voices.engine || "") === "nemo"
+                                enabled: view.voices.checking !== true && !view.busyPhase
+                                onClicked: bridge.refreshDiarizeStatus()
+                            }
+                        }
+
+                        TranscriptBusy {
+                            Layout.fillWidth: true
+                            active: view.busyPhase
+                            stage: view.stage
+                            progress: view.progress
+                            fileName: view.file
+                            message: view.busyMessage()
+                        }
+                    }
+                }
+
+                // Плеер исходника: доступен сразу после выбора файла, до ASR.
+                TranscriptPlayer {
+                    id: player
+                    Layout.fillWidth: true
+                    compact: view.segs.length > 0
+                    visible: view.hasMedia
+                    source: view.mediaUrl
+                    segments: view.segs
+                    peaks: bridge.mediaPeaks
+                    peaksDuration: bridge.mediaPeaksDuration
+                    selectedIndex: view.playIndex >= 0 ? view.playIndex : view.editingIndex
+                    editableEdges: view.segs.length > 0 && !view.busyPhase
+                    onPlayingChanged: view.syncPlayIndex()
+                    onPositionChanged: view.syncPlayIndex()
+                    onDurationChanged: view.applyPendingSeek()
+                    onEdgeChanged: function (index, start, end) {
+                        bridge.setTranscriptPhraseWindow(index, start, end)
+                    }
+                }
+
+                TranscriptTools {
+                    Layout.fillWidth: true
+                    visible: view.segs.length > 0
+                    busy: view.busyPhase
+                    quality: bridge.transcriptQuality
+                    presets: bridge.transcriptExportPresets
+                    compare: bridge.transcriptCompare
+                    canUndo: bridge.transcriptCanUndo
+                    canRedo: bridge.transcriptCanRedo
+                    onlyFlagged: view.onlyFlagged
+                    onUndoRequested: bridge.undoTranscriptEdit()
+                    onRedoRequested: bridge.redoTranscriptEdit()
+                    onReplaceRequested: function (find, replace) {
+                        bridge.replaceInTranscript(find, replace, false)
+                    }
+                    onDictionaryRequested: bridge.applyDictionaryToTranscript()
+                    onExportPresetRequested: function (key, options) {
+                        bridge.transcriptExportPreset(key, options || {})
+                    }
+                    onCompareRequested: bridge.runTranscriptModelCompare()
+                    onOnlyFlaggedToggled: function (value) {
+                        view.onlyFlagged = value
+                    }
+                    onAssistantRequested: bridge.openTranscriptInAssistant()
+                }
+
+                // Текущая фраза синхронно со звуком - всегда над списком.
+                Rectangle {
+                    Layout.fillWidth: true
+                    visible: view.segs.length > 0 && view.activePhrase !== null
+                    implicitHeight: nowPlayingCol.implicitHeight + 2 * Theme.padCard
+                    radius: Theme.radiusLg
+                    color: Theme.surface3
+                    border.width: 1
+                    border.color: Theme.borderHi
+                    ColumnLayout {
+                        id: nowPlayingCol
+                        anchors.fill: parent
+                        anchors.margins: Theme.padCard
+                        spacing: 4
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.gapSm
+                            Label {
+                                text: player.playing ? "Сейчас звучит" : "Фраза"
+                                color: Theme.muted
+                                font.pixelSize: Theme.fsMicro
+                                font.weight: Font.DemiBold
+                            }
+                            Label {
+                                visible: view.activePhrase && String(view.activePhrase.speaker || "").length > 0
+                                text: view.activePhrase ? String(view.activePhrase.speaker) : ""
+                                color: Theme.speakerInk(view.activePhrase ? view.activePhrase.role : 0)
+                                font.pixelSize: Theme.fsSmall
+                                font.weight: Font.DemiBold
+                            }
+                            Item { Layout.fillWidth: true }
+                            Label {
+                                visible: view.activePhrase !== null
+                                text: view.activePhrase
+                                      ? (view.timecode(view.activePhrase.start) + " - "
+                                         + view.timecode(view.activePhrase.end))
+                                      : ""
+                                color: Theme.faint
+                                font.family: Theme.monoFamily
+                                font.pixelSize: Theme.fsMicro
                             }
                         }
                         Label {
                             Layout.fillWidth: true
-                            text: {
-                                var parts = [view.exportFormatKey.toUpperCase()]
-                                if (view.exportTimesForced || view.exportTimestamps)
-                                    parts.push("с таймкодами")
-                                else
-                                    parts.push("без таймкодов")
-                                parts.push(view.exportSpeakers ? "с голосами" : "только текст")
-                                if (view.exportFocusedOnly && view.focusKey > 0)
-                                    parts.push("один голос")
-                                return "Будет сохранено: " + parts.join(" · ")
-                                      + " · " + view.phrases(view.exportFocusedOnly && view.focusKey > 0
-                                                              ? view.rows.length : view.segs.length)
+                            text: view.activePhrase ? String(view.activePhrase.text || "") : ""
+                            color: Theme.text
+                            font.pixelSize: Theme.fsLead
+                            font.weight: Font.DemiBold
+                            wrapMode: Text.Wrap
+                            maximumLineCount: 4
+                            elide: Text.ElideRight
+                        }
+                    }
+                }
+
+                Connections {
+                    target: bridge
+                    function onChanged() { view.applyPendingSeek() }
+                }
+
+                // Как включить выбранный движок, если его нет на машине.
+                Rectangle {
+                    Layout.fillWidth: true
+                    visible: view.segs.length === 0
+                             && view.voices.ready !== true && view.voices.checking !== true
+                             && String(view.voices.hint || "").length > 0
+                    implicitHeight: setupBox.implicitHeight + 2 * Theme.padCard
+                    radius: Theme.radiusLg
+                    color: Theme.surface
+                    border.width: 1
+                    border.color: Theme.borderHi
+                    ColumnLayout {
+                        id: setupBox
+                        anchors.fill: parent
+                        anchors.margins: Theme.padCard
+                        spacing: Theme.gapSm
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.gapSm
+                            Icon { name: "warning"; ink: Theme.text; width: 16; height: 16 }
+                            Label {
+                                Layout.fillWidth: true
+                                text: String(view.voices.hint || "")
+                                color: Theme.text
+                                font.pixelSize: Theme.fsBody
+                                wrapMode: Text.Wrap
                             }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            visible: String(view.voices.install || "").length > 0
+                            spacing: Theme.gapSm
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: Math.max(34, command.implicitHeight + 14)
+                                radius: Theme.radiusMd
+                                color: Theme.fill
+                                border.width: 1
+                                border.color: Theme.hairline
+                                TextEdit {
+                                    id: command
+                                    anchors.fill: parent
+                                    anchors.margins: 9
+                                    text: String(view.voices.install || "")
+                                    readOnly: true
+                                    selectByMouse: true
+                                    wrapMode: TextEdit.WrapAnywhere
+                                    color: Theme.text
+                                    selectionColor: Theme.fillPress
+                                    font.family: Theme.monoFamily
+                                    font.pixelSize: Theme.fsSmall
+                                }
+                            }
+                            PillButton { text: "Копировать"; compact: true; onClicked: bridge.copyDiarizeInstall() }
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            visible: String(view.voices.engine || "") === "nemo"
+                            text: "Python-пакет NeMo не поддерживает Windows, поэтому используется нативный рантайм NVIDIA NeMo-Speech.cpp. Он не тянет torch и работает на процессоре."
                             color: Theme.faint
-                            font.pixelSize: Theme.fsMicro
+                            font.pixelSize: Theme.fsSmall
                             wrapMode: Text.Wrap
                         }
                     }
                 }
 
+                // Легенда говорящих: цвет, имя (правится), доля речи, фильтр.
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.topMargin: 2
-                    implicitHeight: 1
-                    color: Theme.hairline
-                }
+                    Layout.maximumHeight: 140
+                    visible: view.speakers.length > 0
+                    implicitHeight: Math.min(140, speakerBox.implicitHeight + 2 * Theme.padCard)
+                    radius: Theme.radiusLg
+                    color: Theme.surface
+                    border.width: 1
+                    border.color: Theme.border
+                    clip: true
+                    ColumnLayout {
+                        id: speakerBox
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: Theme.padCard
+                        spacing: Theme.gapSm
 
-                // Модель Whisper для этой расшифровки (общая настройка приложения).
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.gapSm
-                    Label {
-                        text: "Whisper"
-                        color: Theme.muted
-                        font.pixelSize: Theme.fsLabel
-                    }
-                    Dropdown {
-                        id: whisperPick
-                        Layout.preferredWidth: 210
-                        enabled: !view.busyPhase && !bridge.modelPreparing
-                        model: view.whisperModels
-                        textRole: "label"
-                        currentIndex: view.whisperModelIndex()
-                        onActivated: function (index) {
-                            view.selectWhisperModel(index)
+                        Flow {
+                            id: speakerRow
+                            Layout.fillWidth: true
+                            spacing: Theme.gapSm
+                            Repeater {
+                                model: view.speakers
+                                delegate: Rectangle {
+                                    id: chip
+                                    required property var modelData
+                                    readonly property bool focused: view.focusKey === Number(modelData.key)
+                                    readonly property string kind: String(modelData.kind || "voice")
+                                    function commit() {
+                                        var label = nameField.text.trim()
+                                        if (label.length) bridge.renameTranscriptSpeaker(Number(modelData.key), label)
+                                    }
+                                    function cycleKind() {
+                                        if (view.busyPhase)
+                                            return
+                                        bridge.setTranscriptSpeakerKind(
+                                            Number(chip.modelData.key),
+                                            view.nextSpeakerKind(chip.kind)
+                                        )
+                                    }
+                                    width: Math.min(360, Math.max(250, nameField.implicitWidth + share.implicitWidth + kindBtn.implicitWidth + 86))
+                                    implicitHeight: 38
+                                    radius: Theme.radiusLg
+                                    color: chip.focused ? Theme.fillHi : Theme.fill
+                                    border.width: 1
+                                    border.color: chip.focused ? Theme.borderHi : Theme.hairline
+                                    Behavior on color { ColorAnimation { duration: Theme.fastMs } }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        acceptedButtons: Qt.LeftButton
+                                        onClicked: view.focusKey = chip.focused ? 0 : Number(chip.modelData.key)
+                                        // Имя и вид правятся элементами поверх этой области.
+                                        propagateComposedEvents: true
+                                    }
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 12
+                                        anchors.rightMargin: 10
+                                        spacing: Theme.gapSm
+                                        Rectangle {
+                                            Layout.preferredWidth: 8
+                                            Layout.preferredHeight: 8
+                                            radius: 4
+                                            color: Theme.speakerInk(chip.modelData.key)
+                                        }
+                                        TextField {
+                                            id: nameField
+                                            Layout.fillWidth: true
+                                            text: String(chip.modelData.label || "")
+                                            color: Theme.text
+                                            font.pixelSize: Theme.fsLabel
+                                            enabled: !view.busyPhase
+                                            onActiveFocusChanged: if (!activeFocus) chip.commit()
+                                            onEditingFinished: chip.commit()
+                                            background: Item {}
+                                        }
+                                        PillButton {
+                                            id: kindBtn
+                                            text: view.speakerKindLabel(chip.kind)
+                                            compact: true
+                                            enabled: !view.busyPhase
+                                            onClicked: chip.cycleKind()
+                                            ToolTip.visible: hovered
+                                            ToolTip.text: "Вид: Голос / Парень / Девушка. Своё имя не затирается."
+                                        }
+                                        Label {
+                                            id: share
+                                            text: view.phrases(chip.modelData.count) + " · "
+                                                  + view.duration(chip.modelData.seconds)
+                                            color: Theme.faint
+                                            font.pixelSize: Theme.fsMicro
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Полоса голосов по всей записи: видно, кто и когда говорит.
+                        SpeakerTracks {
+                            Layout.fillWidth: true
+                            visible: view.speakers.length > 0 && view.segs.length > 0
+                            speakers: view.speakers
+                            segments: view.segs
+                            duration: view.total
+                            focusKey: view.focusKey
+                            mutedKeys: view.mutedKeys
+                            soloKeys: view.soloKeys
+                            onFocusRequested: function (key) { view.focusKey = key }
+                            onMuteToggled: function (key) { view.toggleMuteKey(key) }
+                            onSoloToggled: function (key) { view.toggleSoloKey(key) }
+                            onSeekRequested: function (start, end, index) {
+                                view.revealPhrase(index)
+                                view.playPhraseAt(start, end, index)
+                            }
+                        }
+
+                        Item {
+                            id: timeline
+                            Layout.fillWidth: true
+                            implicitHeight: 26
+                            visible: false
+
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: Theme.radiusSm
+                                color: Theme.surface2
+                                border.width: 1
+                                border.color: Theme.hairline
+                            }
+                            Repeater {
+                                model: view.segs
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    required property int index
+                                    readonly property bool dimmed: view.focusKey > 0
+                                                                   && Number(modelData.role) !== view.focusKey
+                                    x: 3 + (timeline.width - 6) * Math.min(1, Number(modelData.start) / view.total)
+                                    width: Math.max(2, (timeline.width - 6)
+                                           * Math.min(1, (Number(modelData.end) - Number(modelData.start)) / view.total))
+                                    y: 5
+                                    height: parent.height - 10
+                                    radius: 3
+                                    color: Theme.speakerInk(modelData.role)
+                                    opacity: dimmed ? 0.22 : 0.85
+                                    Behavior on opacity { NumberAnimation { duration: Theme.fastMs } }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            view.revealPhrase(parent.index)
+                                            view.playPhraseAt(parent.modelData.start, parent.modelData.end, parent.index)
+                                        }
+                                        ToolTip.visible: containsMouse
+                                        ToolTip.text: view.timecode(parent.modelData.start) + " · "
+                                                      + (parent.modelData.speaker || "голос не определён")
+                                                      + " · воспроизвести"
+                                    }
+                                }
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.gapSm
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+                                Label {
+                                    Layout.fillWidth: true
+                                    visible: view.engineNote.length > 0
+                                    text: view.engineNote
+                                    color: Theme.faint
+                                    font.pixelSize: Theme.fsSmall
+                                    elide: Text.ElideRight
+                                }
+                                // Подсказка про фильтр нужна ровно тогда, когда есть
+                                // между кем выбирать, и мешает, когда фильтр уже стоит.
+                                Label {
+                                    Layout.fillWidth: true
+                                    visible: view.focusKey === 0 && view.speakers.length > 1
+                                    text: "Нажмите на голос, чтобы оставить в списке только его реплики, или на полосу - чтобы перейти к фразе и услышать её."
+                                    color: Theme.faint
+                                    font.pixelSize: Theme.fsSmall
+                                    elide: Text.ElideRight
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    visible: view.focusKey > 0
+                                    text: "Показаны реплики одного голоса: " + view.rows.length + " из " + view.segs.length + "."
+                                    color: Theme.muted
+                                    font.pixelSize: Theme.fsSmall
+                                }
+                            }
+                            PillButton {
+                                text: "Показать всех"
+                                compact: true
+                                visible: view.focusKey > 0
+                                onClicked: view.focusKey = 0
+                            }
                         }
                     }
-                    StatusDot {
-                        active: Boolean(view.whisperDisk(bridge.settings.model).ready)
-                        tint: Boolean(view.whisperDisk(bridge.settings.model).ready)
-                              ? Theme.text
-                              : (bridge.modelPreparing
-                                 && String(bridge.modelState.model) === String(bridge.settings.model)
-                                 ? Theme.muted : Theme.rec)
-                    }
-                    Label {
-                        Layout.fillWidth: true
-                        text: view.whisperModelNote()
-                        color: Theme.muted
-                        font.pixelSize: Theme.fsSmall
-                        elide: Text.ElideRight
-                    }
-                    PillButton {
-                        text: "Загрузить"
-                        compact: true
-                        visible: !Boolean(view.whisperDisk(bridge.settings.model).ready)
-                                 && !(bridge.modelPreparing
-                                      && String(bridge.modelState.model) === String(bridge.settings.model))
-                        enabled: !view.busyPhase && !bridge.modelPreparing
-                        onClicked: bridge.prepareSelectedModel()
-                        ToolTip.visible: hovered
-                        ToolTip.text: "Скачать выбранную модель Whisper в локальный кеш"
-                    }
-                    PillButton {
-                        text: "Отмена"
-                        compact: true
-                        visible: bridge.modelPreparing
-                                 && String(bridge.modelState.model) === String(bridge.settings.model)
-                        onClicked: bridge.cancelModelPrepare()
-                    }
                 }
 
-                // Выбор движка голосов и его готовность.
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.gapSm
-                    Label {
-                        text: "Голоса"
-                        color: Theme.muted
-                        font.pixelSize: Theme.fsLabel
-                    }
-                    Dropdown {
-                        id: enginePick
-                        Layout.preferredWidth: 190
-                        enabled: !view.busyPhase
-                        model: view.engines
-                        textRole: "label"
-                        currentIndex: view.engineIndex()
-                        onActivated: function (index) {
-                            bridge.setDiarizeEngine(String(view.engines[index].key))
-                        }
-                    }
-                    StatusDot {
-                        active: view.voices.ready === true
-                        tint: view.voices.ready === true ? Theme.text
-                              : view.voices.checking === true ? Theme.muted : Theme.rec
-                    }
-                    Label {
-                        Layout.fillWidth: true
-                        text: String(view.voices.message || "")
-                        color: view.voices.ready === true ? Theme.muted : Theme.text
-                        font.pixelSize: Theme.fsSmall
-                        elide: Text.ElideRight
-                    }
-                    PillButton {
-                        text: "Проверить снова"
-                        compact: true
-                        visible: String(view.voices.engine || "") === "nemo"
-                        enabled: view.voices.checking !== true && !view.busyPhase
-                        onClicked: bridge.refreshDiarizeStatus()
-                    }
-                }
-
-                TranscriptBusy {
-                    Layout.fillWidth: true
-                    active: view.busyPhase
-                    stage: view.stage
-                    progress: view.progress
-                    fileName: view.file
-                    message: view.busyMessage()
-                }
-                } // topRow
-            } // topFlick
-        }
-
-        // Плеер исходника: доступен сразу после выбора файла, до ASR.
-        TranscriptPlayer {
-            id: player
-            Layout.fillWidth: true
-            compact: view.segs.length > 0
-            visible: view.hasMedia
-            source: view.mediaUrl
-            segments: view.segs
-            peaks: bridge.mediaPeaks
-            peaksDuration: bridge.mediaPeaksDuration
-            selectedIndex: view.playIndex >= 0 ? view.playIndex : view.editingIndex
-            editableEdges: view.segs.length > 0 && !view.busyPhase
-            onPlayingChanged: view.syncPlayIndex()
-            onPositionChanged: view.syncPlayIndex()
-            onDurationChanged: view.applyPendingSeek()
-            onEdgeChanged: function (index, start, end) {
-                bridge.setTranscriptPhraseWindow(index, start, end)
-            }
-        }
-
-        TranscriptTools {
-            Layout.fillWidth: true
-            visible: view.segs.length > 0
-            busy: view.busyPhase
-            quality: bridge.transcriptQuality
-            presets: bridge.transcriptExportPresets
-            compare: bridge.transcriptCompare
-            canUndo: bridge.transcriptCanUndo
-            canRedo: bridge.transcriptCanRedo
-            onlyFlagged: view.onlyFlagged
-            onUndoRequested: bridge.undoTranscriptEdit()
-            onRedoRequested: bridge.redoTranscriptEdit()
-            onReplaceRequested: function (find, replace) {
-                bridge.replaceInTranscript(find, replace, false)
-            }
-            onDictionaryRequested: bridge.applyDictionaryToTranscript()
-            onExportPresetRequested: function (key) {
-                bridge.transcriptExportPreset(key)
-            }
-            onCompareRequested: bridge.runTranscriptModelCompare()
-            onOnlyFlaggedToggled: function (value) {
-                view.onlyFlagged = value
-            }
-            onAssistantRequested: bridge.openTranscriptInAssistant()
-        }
-
-        // Текущая фраза синхронно со звуком - всегда над списком.
-        Rectangle {
-            Layout.fillWidth: true
-            visible: view.segs.length > 0 && view.activePhrase !== null
-            implicitHeight: nowPlayingCol.implicitHeight + 2 * Theme.padCard
-            radius: Theme.radiusLg
-            color: Theme.surface3
-            border.width: 1
-            border.color: Theme.borderHi
-            ColumnLayout {
-                id: nowPlayingCol
-                anchors.fill: parent
-                anchors.margins: Theme.padCard
-                spacing: 4
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.gapSm
-                    Label {
-                        text: player.playing ? "Сейчас звучит" : "Фраза"
-                        color: Theme.muted
-                        font.pixelSize: Theme.fsMicro
-                        font.weight: Font.DemiBold
-                    }
-                    Label {
-                        visible: view.activePhrase && String(view.activePhrase.speaker || "").length > 0
-                        text: view.activePhrase ? String(view.activePhrase.speaker) : ""
-                        color: Theme.speakerInk(view.activePhrase ? view.activePhrase.role : 0)
-                        font.pixelSize: Theme.fsSmall
-                        font.weight: Font.DemiBold
-                    }
-                    Item { Layout.fillWidth: true }
-                    Label {
-                        visible: view.activePhrase !== null
-                        text: view.activePhrase
-                              ? (view.timecode(view.activePhrase.start) + " - "
-                                 + view.timecode(view.activePhrase.end))
-                              : ""
-                        color: Theme.faint
-                        font.family: Theme.monoFamily
-                        font.pixelSize: Theme.fsMicro
-                    }
-                }
+                // Причина, по которой голоса не определились: текст всё равно есть.
                 Label {
                     Layout.fillWidth: true
-                    text: view.activePhrase ? String(view.activePhrase.text || "") : ""
-                    color: Theme.text
-                    font.pixelSize: Theme.fsLead
-                    font.weight: Font.DemiBold
-                    wrapMode: Text.Wrap
-                    maximumLineCount: 4
-                    elide: Text.ElideRight
-                }
-            }
-        }
-
-        Connections {
-            target: bridge
-            function onChanged() { view.applyPendingSeek() }
-        }
-
-        // Как включить выбранный движок, если его нет на машине.
-        Rectangle {
-            Layout.fillWidth: true
-            visible: view.segs.length === 0
-                     && view.voices.ready !== true && view.voices.checking !== true
-                     && String(view.voices.hint || "").length > 0
-            implicitHeight: setupBox.implicitHeight + 2 * Theme.padCard
-            radius: Theme.radiusLg
-            color: Theme.surface
-            border.width: 1
-            border.color: Theme.borderHi
-            ColumnLayout {
-                id: setupBox
-                anchors.fill: parent
-                anchors.margins: Theme.padCard
-                spacing: Theme.gapSm
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.gapSm
-                    Icon { name: "warning"; ink: Theme.text; width: 16; height: 16 }
-                    Label {
-                        Layout.fillWidth: true
-                        text: String(view.voices.hint || "")
-                        color: Theme.text
-                        font.pixelSize: Theme.fsBody
-                        wrapMode: Text.Wrap
-                    }
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    visible: String(view.voices.install || "").length > 0
-                    spacing: Theme.gapSm
-                    Rectangle {
-                        Layout.fillWidth: true
-                        implicitHeight: Math.max(34, command.implicitHeight + 14)
-                        radius: Theme.radiusMd
-                        color: Theme.fill
-                        border.width: 1
-                        border.color: Theme.hairline
-                        TextEdit {
-                            id: command
-                            anchors.fill: parent
-                            anchors.margins: 9
-                            text: String(view.voices.install || "")
-                            readOnly: true
-                            selectByMouse: true
-                            wrapMode: TextEdit.WrapAnywhere
-                            color: Theme.text
-                            selectionColor: Theme.fillPress
-                            font.family: Theme.monoFamily
-                            font.pixelSize: Theme.fsSmall
-                        }
-                    }
-                    PillButton { text: "Копировать"; compact: true; onClicked: bridge.copyDiarizeInstall() }
-                }
-                Label {
-                    Layout.fillWidth: true
-                    visible: String(view.voices.engine || "") === "nemo"
-                    text: "Python-пакет NeMo не поддерживает Windows, поэтому используется нативный рантайм NVIDIA NeMo-Speech.cpp. Он не тянет torch и работает на процессоре."
-                    color: Theme.faint
+                    visible: view.speakers.length === 0 && view.engineNote.length > 0
+                    text: view.engineNote
+                    color: Theme.muted
                     font.pixelSize: Theme.fsSmall
                     wrapMode: Text.Wrap
                 }
+
+
             }
         }
 
-        // Легенда говорящих: цвет, имя (правится), доля речи, фильтр.
-        Rectangle {
-            Layout.fillWidth: true
-            Layout.maximumHeight: 140
-            visible: view.speakers.length > 0
-            implicitHeight: Math.min(140, speakerBox.implicitHeight + 2 * Theme.padCard)
-            radius: Theme.radiusLg
-            color: Theme.surface
-            border.width: 1
-            border.color: Theme.border
-            clip: true
-            ColumnLayout {
-                id: speakerBox
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.margins: Theme.padCard
-                spacing: Theme.gapSm
-
-                Flow {
-                    id: speakerRow
-                    Layout.fillWidth: true
-                    spacing: Theme.gapSm
-                    Repeater {
-                        model: view.speakers
-                        delegate: Rectangle {
-                            id: chip
-                            required property var modelData
-                            readonly property bool focused: view.focusKey === Number(modelData.key)
-                            readonly property string kind: String(modelData.kind || "voice")
-                            function commit() {
-                                var label = nameField.text.trim()
-                                if (label.length) bridge.renameTranscriptSpeaker(Number(modelData.key), label)
-                            }
-                            function cycleKind() {
-                                if (view.busyPhase)
-                                    return
-                                bridge.setTranscriptSpeakerKind(
-                                    Number(chip.modelData.key),
-                                    view.nextSpeakerKind(chip.kind)
-                                )
-                            }
-                            width: Math.min(360, Math.max(250, nameField.implicitWidth + share.implicitWidth + kindBtn.implicitWidth + 86))
-                            implicitHeight: 38
-                            radius: Theme.radiusLg
-                            color: chip.focused ? Theme.fillHi : Theme.fill
-                            border.width: 1
-                            border.color: chip.focused ? Theme.borderHi : Theme.hairline
-                            Behavior on color { ColorAnimation { duration: Theme.fastMs } }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                acceptedButtons: Qt.LeftButton
-                                onClicked: view.focusKey = chip.focused ? 0 : Number(chip.modelData.key)
-                                // Имя и вид правятся элементами поверх этой области.
-                                propagateComposedEvents: true
-                            }
-
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 12
-                                anchors.rightMargin: 10
-                                spacing: Theme.gapSm
-                                Rectangle {
-                                    Layout.preferredWidth: 8
-                                    Layout.preferredHeight: 8
-                                    radius: 4
-                                    color: Theme.speakerInk(chip.modelData.key)
-                                }
-                                TextField {
-                                    id: nameField
-                                    Layout.fillWidth: true
-                                    text: String(chip.modelData.label || "")
-                                    color: Theme.text
-                                    font.pixelSize: Theme.fsLabel
-                                    enabled: !view.busyPhase
-                                    onActiveFocusChanged: if (!activeFocus) chip.commit()
-                                    onEditingFinished: chip.commit()
-                                    background: Item {}
-                                }
-                                PillButton {
-                                    id: kindBtn
-                                    text: view.speakerKindLabel(chip.kind)
-                                    compact: true
-                                    enabled: !view.busyPhase
-                                    onClicked: chip.cycleKind()
-                                    ToolTip.visible: hovered
-                                    ToolTip.text: "Вид: Голос / Парень / Девушка. Своё имя не затирается."
-                                }
-                                Label {
-                                    id: share
-                                    text: view.phrases(chip.modelData.count) + " · "
-                                          + view.duration(chip.modelData.seconds)
-                                    color: Theme.faint
-                                    font.pixelSize: Theme.fsMicro
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Полоса голосов по всей записи: видно, кто и когда говорит.
-                SpeakerTracks {
-                    Layout.fillWidth: true
-                    visible: view.speakers.length > 0 && view.segs.length > 0
-                    speakers: view.speakers
-                    segments: view.segs
-                    duration: view.total
-                    focusKey: view.focusKey
-                    mutedKeys: view.mutedKeys
-                    soloKeys: view.soloKeys
-                    onFocusRequested: function (key) { view.focusKey = key }
-                    onMuteToggled: function (key) { view.toggleMuteKey(key) }
-                    onSoloToggled: function (key) { view.toggleSoloKey(key) }
-                    onSeekRequested: function (start, end, index) {
-                        view.revealPhrase(index)
-                        view.playPhraseAt(start, end, index)
-                    }
-                }
-
-                Item {
-                    id: timeline
-                    Layout.fillWidth: true
-                    implicitHeight: 26
-                    visible: false
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: Theme.radiusSm
-                        color: Theme.surface2
-                        border.width: 1
-                        border.color: Theme.hairline
-                    }
-                    Repeater {
-                        model: view.segs
-                        delegate: Rectangle {
-                            required property var modelData
-                            required property int index
-                            readonly property bool dimmed: view.focusKey > 0
-                                                           && Number(modelData.role) !== view.focusKey
-                            x: 3 + (timeline.width - 6) * Math.min(1, Number(modelData.start) / view.total)
-                            width: Math.max(2, (timeline.width - 6)
-                                   * Math.min(1, (Number(modelData.end) - Number(modelData.start)) / view.total))
-                            y: 5
-                            height: parent.height - 10
-                            radius: 3
-                            color: Theme.speakerInk(modelData.role)
-                            opacity: dimmed ? 0.22 : 0.85
-                            Behavior on opacity { NumberAnimation { duration: Theme.fastMs } }
-                            MouseArea {
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    view.revealPhrase(parent.index)
-                                    view.playPhraseAt(parent.modelData.start, parent.modelData.end, parent.index)
-                                }
-                                ToolTip.visible: containsMouse
-                                ToolTip.text: view.timecode(parent.modelData.start) + " · "
-                                              + (parent.modelData.speaker || "голос не определён")
-                                              + " · воспроизвести"
-                            }
-                        }
-                    }
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.gapSm
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 2
-                        Label {
-                            Layout.fillWidth: true
-                            visible: view.engineNote.length > 0
-                            text: view.engineNote
-                            color: Theme.faint
-                            font.pixelSize: Theme.fsSmall
-                            elide: Text.ElideRight
-                        }
-                        // Подсказка про фильтр нужна ровно тогда, когда есть
-                        // между кем выбирать, и мешает, когда фильтр уже стоит.
-                        Label {
-                            Layout.fillWidth: true
-                            visible: view.focusKey === 0 && view.speakers.length > 1
-                            text: "Нажмите на голос, чтобы оставить в списке только его реплики, или на полосу - чтобы перейти к фразе и услышать её."
-                            color: Theme.faint
-                            font.pixelSize: Theme.fsSmall
-                            elide: Text.ElideRight
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            visible: view.focusKey > 0
-                            text: "Показаны реплики одного голоса: " + view.rows.length + " из " + view.segs.length + "."
-                            color: Theme.muted
-                            font.pixelSize: Theme.fsSmall
-                        }
-                    }
-                    PillButton {
-                        text: "Показать всех"
-                        compact: true
-                        visible: view.focusKey > 0
-                        onClicked: view.focusKey = 0
-                    }
-                }
-            }
-        }
-
-        // Причина, по которой голоса не определились: текст всё равно есть.
-        Label {
-            Layout.fillWidth: true
-            visible: view.speakers.length === 0 && view.engineNote.length > 0
-            text: view.engineNote
-            color: Theme.muted
-            font.pixelSize: Theme.fsSmall
-            wrapMode: Text.Wrap
-        }
-
-        // Список фраз с говорящим и таймкодом - всегда занимает оставшееся место.
+        // Низ: список фраз - отдельная панель, тянется ручкой SplitView.
         Item {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            Layout.minimumHeight: 220
-            Layout.preferredHeight: 320
+            SplitView.fillHeight: true
+            SplitView.minimumHeight: 150
             clip: true
             ColumnLayout {
                 anchors.centerIn: parent
@@ -1203,7 +1222,7 @@ Rectangle {
                 spacing: Theme.gapSm
                 clip: true
                 visible: view.segs.length > 0
-                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 10 }
                 header: Item {
                     width: segList.width
                     height: phraseHead.implicitHeight + Theme.gapSm

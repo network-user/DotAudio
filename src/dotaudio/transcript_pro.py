@@ -23,6 +23,10 @@ EXPORT_PRESETS: dict[str, dict[str, Any]] = {
         "format": "txt",
         "include_timestamps": True,
         "include_speakers": True,
+        "include_confidence": True,
+        "include_review_flags": True,
+        "include_header": True,
+        "include_phrase_numbers": True,
         "style": "court",
     },
     "protocol": {
@@ -30,6 +34,10 @@ EXPORT_PRESETS: dict[str, dict[str, Any]] = {
         "format": "txt",
         "include_timestamps": False,
         "include_speakers": True,
+        "include_confidence": False,
+        "include_review_flags": False,
+        "include_header": False,
+        "include_phrase_numbers": False,
         "style": "protocol",
     },
     "youtube": {
@@ -37,6 +45,10 @@ EXPORT_PRESETS: dict[str, dict[str, Any]] = {
         "format": "srt",
         "include_timestamps": True,
         "include_speakers": False,
+        "include_confidence": False,
+        "include_review_flags": False,
+        "include_header": False,
+        "include_phrase_numbers": False,
         "style": "youtube",
     },
     "broadcast": {
@@ -44,6 +56,10 @@ EXPORT_PRESETS: dict[str, dict[str, Any]] = {
         "format": "vtt",
         "include_timestamps": True,
         "include_speakers": True,
+        "include_confidence": False,
+        "include_review_flags": False,
+        "include_header": False,
+        "include_phrase_numbers": False,
         "style": "broadcast",
     },
     "json_pipeline": {
@@ -51,6 +67,10 @@ EXPORT_PRESETS: dict[str, dict[str, Any]] = {
         "format": "json",
         "include_timestamps": True,
         "include_speakers": True,
+        "include_confidence": True,
+        "include_review_flags": True,
+        "include_header": False,
+        "include_phrase_numbers": False,
         "style": "json",
     },
     "plain": {
@@ -58,9 +78,51 @@ EXPORT_PRESETS: dict[str, dict[str, Any]] = {
         "format": "txt",
         "include_timestamps": False,
         "include_speakers": False,
+        "include_confidence": False,
+        "include_review_flags": False,
+        "include_header": False,
+        "include_phrase_numbers": False,
         "style": "plain",
     },
 }
+
+_OPTION_KEYS = (
+    "include_timestamps",
+    "include_speakers",
+    "include_confidence",
+    "include_review_flags",
+    "include_header",
+    "include_phrase_numbers",
+)
+
+
+def resolve_export_options(
+    preset_key: str,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge preset defaults with user overrides for export filters."""
+
+    key = str(preset_key or "plain").strip().lower()
+    preset = dict(EXPORT_PRESETS.get(key) or EXPORT_PRESETS["plain"])
+    options = {
+        "preset": key,
+        "format": str(preset.get("format") or "txt"),
+        "style": str(preset.get("style") or "plain"),
+        "label": str(preset.get("label") or key),
+    }
+    for name in _OPTION_KEYS:
+        options[name] = bool(preset.get(name, False))
+    for name, value in (overrides or {}).items():
+        if name in _OPTION_KEYS:
+            options[name] = bool(value)
+    return options
+
+
+def preset_defaults(preset_key: str) -> dict[str, Any]:
+    """Defaults for QML toggles when the user picks a preset."""
+
+    options = resolve_export_options(preset_key)
+    return {name: options[name] for name in _OPTION_KEYS}
 
 
 def confidence_from_logprob(avg_logprob: float) -> float:
@@ -334,51 +396,72 @@ def court_document(
     title: str = "",
     source: str = "",
     model: str = "",
+    include_timestamps: bool = True,
+    include_speakers: bool = True,
+    include_confidence: bool = True,
+    include_review_flags: bool = True,
+    include_header: bool = True,
+    include_phrase_numbers: bool = True,
 ) -> str:
     """Formal transcript for court / hearing protocol use."""
 
-    lines = [
-        "ПРОТОКОЛ РАСШИФРОВКИ АУДИОЗАПИСИ",
-        "",
-    ]
-    if title:
-        lines.append(f"Материал: {title}")
-    if source:
-        lines.append(f"Файл: {source}")
-    if model:
-        lines.append(f"Модель распознавания: {model}")
-    stats = quality_stats(segments)
-    lines.append(f"Фраз: {stats['total']}")
-    if stats["flagged"]:
-        lines.append(
-            f"Требуют проверки (низкая уверенность): {stats['flagged']}"
-        )
-    lines.append("")
-    lines.append("-" * 48)
-    lines.append("")
+    lines: list[str] = []
+    if include_header:
+        lines.extend(["ПРОТОКОЛ РАСШИФРОВКИ АУДИОЗАПИСИ", ""])
+        if title:
+            lines.append(f"Материал: {title}")
+        if source:
+            lines.append(f"Файл: {source}")
+        if model:
+            lines.append(f"Модель распознавания: {model}")
+        stats = quality_stats(segments)
+        lines.append(f"Фраз: {stats['total']}")
+        if include_review_flags and stats["flagged"]:
+            lines.append(
+                f"Требуют проверки (низкая уверенность): {stats['flagged']}"
+            )
+        lines.append("")
+        lines.append("-" * 48)
+        lines.append("")
     for index, row in enumerate(segments, start=1):
         start = float(row.get("start", 0.0))
         end = float(row.get("end", start))
         speaker = str(row.get("speaker") or "").strip() or "НЕ УКАЗАН"
         text = str(row.get("text") or "").strip()
         conf = segment_confidence(row)
-        stamp = _fmt_range(start, end)
+        head_parts: list[str] = []
+        if include_phrase_numbers:
+            head_parts.append(f"{index}.")
+        if include_timestamps:
+            head_parts.append(_fmt_range(start, end))
+        if head_parts:
+            lines.append(" ".join(head_parts))
         flag = ""
-        if needs_review(row) and not row.get("reviewed"):
+        if include_review_flags and needs_review(row) and not row.get("reviewed"):
             flag = " [НА ПРОВЕРКУ]"
-        elif conf >= 0:
+        elif include_confidence and conf >= 0:
             flag = f" [уверенность {conf:.0%}]"
-        lines.append(f"{index}. {stamp}")
-        lines.append(f"   Говорящий: {speaker}{flag}")
-        lines.append(f"   {text}")
+        if include_speakers:
+            lines.append(f"   Говорящий: {speaker}{flag}")
+        elif flag:
+            lines.append(f"   {flag.strip()}")
+        lines.append(f"   {text}" if include_speakers or include_phrase_numbers or include_timestamps else text)
         lines.append("")
-    lines.append("-" * 48)
-    lines.append("Конец протокола.")
-    return "\n".join(lines)
+    if include_header:
+        lines.append("-" * 48)
+        lines.append("Конец протокола.")
+    return "\n".join(lines).rstrip() + ("\n" if lines else "")
 
 
-def protocol_document(segments: list[dict[str, Any]]) -> str:
-    """Speaker-labelled plain protocol without timestamps."""
+def protocol_document(
+    segments: list[dict[str, Any]],
+    *,
+    include_timestamps: bool = False,
+    include_speakers: bool = True,
+    include_confidence: bool = False,
+    include_review_flags: bool = False,
+) -> str:
+    """Speaker-labelled protocol; optional timestamps and confidence notes."""
 
     blocks: list[str] = []
     previous = None
@@ -387,12 +470,43 @@ def protocol_document(segments: list[dict[str, Any]]) -> str:
         text = str(row.get("text") or "").strip()
         if not text:
             continue
-        if speaker != previous:
-            blocks.append(f"{speaker}:")
-            previous = speaker
-        blocks.append(text)
+        notes: list[str] = []
+        if include_timestamps:
+            notes.append(_fmt_range(float(row.get("start", 0.0)), float(row.get("end", 0.0))))
+        conf = segment_confidence(row)
+        if include_review_flags and needs_review(row) and not row.get("reviewed"):
+            notes.append("на проверку")
+        elif include_confidence and conf >= 0:
+            notes.append(f"{conf:.0%}")
+        suffix = f" ({'; '.join(notes)})" if notes else ""
+        if include_speakers:
+            if speaker != previous:
+                blocks.append(f"{speaker}:")
+                previous = speaker
+            blocks.append(f"{text}{suffix}")
+        else:
+            blocks.append(f"{text}{suffix}")
         blocks.append("")
     return "\n".join(blocks).rstrip() + ("\n" if blocks else "")
+
+
+def _annotate_text(
+    text: str,
+    row: dict[str, Any],
+    *,
+    include_confidence: bool,
+    include_review_flags: bool,
+) -> str:
+    body = str(text or "").strip()
+    notes: list[str] = []
+    conf = segment_confidence(row)
+    if include_review_flags and needs_review(row) and not row.get("reviewed"):
+        notes.append("на проверку")
+    elif include_confidence and conf >= 0:
+        notes.append(f"{conf:.0%}")
+    if not notes:
+        return body
+    return f"{body} [{'; '.join(notes)}]".strip()
 
 
 def export_with_preset(
@@ -402,59 +516,113 @@ def export_with_preset(
     title: str = "",
     source: str = "",
     model: str = "",
+    options: dict[str, Any] | None = None,
 ) -> tuple[str, str, str]:
     """Return (text, format_ext, suggested_filename_stem).
 
-    Uses transcripts.export_transcript for standard formats; court/protocol
-    use dedicated layouts.
+    ``options`` overrides preset defaults: timestamps, speakers, confidence,
+    review flags, header, phrase numbers.
     """
 
     from dotaudio.transcripts import export_transcript, regroup_for_subtitles
 
-    key = str(preset_key or "plain").strip().lower()
-    preset = EXPORT_PRESETS.get(key) or EXPORT_PRESETS["plain"]
-    fmt = str(preset["format"])
-    style = str(preset.get("style") or "")
+    opts = resolve_export_options(preset_key, options)
+    fmt = str(opts["format"])
+    style = str(opts["style"])
     rows = list(segments)
+    with_times = bool(opts["include_timestamps"])
+    with_speakers = bool(opts["include_speakers"])
+    with_conf = bool(opts["include_confidence"])
+    with_flags = bool(opts["include_review_flags"])
 
     if style == "court":
-        return court_document(rows, title=title, source=source, model=model), "txt", "protocol_court"
+        return (
+            court_document(
+                rows,
+                title=title,
+                source=source,
+                model=model,
+                include_timestamps=with_times,
+                include_speakers=with_speakers,
+                include_confidence=with_conf,
+                include_review_flags=with_flags,
+                include_header=bool(opts["include_header"]),
+                include_phrase_numbers=bool(opts["include_phrase_numbers"]),
+            ),
+            "txt",
+            "protocol_court",
+        )
     if style == "protocol":
-        return protocol_document(rows), "txt", "protocol"
+        return (
+            protocol_document(
+                rows,
+                include_timestamps=with_times,
+                include_speakers=with_speakers,
+                include_confidence=with_conf,
+                include_review_flags=with_flags,
+            ),
+            "txt",
+            "protocol",
+        )
+
+    # Enrich cue/segment text with optional confidence / review notes.
+    def annotated(source_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for row in source_rows:
+            item = dict(row)
+            item["text"] = _annotate_text(
+                str(row.get("text") or ""),
+                row,
+                include_confidence=with_conf,
+                include_review_flags=with_flags,
+            )
+            out.append(item)
+        return out
+
     if style == "plain":
         body = export_transcript(
-            rows,
+            annotated(rows),
             "txt",
-            include_timestamps=False,
-            include_speakers=False,
+            include_timestamps=with_times,
+            include_speakers=with_speakers,
         )
         return body, "txt", "transcript"
     if fmt in ("srt", "vtt"):
         cues = regroup_for_subtitles(rows)
-        # Keep speakers on cues when requested.
-        if preset.get("include_speakers"):
+        if with_speakers or with_conf or with_flags:
             enriched = []
             for cue in cues:
                 mid = (float(cue["start"]) + float(cue["end"])) / 2.0
                 speaker = ""
+                source_row: dict[str, Any] = cue
                 for seg in rows:
                     if float(seg["start"]) <= mid <= float(seg["end"]):
                         speaker = str(seg.get("speaker") or "").strip()
+                        source_row = seg
                         break
-                enriched.append({**cue, "speaker": speaker})
+                item = {**cue, "speaker": speaker}
+                item["text"] = _annotate_text(
+                    str(cue.get("text") or ""),
+                    source_row,
+                    include_confidence=with_conf,
+                    include_review_flags=with_flags,
+                )
+                enriched.append(item)
             cues = enriched
         body = export_transcript(
             cues,
             fmt,
             include_timestamps=True,
-            include_speakers=bool(preset.get("include_speakers")),
+            include_speakers=with_speakers,
         )
         return body, fmt, f"subtitles_{fmt}"
     body = export_transcript(
-        rows,
+        annotated(rows),
         fmt,
-        include_timestamps=bool(preset.get("include_timestamps")),
-        include_speakers=bool(preset.get("include_speakers")),
+        include_timestamps=with_times,
+        include_speakers=with_speakers,
+        include_confidence=with_conf,
+        include_review_flags=with_flags,
     )
     return body, fmt, f"transcript_{fmt}"
 
@@ -557,8 +725,14 @@ def _fmt_ts(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}.{ms:03d}"
 
 
-def preset_list() -> list[dict[str, str]]:
-    return [{"key": key, "label": str(meta["label"])} for key, meta in EXPORT_PRESETS.items()]
+def preset_list() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key, meta in EXPORT_PRESETS.items():
+        row: dict[str, Any] = {"key": key, "label": str(meta["label"])}
+        for name in _OPTION_KEYS:
+            row[name] = bool(meta.get(name, False))
+        rows.append(row)
+    return rows
 
 
 __all__ = [
@@ -575,9 +749,11 @@ __all__ = [
     "mark_reviewed",
     "merge_segments",
     "needs_review",
+    "preset_defaults",
     "preset_list",
     "protocol_document",
     "quality_stats",
+    "resolve_export_options",
     "segment_confidence",
     "serialize_compare_report",
     "set_phrase_window",

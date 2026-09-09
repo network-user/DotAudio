@@ -4,17 +4,33 @@ import QtQuick.Layouts
 import "Theme.js" as Theme
 
 // Страница диктовки: запись, готовый текст и список фраз.
+// SplitView: шапка и лента фраз тянутся ручкой при низком окне.
 Item {
-    ColumnLayout {
+    SplitView {
         anchors.fill: parent
-        spacing: 14
+        orientation: Qt.Vertical
+        handle: Item {
+            implicitWidth: 1
+            implicitHeight: 10
+            Rectangle {
+                anchors.centerIn: parent
+                width: 56
+                height: 3
+                radius: 1.5
+                color: SplitHandle.pressed || SplitHandle.hovered ? Theme.text : Theme.border
+            }
+        }
+
         Rectangle {
-            Layout.fillWidth: true
-            Layout.preferredHeight: 248
+            SplitView.preferredHeight: 248
+            SplitView.minimumHeight: 160
+            SplitView.maximumHeight: Math.max(180, parent.height - 120)
             radius: Theme.radiusXl
             color: Theme.surface
             border.width: 1
             border.color: Theme.border
+            clip: true
+
             ColumnLayout {
                 anchors.fill: parent
                 anchors.margins: 24
@@ -85,13 +101,12 @@ Item {
                         Behavior on opacity { NumberAnimation { duration: Theme.fastMs } }
                     }
                 }
-                RowLayout {
+                Flow {
                     Layout.fillWidth: true
                     spacing: Theme.gapSm
                     Dropdown {
                         id: micChooser
-                        Layout.fillWidth: true
-                        Layout.maximumWidth: 280
+                        width: Math.min(280, Math.max(160, parent.width * 0.35))
                         enabled: !bridge.recording && !bridge.busy
                         model: [{ name: "Системный микрофон", id: "" }].concat(bridge.devices)
                         textRole: "name"
@@ -132,11 +147,15 @@ Item {
                     PillButton { text: bridge.recording ? "Стоп" : bridge.busy ? "Остановить" : "Диктовать"; primary: true; onClicked: bridge.toggleRecording() }
                     PillButton { text: "Копировать"; enabled: bridge.text.length > 0; onClicked: bridge.copyText() }
                     PillButton { text: "Вставить последний"; enabled: bridge.lastTranscript.length > 0 && !bridge.recording; onClicked: bridge.pasteLastTranscript() }
-                    Item { Layout.fillWidth: true }
-                    Waveform { Layout.preferredWidth: 140; bars: 18; barH: 18 }
+                    Waveform { bars: 18; barH: 18 }
                 }
             }
         }
-        TranscriptEditor { Layout.fillWidth: true; Layout.fillHeight: true; editable: true }
+
+        TranscriptEditor {
+            SplitView.fillHeight: true
+            SplitView.minimumHeight: 120
+            editable: true
+        }
     }
 }
