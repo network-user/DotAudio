@@ -21,7 +21,13 @@ from PySide6.QtWidgets import QApplication, QFileDialog
 
 from dotaudio import assistant as core
 from dotaudio import hardware, llm, modelhub
-from dotaudio.assistant import Digest, TranscriptAssistant, build_chunks
+from dotaudio.assistant import (
+    Digest,
+    TranscriptAssistant,
+    build_chunk_embeddings,
+    build_chunks,
+    outline_text,
+)
 from dotaudio.llm import GenerationOptions
 from dotaudio.storage import GENERAL_CHAT_ID
 
@@ -43,6 +49,14 @@ ACTION_LABELS = {
 
 GENERAL_CHAT_TITLE = "Свободный разговор"
 
+_TASK_PRIORITY = {"answer": 0, "action": 1, "title": 2, "index": 3}
+_TASK_LABELS = {
+    "answer": "ответ",
+    "action": "действие",
+    "title": "название",
+    "index": "карта записи",
+}
+
 
 class StoreDigests:
     """Выжимки частей записи, живущие в базе рядом с расшифровкой."""
@@ -56,8 +70,11 @@ class StoreDigests:
         if session_id in self._cache:
             return dict(self._cache[session_id])
         rows = self.store.list_digests(session_id)
-        found = {
-            int(row["chunk_index"]): Digest(
+        found: dict[int, Digest] = {}
+        for row in rows:
+            if self.model_id and str(row.get("model") or "") != self.model_id:
+                continue
+            found[int(row["chunk_index"])] = Digest(
                 index=int(row["chunk_index"]),
                 start=float(row["start"]),
                 end=float(row["end"]),
@@ -65,8 +82,6 @@ class StoreDigests:
                 keywords=tuple(row.get("keywords") or ()),
                 content_hash=str(row["content_hash"]),
             )
-            for row in rows
-        }
         self._cache[session_id] = found
         return dict(found)
 
@@ -121,6 +136,7 @@ class AssistantController(QObject):
     recordArrived = Signal(int, str, "QVariantMap", "QVariant", str)
     titleFinished = Signal(str, str, str)
     namingFinished = Signal(str, int)
+    indexFinished = Signal(str, str)
 
     def __init__(self, data_dir: Path, store, controller) -> None:
         super().__init__()
@@ -132,7 +148,14 @@ class AssistantController(QObject):
             self.models_dir,
             preference=str(controller.setting("assistant_runtime", "auto")),
         )
+        from dotaudio.vram_arbiter import get_arbiter
+
+        get_arbiter().on_evict("llm", self._evict_vram_llm)
         self._digests = StoreDigests(store)
+        self._task_queue: list[dict] = []
+        self._task_seq = 0
+        self._current_task = ""
+        self._queue_status = ""
 
         self._hardware: dict = {}
         self._accelerators: list = []
@@ -177,6 +200,7 @@ class AssistantController(QObject):
         self.recordArrived.connect(self._on_record)
         self.titleFinished.connect(self._on_title_finished)
         self.namingFinished.connect(self._on_naming_finished)
+        self.indexFinished.connect(self._on_index_finished)
 
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
@@ -200,11 +224,16 @@ class AssistantController(QObject):
         if hasattr(controller, "transcriptPersisted"):
             controller.transcriptPersisted.connect(lambda *_: self.refreshRecords(""))
         if hasattr(controller, "jobFinished"):
-            controller.jobFinished.connect(lambda *_: self.refreshRecords(""))
+            controller.jobFinished.connect(self._on_job_finished)
         if hasattr(controller, "openAssistantWithRecord"):
             controller.openAssistantWithRecord.connect(self.openRecord)
 
+        self._sync_digest_model()
+
     # -- свойства ----------------------------------------------------------
+
+    def _evict_vram_llm(self) -> None:
+        self._release_async()
 
     def _release_async(self) -> None:
         """Выгрузка GGUF с GUI-потока: close() у большой модели идёт секундами."""
@@ -362,12 +391,21 @@ class AssistantController(QObject):
     def install(self):
         return self._install
 
+    @Property(str, notify=streamChanged)
+    def queueStatus(self):
+        return self._queue_status
+
     @Property(str, notify=noticeChanged)
     def notice(self):
         return self._notice
 
     @Property("QVariant", notify=recordChanged)
     def actions(self):
+        if not self._record_id:
+            return []
+        segments = int(self._record.get("segments") or 0)
+        if segments <= 0:
+            return []
         return [{"id": key, "label": label} for key, label in ACTION_LABELS.items()]
 
     @Property("QVariantMap", notify=attachmentChanged)
@@ -540,6 +578,11 @@ class AssistantController(QObject):
         if llm.get_model(str(model_id)) is None:
             return
         self.controller.setSetting("assistant_model", str(model_id))
+        self._digests.model_id = str(model_id)
+        if self._record_id:
+            self._digests._cache.pop(self._record_id, None)
+            self._digests.clear(self._record_id)
+            self.store.clear_embeddings(self._record_id)
         # Выгрузка прошлой модели - секунды на GUI-потоке; в фоне.
         self._release_async()
         # Готовность новой модели уже известна из каталога: показать её сразу,
@@ -556,7 +599,7 @@ class AssistantController(QObject):
     @Slot(str)
     def setRuntime(self, preference):
         value = str(preference)
-        if value not in ("auto", "llama_cpp", "ollama"):
+        if value not in ("auto", "llama_cpp", "llama_inplace", "ollama"):
             return
         self.controller.setSetting("assistant_runtime", value)
         self.engine.preference = value
@@ -567,7 +610,7 @@ class AssistantController(QObject):
     def selectRecord(self, session_id):
         """Открыть запись: её переписка и карточка приходят из базы."""
 
-        if self._busy:
+        if self._busy or self._naming:
             self._set_notice("Дождитесь ответа или остановите его.")
             return
         sid = str(session_id or "")
@@ -761,10 +804,200 @@ class AssistantController(QObject):
     def rebuildIndex(self):
         """Пересчитать карту записи заново, выбросив прежние выжимки."""
 
-        if self._busy or not self._record_id:
+        if self._busy or self._naming or not self._record_id:
             return
-        self._digests.clear(self._record_id)
-        self._set_notice("Карта записи будет собрана при следующем вопросе.")
+        session_id = self._record_id
+        self._digests.clear(session_id)
+        self.store.clear_embeddings(session_id)
+        self._set_notice("Пересобираю карту записи…")
+        self._enqueue("index", session_id=session_id)
+
+    def _on_job_finished(self, session_id: str, error: str, cancelled: bool) -> None:
+        self.refreshRecords("")
+        sid = str(session_id or "")
+        if error or cancelled or not sid:
+            return
+        session = self.store.get_session(sid)
+        if session is None or not (session.get("segments") or ()):
+            return
+        self._enqueue("index", session_id=sid)
+
+    def _sync_digest_model(self) -> None:
+        self._digests.model_id = self._active_model_id()
+
+    def _load_embeddings(
+        self,
+        session_id: str,
+        chunks,
+        model_id: str,
+    ) -> dict[int, list[float]] | None:
+        rows = self.store.list_embeddings(session_id)
+        by_index = {int(row["chunk_index"]): row for row in rows}
+        loaded: dict[int, list[float]] = {}
+        for chunk in chunks:
+            row = by_index.get(chunk.index)
+            if row is None:
+                continue
+            if str(row.get("content_hash") or "") != chunk.content_hash:
+                continue
+            if model_id and str(row.get("model") or "") != model_id:
+                continue
+            vector = row.get("vector") or []
+            if vector:
+                loaded[chunk.index] = [float(value) for value in vector]
+        return loaded or None
+
+    def _save_embeddings(self, session_id: str, chunks, model_id: str) -> None:
+        vectors = build_chunk_embeddings(chunks)
+        for chunk in chunks:
+            vector = vectors.get(chunk.index)
+            if vector is None:
+                continue
+            self.store.save_embedding(
+                session_id,
+                chunk.index,
+                chunk.content_hash,
+                model_id,
+                vector,
+            )
+
+    def _ensure_index(self, session_id: str, model, cancel: threading.Event) -> None:
+        session = self.store.get_session(session_id)
+        if session is None:
+            return
+        chunks = build_chunks(session.get("segments") or [])
+        if not chunks:
+            return
+        self._sync_digest_model()
+
+        def respond(messages, options: GenerationOptions, on_token=None):
+            return self.engine.complete(
+                messages,
+                model,
+                options,
+                cancel=cancel,
+                on_token=on_token,
+            )
+
+        helper = TranscriptAssistant(
+            respond=respond,
+            context_tokens=llm.plan_context(model),
+            digests=self._digests,
+            on_stage=lambda name, payload: self.stageArrived.emit(name, dict(payload)),
+            cancel=cancel,
+        )
+        helper.ensure_digests(session_id, chunks)
+        if cancel.is_set():
+            return
+        self._save_embeddings(session_id, chunks, model.id)
+
+    def _update_queue_status(self) -> None:
+        labels = [_TASK_LABELS.get(task["kind"], task["kind"]) for task in self._task_queue]
+        status = f"В очереди: {', '.join(labels)}" if labels else ""
+        if status == self._queue_status:
+            return
+        self._queue_status = status
+        self.streamChanged.emit()
+
+    def _enqueue(self, kind: str, **payload) -> None:
+        priority = _TASK_PRIORITY.get(kind, 99)
+        session_id = str(payload.get("session_id") or "")
+        if kind == "index" and session_id:
+            self._task_queue = [
+                task
+                for task in self._task_queue
+                if not (task["kind"] == "index" and task.get("session_id") == session_id)
+            ]
+        self._task_seq += 1
+        self._task_queue.append(
+            {"kind": kind, "priority": priority, "seq": self._task_seq, **payload}
+        )
+        self._task_queue.sort(key=lambda task: (task["priority"], task["seq"]))
+        self._update_queue_status()
+        if (
+            self._current_task == "index"
+            and priority < _TASK_PRIORITY["index"]
+        ):
+            self._cancel.set()
+        self._pump()
+
+    def _pump(self) -> None:
+        if self._current_task:
+            return
+        if not self._task_queue:
+            return
+        task = self._task_queue.pop(0)
+        self._update_queue_status()
+        kind = str(task["kind"])
+        self._current_task = kind
+        self._cancel = threading.Event()
+        self._idle.stop()
+        if kind == "index":
+            self._start_index(str(task.get("session_id") or ""))
+        elif kind == "title":
+            self._start_naming(list(task.get("session_ids") or []))
+        elif kind in ("answer", "action"):
+            self._start_reply(
+                str(task.get("question") or ""),
+                str(task.get("action") or ""),
+                task.get("meta"),
+            )
+
+    def _finish_task(self) -> None:
+        self._current_task = ""
+        self._pump()
+
+    def _start_index(self, session_id: str) -> None:
+        if not session_id:
+            self._finish_task()
+            return
+        model = self._current_model()
+        if model is None or not self._ready:
+            self._set_notice("Сначала скачайте модель, чтобы собрать карту записи.")
+            self._finish_task()
+            return
+        self._index = {"active": True, "done": 0, "total": 0}
+        self._stage = "index"
+        self._status = "Собираю карту записи…"
+        self.streamChanged.emit()
+        cancel = self._cancel
+
+        def work():
+            error = ""
+            try:
+                self._ensure_index(session_id, model, cancel)
+            except llm.GenerationCancelled:
+                error = "cancelled"
+            except llm.RuntimeUnavailable as failure:
+                error = str(failure)
+            except Exception as failure:
+                error = str(failure) or failure.__class__.__name__
+            self.indexFinished.emit(session_id, error)
+
+        self._worker = threading.Thread(
+            target=work,
+            name="dotaudio-llm-index",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def _on_index_finished(self, session_id: str, error: str) -> None:
+        self._index = {"active": False, "done": 0, "total": 0}
+        self._stage = ""
+        sid = str(session_id or "")
+        if error == "cancelled":
+            self._status = "Сбор карты остановлен"
+        elif error:
+            self._status = "Ошибка"
+            self._set_notice(f"Не удалось собрать карту: {error}")
+        elif sid and sid == self._record_id:
+            self._status = "Карта записи готова"
+            self._set_notice("Карта записи обновлена.")
+        else:
+            self._status = "Готов к следующему вопросу"
+        self._idle.start()
+        self.streamChanged.emit()
+        self._finish_task()
 
     # -- загрузка модели ---------------------------------------------------
 
@@ -1067,7 +1300,7 @@ class AssistantController(QObject):
             return
         meta = self._take_attachment_meta()
         self._append("user", question, meta=meta)
-        self._start(question, "", meta)
+        self._enqueue("answer", question=question, action="", meta=meta)
 
     @Slot(str)
     def runAction(self, kind):
@@ -1080,7 +1313,7 @@ class AssistantController(QObject):
             self._set_notice("Эти действия работают по выбранной записи.")
             return
         self._append("user", ACTION_LABELS[action])
-        self._start("", action)
+        self._enqueue("answer", question="", action=action)
 
     @Slot(str)
     def renameRecord(self, title):
@@ -1114,7 +1347,7 @@ class AssistantController(QObject):
             return
         if not self._guard():
             return
-        self._start_naming([self._record_id])
+        self._enqueue("title", session_ids=[self._record_id])
 
     @Slot()
     def nameUntitledRecords(self):
@@ -1126,11 +1359,9 @@ class AssistantController(QObject):
         if not targets:
             self._set_notice("Все записи уже с понятными названиями.")
             return
-        self._start_naming(targets)
+        self._enqueue("title", session_ids=targets)
 
     def _start_naming(self, session_ids: list[str]) -> None:
-        self._idle.stop()
-        self._cancel = threading.Event()
         self._naming = True
         self._busy = True
         self._stage = "title"
@@ -1229,10 +1460,14 @@ class AssistantController(QObject):
         self._idle.start()
         self.streamChanged.emit()
         self.refreshRecords("")
+        self._finish_task()
 
-    def _start(self, question: str, action: str, meta: dict | None = None) -> None:
-        self._idle.stop()
-        self._cancel = threading.Event()
+    def _start_reply(
+        self,
+        question: str,
+        action: str,
+        meta: dict | None = None,
+    ) -> None:
         self._busy = True
         self._streaming = False
         self._stage = "prepare"
@@ -1271,7 +1506,11 @@ class AssistantController(QObject):
                 error = str(failure) or failure.__class__.__name__
             self.replyFinished.emit(error, action)
 
-        self._worker = threading.Thread(target=work, name="dotaudio-llm-answer", daemon=True)
+        self._worker = threading.Thread(
+            target=work,
+            name="dotaudio-llm-answer",
+            daemon=True,
+        )
         self._worker.start()
 
     def _run_task(
@@ -1279,7 +1518,7 @@ class AssistantController(QObject):
     ) -> None:
         """Тело воркера: ни одного обращения к QML, только сигналы."""
 
-        digests = StoreDigests(self.store, model.id)
+        self._sync_digest_model()
 
         def respond(messages, options: GenerationOptions, on_token):
             return self.engine.complete(
@@ -1295,10 +1534,15 @@ class AssistantController(QObject):
 
         session = self.store.get_session(record_id) if record_id else None
         chunks = build_chunks(session.get("segments") or []) if session else []
+        embeddings = (
+            self._load_embeddings(record_id, chunks, model.id)
+            if record_id and chunks
+            else None
+        )
         helper = TranscriptAssistant(
             respond=respond,
             context_tokens=llm.plan_context(model),
-            digests=digests,
+            digests=self._digests,
             on_stage=lambda name, payload: self.stageArrived.emit(name, dict(payload)),
             cancel=cancel,
         )
@@ -1318,7 +1562,14 @@ class AssistantController(QObject):
                     f"Дополнительно прикреплён файл «{material_name or 'файл'}»:\n"
                     f"{material.strip()}\n\nВопрос: {question}"
                 )
-            helper.answer(prompt, record_id, chunks, history, on_token=emit_token)
+            helper.answer(
+                prompt,
+                record_id,
+                chunks,
+                history,
+                on_token=emit_token,
+                embeddings=embeddings,
+            )
         else:
             helper.chat(
                 question,
@@ -1422,6 +1673,7 @@ class AssistantController(QObject):
         self._idle.start()
         self.messagesChanged.emit()
         self.streamChanged.emit()
+        self._finish_task()
 
     @Slot()
     def stop(self):
@@ -1451,6 +1703,101 @@ class AssistantController(QObject):
     @Slot()
     def clearNotice(self):
         self._set_notice("")
+
+    @Slot()
+    def exportChat(self):
+        """Сохранить переписку по текущему чату или записи."""
+
+        if not self._messages:
+            self._set_notice("Нечего экспортировать: переписка пуста.")
+            return
+        title = self.recordTitle.replace("/", "-").replace("\\", "-")
+        path, selected = QFileDialog.getSaveFileName(
+            None,
+            "Экспорт переписки",
+            f"{title or 'chat'}.md",
+            "Markdown (*.md);;Текст (*.txt);;Все файлы (*.*)",
+        )
+        if not path or not selected:
+            return
+        export_path = Path(path)
+        lines: list[str] = [f"# {self.recordTitle}", ""]
+        for item in self._messages:
+            role = "Вы" if item.get("role") == "user" else "Ассистент"
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            lines.extend((f"## {role}", "", content, ""))
+        body = "\n".join(lines).strip() + "\n"
+        try:
+            export_path.write_text(body, encoding="utf-8")
+        except OSError as exc:
+            self._set_notice(f"Не удалось сохранить переписку: {exc}")
+            return
+        self._set_notice(f"Переписка сохранена: {export_path.name}")
+
+    def _export_digests_to(self, export_path: Path) -> bool:
+        if not self._record_id:
+            self._set_notice("Сначала выберите запись.")
+            return False
+        digests = self._digests.load(self._record_id)
+        if not digests:
+            self._set_notice("Карта записи ещё не собрана.")
+            return False
+        title = self.recordTitle.replace("/", "-").replace("\\", "-")
+        ordered = [digests[index] for index in sorted(digests)]
+        body = "\n".join(
+            [
+                f"# Карта записи: {self.recordTitle}",
+                "",
+                outline_text(ordered),
+                "",
+            ]
+        )
+        try:
+            export_path.write_text(body, encoding="utf-8")
+        except OSError as exc:
+            self._set_notice(f"Не удалось сохранить карту: {exc}")
+            return False
+        self._set_notice(f"Карта записи сохранена: {export_path.name}")
+        return True
+
+    @Slot()
+    def exportDigests(self):
+        """Сохранить карту записи (выжимки частей) в файл."""
+
+        if not self._record_id:
+            self._set_notice("Сначала выберите запись.")
+            return
+        title = self.recordTitle.replace("/", "-").replace("\\", "-")
+        path, selected = QFileDialog.getSaveFileName(
+            None,
+            "Экспорт карты записи",
+            f"{title or 'map'}.md",
+            "Markdown (*.md);;Текст (*.txt);;Все файлы (*.*)",
+        )
+        if not path or not selected:
+            return
+        self._export_digests_to(Path(path))
+
+    @Slot()
+    def exportMap(self):
+        """Синоним exportDigests для QML."""
+
+        self.exportDigests()
+
+    @Slot(float)
+    def openTimestamp(self, seconds: float):
+        """Открыть запись на нужном таймкоде."""
+
+        if not self._record_id:
+            self._set_notice("Сначала выберите запись.")
+            return
+        open_at = getattr(self.controller, "openSessionAt", None)
+        if not callable(open_at):
+            self._set_notice("Переход по таймкоду недоступен.")
+            return
+        open_at(self._record_id, float(seconds))
 
     def shutdown(self) -> None:
         """Остановить работу перед закрытием окна.

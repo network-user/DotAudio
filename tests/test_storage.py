@@ -145,7 +145,7 @@ def test_versionless_database_is_migrated_without_losing_data(tmp_path: Path) ->
         }
     assert "words_json" in columns
     assert {"ix_sessions_history_order", "ix_sessions_status"} <= indexes
-    assert {"chat_messages", "transcript_digests"} <= tables
+    assert {"chat_messages", "transcript_digests", "transcript_embeddings"} <= tables
 
 
 def test_list_sessions_supports_stable_pagination(tmp_path: Path) -> None:
@@ -234,6 +234,7 @@ def test_pin_and_delete_session(tmp_path: Path) -> None:
     store.append_segments(second, [{"start": 0.0, "end": 1.0, "text": "б"}])
     store.append_chat_message(first, "user", "вопрос")
     store.save_digest(first, 0, "h", 0.0, 1.0, "выжимка", ["а"], "qwen")
+    store.save_embedding(first, 0, "h", "hash256", [0.1, 0.2])
 
     assert store.set_pinned(first, True) is True
     rows = store.list_sessions()
@@ -244,6 +245,7 @@ def test_pin_and_delete_session(tmp_path: Path) -> None:
     assert store.get_session(first) is None
     assert store.list_chat_messages(first) == []
     assert store.list_digests(first) == []
+    assert store.list_embeddings(first) == []
     assert store.get_session(second) is not None
 
 
@@ -264,3 +266,24 @@ def test_digests_are_replaced_per_part_and_keep_the_text_hash(tmp_path: Path) ->
 
     store.clear_digests("rec")
     assert store.list_digests("rec") == []
+
+
+def test_embeddings_are_replaced_per_part_and_survive_reopen(tmp_path: Path) -> None:
+    store = Store(tmp_path / "dotaudio.sqlite3")
+
+    store.save_embedding("rec", 0, "hash-a", "hash256", [0.1, 0.2, 0.3])
+    store.save_embedding("rec", 1, "hash-b", "hash256", [1.0, 0.0])
+    store.save_embedding("rec", 0, "hash-c", "hash256", [0.9, 0.8])
+
+    embeddings = store.list_embeddings("rec")
+
+    assert [item["chunk_index"] for item in embeddings] == [0, 1]
+    assert embeddings[0]["content_hash"] == "hash-c"
+    assert embeddings[0]["model"] == "hash256"
+    assert embeddings[0]["vector"] == [0.9, 0.8]
+
+    reopened = Store(tmp_path / "dotaudio.sqlite3")
+    assert reopened.list_embeddings("rec") == embeddings
+
+    store.clear_embeddings("rec")
+    assert store.list_embeddings("rec") == []

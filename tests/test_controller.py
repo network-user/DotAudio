@@ -555,3 +555,76 @@ def test_abort_emergency_cancels_running_jobs_when_capture_is_active() -> None:
     assert controller._level == 0.0
     assert events == ["force"]
     assert release.stopped is True
+
+
+def test_pending_seek_defaults_to_none() -> None:
+    controller = Controller.__new__(Controller)
+    controller._pending_seek_ms = -1
+    controller._media_url = ""
+    controller.changed = _Counting()
+
+    assert Controller.pendingSeekMs.fget(controller) == -1
+
+    Controller.seekMediaTo(controller, 12.5)
+    assert controller._pending_seek_ms == -1
+    assert controller.changed.count == 0
+
+    controller._media_url = "file:///tmp/sample.wav"
+    Controller.seekMediaTo(controller, 3.2)
+    assert controller._pending_seek_ms == 3200
+    assert controller.changed.count == 1
+
+    Controller.clearPendingSeek(controller)
+    assert controller._pending_seek_ms == -1
+    assert controller.changed.count == 2
+
+
+def test_open_session_at_sets_page_and_pending_seek(tmp_path) -> None:
+    media = tmp_path / "talk.wav"
+    media.write_bytes(b"RIFF")
+    controller = Controller.__new__(Controller)
+    controller._jobs = {}
+    controller._session_id = ""
+    controller._media_url = ""
+    controller._page = "live"
+    controller._query = ""
+    controller._segments = []
+    controller._edit_undo = []
+    controller._edit_redo = []
+    controller._session_mode = ""
+    controller._session_title = ""
+    controller._status = ""
+    controller._trans_state = {}
+    controller._pending_seek_ms = -1
+    controller.segmentsChanged = _Signal()
+    controller.transcribeChanged = _Signal()
+    controller.changed = _Counting()
+    session_id = "rec-with-media"
+    controller.store = type(
+        "Store",
+        (),
+        {
+            "get_session": staticmethod(
+                lambda sid: {
+                    "id": session_id,
+                    "title": "Talk",
+                    "mode": "transcript",
+                    "source": str(media),
+                    "segments": [{"id": 1, "start": 0.0, "end": 1.0, "text": "hi"}],
+                }
+                if sid == session_id
+                else None
+            ),
+            "list_sessions": staticmethod(lambda _query: []),
+        },
+    )()
+    controller._open_transcript_session = Controller._open_transcript_session.__get__(
+        controller, Controller
+    )
+
+    Controller.openSessionAt(controller, session_id, 42.0)
+
+    assert controller._session_id == session_id
+    assert controller._page == "media"
+    assert controller._pending_seek_ms == 42000
+    assert controller._media_url.startswith("file:")

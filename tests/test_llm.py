@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import threading
+from io import StringIO
 
 import pytest
 
@@ -159,6 +161,41 @@ def test_strip_thinking_cleans_a_finished_answer() -> None:
     assert llm.strip_thinking("<think>шум</think>  Ответ ") == "Ответ"
 
 
+def test_gemma_folds_system_role_into_first_user_turn() -> None:
+    """Шаблон Gemma падает на role=system: инструкцию переносим в user."""
+
+    gemma = llm.MODELS_BY_ID["vikhr-gemma-2b"]
+    assert gemma.system_role is False
+    shaped = llm.shape_messages(
+        [
+            {"role": "system", "content": "Ты помощник."},
+            {"role": "user", "content": "Привет"},
+            {"role": "assistant", "content": "Здравствуй"},
+            {"role": "user", "content": "Как дела?"},
+        ],
+        gemma,
+        llm.GenerationOptions(),
+    )
+    assert [item["role"] for item in shaped] == ["user", "assistant", "user"]
+    assert shaped[0]["content"].startswith("Ты помощник.")
+    assert shaped[0]["content"].endswith("Привет")
+    assert "system" not in {item["role"] for item in shaped}
+
+
+def test_qwen_keeps_system_role() -> None:
+    shaped = llm.shape_messages(
+        [
+            {"role": "system", "content": "Инструкция"},
+            {"role": "user", "content": "Вопрос"},
+        ],
+        llm.MODELS_BY_ID["qwen3-4b"],
+        llm.GenerationOptions(),
+    )
+    assert shaped[0]["role"] == "system"
+    assert shaped[0]["content"] == "Инструкция"
+    assert shaped[1]["content"].endswith(llm.NO_THINK_SWITCH)
+
+
 class _FakeRuntime:
     """Рантайм-заглушка: отдаёт заранее известные куски."""
 
@@ -197,15 +234,20 @@ def test_engine_prefers_ollama_when_it_already_has_the_model(tmp_path) -> None:
     assert engine.pick_runtime(model) is engine._ollama
 
     engine._ollama = _FakeRuntime([], ready=False)
-    assert engine.pick_runtime(model) is engine._llama
+    engine._subprocess = _FakeRuntime([], ready=True)
+    assert engine.pick_runtime(model) is engine._subprocess
 
     engine.preference = "llama_cpp"
     engine._ollama = _FakeRuntime([], ready=True)
+    engine._subprocess = _FakeRuntime([], ready=True)
+    assert engine.pick_runtime(model) is engine._subprocess
+
+    engine.preference = "llama_inplace"
     assert engine.pick_runtime(model) is engine._llama
 
 
 def test_engine_collects_the_answer_and_reports_tokens(tmp_path) -> None:
-    engine = llm.ChatEngine(tmp_path, preference="llama_cpp")
+    engine = llm.ChatEngine(tmp_path, preference="llama_inplace")
     engine._llama = _FakeRuntime(["Раз", " два", " три"])
     seen: list[str] = []
 
@@ -220,7 +262,7 @@ def test_engine_collects_the_answer_and_reports_tokens(tmp_path) -> None:
 
 
 def test_engine_stops_on_cancel(tmp_path) -> None:
-    engine = llm.ChatEngine(tmp_path, preference="llama_cpp")
+    engine = llm.ChatEngine(tmp_path, preference="llama_inplace")
     engine._llama = _FakeRuntime(["раз", "два"])
     cancel = threading.Event()
     cancel.set()
@@ -230,7 +272,7 @@ def test_engine_stops_on_cancel(tmp_path) -> None:
 
 
 def test_engine_names_the_missing_runtime(tmp_path) -> None:
-    engine = llm.ChatEngine(tmp_path, preference="llama_cpp")
+    engine = llm.ChatEngine(tmp_path, preference="llama_inplace")
     engine._llama = _FakeRuntime([], available=False)
 
     with pytest.raises(llm.RuntimeUnavailable):
@@ -250,3 +292,90 @@ def test_catalog_cards_show_what_is_on_disk(tmp_path) -> None:
     assert cards[model.id]["onDisk"] is False
     assert cards[model.id]["downloadedBytes"] == 1
     assert cards["qwen3-4b"]["sizeGb"] == llm.MODELS_BY_ID["qwen3-4b"].size_gb
+
+
+class _FakeWorkerProcess:
+    """Имитация llm_worker: ping, load, chat, release."""
+
+    def __init__(self) -> None:
+        self.stdin = self
+        self.stdout = self
+        self._pending = ""
+        self._out: list[str] = []
+
+    def write(self, data: str) -> None:
+        self._pending += data
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            payload = json.loads(line)
+            cmd = payload["cmd"]
+            if cmd == "ping":
+                self._out.append(json.dumps({"type": "ok"}) + "\n")
+            elif cmd == "load":
+                self._out.append(json.dumps({"type": "ok"}) + "\n")
+            elif cmd == "release":
+                self._out.append(json.dumps({"type": "ok"}) + "\n")
+            elif cmd == "chat":
+                self._out.append(json.dumps({"type": "token", "text": "Привет"}) + "\n")
+                self._out.append(json.dumps({"type": "done", "text": "Привет"}) + "\n")
+
+    def flush(self) -> None:
+        return
+
+    def readline(self) -> str:
+        return self._out.pop(0) if self._out else ""
+
+    def poll(self):
+        return None
+
+    def kill(self) -> None:
+        return
+
+    def wait(self, timeout=None) -> int:
+        return 0
+
+    def close(self) -> None:
+        return
+
+
+def test_subprocess_runtime_streams_tokens(tmp_path, monkeypatch) -> None:
+    worker = _FakeWorkerProcess()
+    real_popen = llm.subprocess.Popen
+
+    def fake_popen(args, *popen_args, **kwargs):
+        if "-m" in args and "dotaudio.llm_worker" in args:
+            return worker
+        return real_popen(args, *popen_args, **kwargs)
+
+    monkeypatch.setattr(llm.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(llm.hardware, "import_llama_cpp", lambda: object())
+
+    runtime = llm.SubprocessLlamaRuntime(tmp_path)
+    model = llm.MODELS_BY_ID["qwen3-1.7b"]
+    target = modelhub.local_path(tmp_path, model.file)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"x")
+    profile = _profile(offload=False)
+
+    runtime.load(model, profile)
+    pieces = list(
+        runtime.stream(
+            [{"role": "user", "content": "?"}],
+            model,
+            llm.GenerationOptions(),
+            profile=profile,
+        )
+    )
+    assert pieces == ["Привет"]
+
+
+def test_llm_worker_ping_and_release(monkeypatch) -> None:
+    from dotaudio import llm_worker
+
+    stdin = StringIO('{"cmd":"ping"}\n{"cmd":"release"}\n')
+    stdout = StringIO()
+    monkeypatch.setattr(llm_worker.sys, "stdin", stdin)
+    monkeypatch.setattr(llm_worker.sys, "stdout", stdout)
+    llm_worker.main()
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert lines == [{"type": "ok"}, {"type": "ok"}]

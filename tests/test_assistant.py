@@ -11,11 +11,18 @@ from dotaudio.assistant import (
     Digest,
     DigestCache,
     TranscriptAssistant,
+    build_chunk_embeddings,
     build_chunks,
+    cosine,
+    embed_text,
+    iter_timestamps,
     keywords_of,
+    normalize_line,
     outline_text,
     parse_part_numbers,
+    parse_timestamp,
     score_chunks,
+    score_chunks_semantic,
     stamp,
 )
 
@@ -507,3 +514,122 @@ def test_record_card_reports_duration_and_parts() -> None:
     assert card["id"] == "abc"
     assert card["durationLabel"] == "02:00"
     assert card["chunks"] >= 1
+
+
+def test_normalize_line_accepts_two_and_three_tuples() -> None:
+    assert normalize_line((12.0, "текст")) == (12.0, "текст", "")
+    assert normalize_line((12.0, "текст", "Голос 1")) == (12.0, "текст", "Голос 1")
+
+
+def test_chunks_include_speaker_in_stamped_and_hash() -> None:
+    segments = [
+        {
+            "id": 0,
+            "start": 72.0,
+            "end": 80.0,
+            "text": "я возьму смету на себя",
+            "speaker": "Голос 1",
+        },
+        {
+            "id": 1,
+            "start": 90.0,
+            "end": 95.0,
+            "text": "[Голос 2] сроки проверю завтра",
+        },
+    ]
+    chunks = build_chunks(segments, target_seconds=600.0)
+    chunk = chunks[0]
+
+    assert chunk.has_speakers is True
+    assert "[01:12] Голос 1: я возьму смету на себя" in chunk.stamped
+    assert "[01:30] Голос 2: сроки проверю завтра" in chunk.stamped
+    first_hash = chunk.content_hash
+
+    segments[0]["speaker"] = "Голос 2"
+    changed = build_chunks(segments, target_seconds=600.0)
+    assert changed[0].content_hash != first_hash
+
+
+def test_edited_speaker_invalidates_digest_cache() -> None:
+    segments = [
+        {"id": 0, "start": 0.0, "end": 60.0, "text": "договорились", "speaker": "Голос 1"},
+        {"id": 1, "start": 120.0, "end": 180.0, "text": "продолжение"},
+    ]
+    chunks = build_chunks(segments, target_seconds=120.0)
+    model = _Recorder(default="описание")
+    helper = TranscriptAssistant(respond=model, context_tokens=2048, digests=DigestCache())
+    helper.ensure_digests("rec", chunks)
+    before = len(model.prompts)
+
+    segments[0]["speaker"] = "Голос 2"
+    changed = build_chunks(segments, target_seconds=120.0)
+    helper.ensure_digests("rec", changed)
+
+    assert len(model.prompts) == before + 1
+
+
+def test_parse_timestamp_accepts_minutes_and_hours() -> None:
+    assert parse_timestamp("[01:12]") == 72.0
+    assert parse_timestamp("смета выросла [03:20]") == 200.0
+    assert parse_timestamp("[1:02:05]") == 3725.0
+    assert parse_timestamp("[Голос 1]") is None
+
+
+def test_iter_timestamps_returns_spans() -> None:
+    text = "Сначала [00:10], потом [1:02:05]."
+    hits = iter_timestamps(text)
+
+    assert hits == [(8, 15, 10.0), (23, 32, 3725.0)]
+
+
+def test_embed_text_is_normalized_and_cosine_works() -> None:
+    left = embed_text("смета проект бюджет")
+    right = embed_text("смета проект бюджет")
+    other = embed_text("погода солнце облака")
+
+    assert len(left) == 256
+    assert abs(sum(value * value for value in left) - 1.0) < 1e-6
+    assert cosine(left, right) > 0.99
+    assert cosine(left, other) < cosine(left, right)
+
+
+def test_semantic_scoring_prefers_relevant_chunk() -> None:
+    segments = [
+        {"id": 0, "start": 0.0, "end": 10.0, "text": "приветствие и small talk " * 20},
+        {
+            "id": 1,
+            "start": 200.0,
+            "end": 210.0,
+            "text": "архитектура микросервисов kubernetes деплой " * 20,
+        },
+        {"id": 2, "start": 400.0, "end": 410.0, "text": "обед и погода " * 20},
+    ]
+    chunks = build_chunks(segments, target_seconds=1.0, max_chars=100000)
+    embeddings = build_chunk_embeddings(chunks)
+    ranked = score_chunks_semantic("kubernetes деплой", chunks, embeddings=embeddings)
+
+    assert ranked
+    assert ranked[0][0] == 1
+
+
+def test_blended_search_uses_embeddings_when_given() -> None:
+    segments = [
+        {"id": 0, "start": 0.0, "end": 10.0, "text": "разговор про погоду " * 30},
+        {
+            "id": 1,
+            "start": 200.0,
+            "end": 210.0,
+            "text": "инфраструктура kubernetes кластер " * 30,
+        },
+    ]
+    chunks = build_chunks(segments, target_seconds=1.0, max_chars=100000)
+    lexical_only = score_chunks("kubernetes кластер", chunks)
+    blended = score_chunks(
+        "kubernetes кластер",
+        chunks,
+        embeddings=build_chunk_embeddings(chunks),
+    )
+
+    assert lexical_only
+    assert blended
+    assert blended[0][0] == 1

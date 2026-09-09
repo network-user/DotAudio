@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterable, Iterator, Sequence
@@ -65,6 +67,10 @@ class ChatModel:
     # Модели с режимом размышления печатают служебный блок перед ответом.
     # Для работы с расшифровкой он не нужен и отключается в запросе.
     thinking: bool = False
+    # Gemma (и дообучения вроде Vikhr) в chat-шаблоне не принимают роль
+    # system: шаблон падает с «System role not supported». Тогда инструкцию
+    # переносим в первое user-сообщение в shape_messages.
+    system_role: bool = True
     ollama: str = ""
     license: str = ""
 
@@ -118,6 +124,7 @@ CHAT_MODELS: tuple[ChatModel, ...] = (
         vram_gb=3.0,
         tier="light",
         family="Gemma 2",
+        system_role=False,
         ollama="",
         license="Gemma",
     ),
@@ -153,6 +160,7 @@ CHAT_MODELS: tuple[ChatModel, ...] = (
         vram_gb=4.0,
         tier="balanced",
         family="Gemma 3",
+        system_role=False,
         ollama="gemma3:4b",
         license="Gemma",
     ),
@@ -335,6 +343,33 @@ _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
 NO_THINK_SWITCH = "/no_think"
 
 
+def _fold_system_into_user(messages: list[dict]) -> list[dict]:
+    """Склеить system-инструкции с первым user-ходом.
+
+    Нужно моделям без роли system в шаблоне чата (Gemma и дообучения).
+    Несколько system подряд объединяются; если user ещё нет - создаётся.
+    """
+
+    systems: list[str] = []
+    rest: list[dict] = []
+    for item in messages:
+        if item.get("role") == "system":
+            content = str(item.get("content") or "").strip()
+            if content:
+                systems.append(content)
+            continue
+        rest.append(item)
+    if not systems:
+        return rest
+    instruction = "\n\n".join(systems)
+    for item in rest:
+        if item.get("role") == "user":
+            body = str(item.get("content") or "")
+            item["content"] = f"{instruction}\n\n{body}" if body else instruction
+            return rest
+    return [{"role": "user", "content": instruction}, *rest]
+
+
 def shape_messages(
     messages: Sequence[dict],
     model: ChatModel,
@@ -342,11 +377,13 @@ def shape_messages(
 ) -> list[dict]:
     """Подготовить сообщения под особенности модели.
 
-    Сейчас правка одна: размышляющей модели говорится не размышлять, если
-    размышление не запрошено явно.
+    Убирает роль system у моделей без неё и отключает размышление у Qwen3,
+    если оно не запрошено явно.
     """
 
     payload = [dict(item) for item in messages]
+    if not model.system_role:
+        payload = _fold_system_into_user(payload)
     if not model.thinking or options.thinking:
         return payload
     for item in reversed(payload):
@@ -481,6 +518,10 @@ class LlamaCppRuntime:
             if self._loaded is not None and self._loaded_key == key:
                 return self._loaded
             self.release()
+            if layers > 0:
+                from dotaudio.vram_arbiter import get_arbiter
+
+                get_arbiter().acquire("llm")
             try:
                 self._loaded = module.Llama(
                     model_path=str(path),
@@ -496,6 +537,10 @@ class LlamaCppRuntime:
                 # CUDA-сборкой из публичного индекса. Сказать словами, что
                 # делать, иначе пользователь видит только код ошибки Windows.
                 self._loaded_key = None
+                if layers > 0:
+                    from dotaudio.vram_arbiter import get_arbiter
+
+                    get_arbiter().release("llm")
                 raise RuntimeUnavailable(
                     "Установленная сборка llama.cpp не запускается на этом процессоре. "
                     "Выберите сборку «Процессор» в каталоге моделей."
@@ -507,7 +552,14 @@ class LlamaCppRuntime:
         """Выгрузить модель из памяти."""
 
         with self._lock:
-            model, self._loaded, self._loaded_key = self._loaded, None, None
+            model = self._loaded
+            key = self._loaded_key
+            self._loaded = None
+            self._loaded_key = None
+        if key is not None and key[2] > 0:
+            from dotaudio.vram_arbiter import get_arbiter
+
+            get_arbiter().release("llm")
         if model is not None:
             close = getattr(model, "close", None)
             if callable(close):
@@ -552,6 +604,239 @@ class LlamaCppRuntime:
             tail = think.flush()
             if tail:
                 yield tail
+
+
+_WORKER_CRASH_HINT = (
+    "Изолированный воркер языковой модели завершился неожиданно. "
+    "Попробуйте сборку «Процессор», режим Ollama или перезапустите приложение."
+)
+
+
+class SubprocessLlamaRuntime:
+    """llama.cpp в отдельном процессе: сбой CUDA не роняет интерфейс."""
+
+    id = "llama_cpp"
+    label = "Встроенный (llama.cpp, изолированно)"
+
+    def __init__(self, models_dir: Path) -> None:
+        self.models_dir = Path(models_dir)
+        self._lock = threading.RLock()
+        self._proc: subprocess.Popen[str] | None = None
+        self._io_lock = threading.Lock()
+        self._loaded_key: tuple | None = None
+
+    @staticmethod
+    def _worker_env() -> dict[str, str]:
+        env = os.environ.copy()
+        try:
+            import dotaudio
+
+            root = str(Path(dotaudio.__file__).resolve().parent.parent)
+            prefix = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = root if not prefix else root + os.pathsep + prefix
+        except Exception:
+            pass
+        return env
+
+    def _worker_command(self) -> list[str]:
+        return [sys.executable, "-m", "dotaudio.llm_worker"]
+
+    def _stop_worker(self) -> None:
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            return
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except Exception:
+            pass
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=2.0)
+        except Exception:
+            pass
+
+    def _read_event(self) -> dict:
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            raise RuntimeUnavailable(_WORKER_CRASH_HINT)
+        line = proc.stdout.readline()
+        if not line:
+            code = proc.poll()
+            self._stop_worker()
+            detail = f" (код {code})" if code is not None else ""
+            raise RuntimeUnavailable(f"{_WORKER_CRASH_HINT}{detail}")
+        try:
+            return json.loads(line)
+        except ValueError as error:
+            self._stop_worker()
+            raise RuntimeUnavailable(_WORKER_CRASH_HINT) from error
+
+    def _ensure_worker(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        self._stop_worker()
+        try:
+            self._proc = subprocess.Popen(
+                self._worker_command(),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+                env=self._worker_env(),
+            )
+        except OSError as error:
+            raise RuntimeUnavailable(
+                "Не удалось запустить изолированный воркер llama.cpp. "
+                "Попробуйте режим «В процессе» или Ollama."
+            ) from error
+        self._write({"cmd": "ping"})
+        event = self._read_event()
+        if event.get("type") == "error":
+            self._stop_worker()
+            raise RuntimeUnavailable(str(event.get("message") or _WORKER_CRASH_HINT))
+
+    def _write(self, payload: dict) -> None:
+        proc = self._proc
+        if proc is None or proc.stdin is None:
+            raise RuntimeUnavailable(_WORKER_CRASH_HINT)
+        proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        proc.stdin.flush()
+
+    def _request(self, payload: dict) -> dict:
+        with self._io_lock:
+            self._ensure_worker()
+            self._write(payload)
+            event = self._read_event()
+            if event.get("type") == "error":
+                raise RuntimeUnavailable(str(event.get("message") or _WORKER_CRASH_HINT))
+            return event
+
+    def available(self) -> bool:
+        return hardware.import_llama_cpp() is not None
+
+    def version(self) -> str:
+        module = hardware.import_llama_cpp()
+        return "" if module is None else str(getattr(module, "__version__", ""))
+
+    def status(self, profile: HardwareProfile | None = None) -> dict:
+        profile = profile or hardware.probe()
+        installed = self.available()
+        return {
+            "id": self.id,
+            "label": self.label,
+            "installed": installed,
+            "version": self.version(),
+            "gpu": bool(profile.llama_gpu_offload) if installed else False,
+            "detail": (
+                "Не установлен: чат без него не запустится"
+                if not installed
+                else (
+                    "Отдельный процесс с ускорением на видеокарте"
+                    if profile.llama_gpu_offload
+                    else "Отдельный процесс, расчёт на процессоре"
+                )
+            ),
+        }
+
+    def model_path(self, model: ChatModel) -> Path:
+        return modelhub.local_path(self.models_dir, model.file)
+
+    def ready(self, model: ChatModel) -> bool:
+        return bool(modelhub.disk_status(self.models_dir, model.file)["ready"])
+
+    def load(self, model: ChatModel, profile: HardwareProfile | None = None):
+        if not self.available():
+            raise RuntimeUnavailable("llama-cpp-python не установлен или не загрузился")
+        profile = profile or hardware.probe()
+        path = self.model_path(model)
+        if not path.exists():
+            raise RuntimeUnavailable(f"Файл модели не скачан: {path.name}")
+        layers = plan_gpu_layers(model, profile)
+        context = plan_context(model, profile)
+        threads = max(1, min(int(profile.threads or 4), 8))
+        key = (str(path), context, layers, threads)
+        with self._lock:
+            if self._loaded_key == key:
+                return self
+            if layers > 0:
+                from dotaudio.vram_arbiter import get_arbiter
+
+                get_arbiter().acquire("llm")
+            try:
+                self._request(
+                    {
+                        "cmd": "load",
+                        "path": str(path),
+                        "context": context,
+                        "layers": layers,
+                        "threads": threads,
+                    }
+                )
+            except RuntimeUnavailable:
+                if layers > 0:
+                    from dotaudio.vram_arbiter import get_arbiter
+
+                    get_arbiter().release("llm")
+                raise
+            self._loaded_key = key
+            return self
+
+    def release(self) -> None:
+        with self._lock:
+            key = self._loaded_key
+            self._loaded_key = None
+        if key is not None and key[2] > 0:
+            from dotaudio.vram_arbiter import get_arbiter
+
+            get_arbiter().release("llm")
+        try:
+            self._request({"cmd": "release"})
+        except RuntimeUnavailable:
+            self._stop_worker()
+
+    def loaded(self) -> bool:
+        with self._lock:
+            return self._loaded_key is not None
+
+    def stream(
+        self,
+        messages: Sequence[dict],
+        model: ChatModel,
+        options: GenerationOptions,
+        cancel: threading.Event | None = None,
+        profile: HardwareProfile | None = None,
+    ) -> Iterator[str]:
+        self.load(model, profile)
+        payload = shape_messages(messages, model, options or GenerationOptions())
+        request = {
+            "cmd": "chat",
+            "messages": payload,
+            "options": {
+                "temperature": (options or GenerationOptions()).temperature,
+                "top_p": (options or GenerationOptions()).top_p,
+                "max_tokens": (options or GenerationOptions()).max_tokens,
+            },
+        }
+        with self._io_lock:
+            self._ensure_worker()
+            self._write(request)
+            while True:
+                if cancel is not None and cancel.is_set():
+                    self._stop_worker()
+                    raise GenerationCancelled()
+                event = self._read_event()
+                if event.get("type") == "error":
+                    raise RuntimeUnavailable(str(event.get("message") or _WORKER_CRASH_HINT))
+                if event.get("type") == "token":
+                    text = str(event.get("text") or "")
+                    if text:
+                        yield text
+                if event.get("type") == "done":
+                    break
 
 
 class OllamaRuntime:
@@ -692,10 +977,12 @@ class ChatEngine:
     models_dir: Path
     preference: str = "auto"
     _llama: LlamaCppRuntime = field(init=False)
+    _subprocess: SubprocessLlamaRuntime = field(init=False)
     _ollama: OllamaRuntime = field(init=False)
 
     def __post_init__(self) -> None:
         self._llama = LlamaCppRuntime(self.models_dir)
+        self._subprocess = SubprocessLlamaRuntime(self.models_dir)
         self._ollama = OllamaRuntime()
 
     @property
@@ -703,11 +990,22 @@ class ChatEngine:
         return self._llama
 
     @property
+    def subprocess(self) -> SubprocessLlamaRuntime:
+        return self._subprocess
+
+    @property
     def ollama(self) -> OllamaRuntime:
         return self._ollama
 
+    def _builtin_llama(self):
+        if self.preference == "llama_inplace":
+            return self._llama
+        if self._subprocess.available():
+            return self._subprocess
+        return self._llama
+
     def runtimes(self) -> tuple:
-        return (self._ollama, self._llama)
+        return (self._ollama, self._builtin_llama())
 
     def status(self, profile: HardwareProfile | None = None) -> list[dict]:
         profile = profile or hardware.probe()
@@ -718,16 +1016,20 @@ class ChatEngine:
 
         ``auto``: запущенный Ollama с нужной моделью выигрывает - она уже
         загружена в его память, и второй копии в нашем процессе не нужно.
-        Иначе идёт встроенный llama.cpp со скачанным файлом.
+        Иначе идёт изолированный llama.cpp со скачанным файлом.
+        ``llama_cpp`` - тот же изолированный путь; ``llama_inplace`` - старый
+        in-process для отладки и тестов.
         """
 
-        if self.preference == "llama_cpp":
-            return self._llama
         if self.preference == "ollama":
             return self._ollama
+        if self.preference == "llama_inplace":
+            return self._llama
+        if self.preference == "llama_cpp":
+            return self._builtin_llama()
         if self._ollama.ready(model):
             return self._ollama
-        return self._llama
+        return self._builtin_llama()
 
     def ready(self, model: ChatModel) -> bool:
         runtime = self.pick_runtime(model)
@@ -772,9 +1074,10 @@ class ChatEngine:
 
     def release(self) -> None:
         self._llama.release()
+        self._subprocess.release()
 
     def loaded(self) -> bool:
-        return self._llama.loaded()
+        return self._llama.loaded() or self._subprocess.loaded()
 
 
 def catalog_cards(

@@ -10,6 +10,42 @@ Item {
 
     property bool catalogOpen: false
     property bool confirmDeleteOpen: false
+    property bool confirmClearChatOpen: false
+    property string pendingDeleteChatId: ""
+
+    component DangerPill: Button {
+        id: dangerControl
+        implicitHeight: 28
+        leftPadding: 11
+        rightPadding: 11
+        hoverEnabled: true
+        scale: dangerControl.down ? 0.96 : 1
+        opacity: dangerControl.enabled ? 1 : 0.5
+        Behavior on scale {
+            NumberAnimation {
+                duration: Theme.fastMs
+                easing.type: Easing.Bezier
+                easing.bezierCurve: Theme.easeSpring
+            }
+        }
+        contentItem: Text {
+            text: dangerControl.text
+            color: Theme.rec
+            font.pixelSize: Theme.fsSmall
+            font.weight: Font.DemiBold
+            font.family: Theme.fontFamily
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+        }
+        background: Rectangle {
+            radius: height / 2
+            color: dangerControl.down ? Theme.recSoft
+                   : dangerControl.hovered ? Theme.recSoft : "transparent"
+            border.width: 1
+            border.color: dangerControl.hovered ? Theme.recRing : Theme.hairline
+            Behavior on color { ColorAnimation { duration: Theme.fastMs } }
+        }
+    }
 
     component Field: TextField {
         color: Theme.text
@@ -256,7 +292,7 @@ Item {
                                     anchors.rightMargin: 4
                                     anchors.verticalCenter: parent.verticalCenter
                                     iconName: "trash"
-                                    onClicked: assistant.deleteChatId(String(modelData.id || ""))
+                                    onClicked: root.requestDeleteChat(String(modelData.id || ""))
                                     ToolTip.visible: hovered
                                     ToolTip.text: "Удалить этот чат"
                                 }
@@ -391,10 +427,20 @@ Item {
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                     }
-                    Label {
-                        text: assistant.status
-                        color: Theme.muted
-                        font.pixelSize: Theme.fsSmall
+                    RowLayout {
+                        spacing: Theme.gapSm
+                        Label {
+                            text: assistant.status
+                            color: Theme.muted
+                            font.pixelSize: Theme.fsSmall
+                        }
+                        Label {
+                            visible: assistant.busy && assistant.stage.length > 0
+                            text: assistant.stage
+                            color: Theme.faint
+                            font.pixelSize: Theme.fsMicro
+                            elide: Text.ElideRight
+                        }
                     }
                 }
                 TextField {
@@ -443,48 +489,140 @@ Item {
                     ToolTip.visible: hovered
                     ToolTip.text: assistant.recordPinned ? "Открепить" : "Закрепить сверху"
                 }
-                PillButton {
-                    compact: true
-                    text: "Новый чат"
-                    enabled: !assistant.busy
-                    onClicked: assistant.createChat()
-                    ToolTip.visible: hovered
-                    ToolTip.text: "Отдельный разговор без расшифровки"
+                Item { Layout.fillWidth: true }
+                RowLayout {
+                    spacing: Theme.gapSm
+                    PillButton {
+                        compact: true
+                        text: "Новый чат"
+                        enabled: !assistant.busy
+                        onClicked: assistant.createChat()
+                        ToolTip.visible: hovered
+                        ToolTip.text: "Отдельный разговор без расшифровки"
+                    }
+                    PillButton {
+                        compact: true
+                        visible: assistant.recordId !== ""
+                        text: assistant.naming ? "…" : "Назвать"
+                        enabled: !assistant.busy && assistant.modelReady
+                        onClicked: assistant.nameRecord()
+                        ToolTip.visible: hovered
+                        ToolTip.text: "Придумать заголовок по расшифровке"
+                    }
+                    PillButton {
+                        compact: true
+                        visible: assistant.recordId !== ""
+                                 && Number(assistant.record.segments || 0) > 0
+                        text: "Карта"
+                        enabled: !assistant.busy
+                        onClicked: assistant.rebuildIndex()
+                        ToolTip.visible: hovered
+                        ToolTip.text: "Пересчитать описания частей записи"
+                    }
+                    PillButton {
+                        compact: true
+                        text: "Экспорт чата"
+                        enabled: !assistant.busy && assistant.messages.length > 0
+                        onClicked: assistant.exportChat()
+                        ToolTip.visible: hovered
+                        ToolTip.text: "Сохранить переписку в файл"
+                    }
+                    PillButton {
+                        compact: true
+                        visible: assistant.recordId !== ""
+                                 && Number(assistant.record.segments || 0) > 0
+                        text: "Экспорт карты"
+                        enabled: !assistant.busy
+                        onClicked: assistant.exportDigests()
+                        ToolTip.visible: hovered
+                        ToolTip.text: "Сохранить выжимки частей записи"
+                    }
                 }
-                PillButton {
-                    compact: true
-                    visible: assistant.recordId !== ""
-                    text: assistant.naming ? "…" : "Назвать"
-                    enabled: !assistant.busy && assistant.modelReady
-                    onClicked: assistant.nameRecord()
-                    ToolTip.visible: hovered
-                    ToolTip.text: "Придумать заголовок по расшифровке"
+                Rectangle {
+                    Layout.preferredWidth: 1
+                    Layout.preferredHeight: 24
+                    color: Theme.hairline
                 }
-                PillButton {
-                    compact: true
-                    visible: assistant.recordId !== "" && Number(assistant.record.segments || 0) > 0
-                    text: "Карта"
-                    enabled: !assistant.busy
-                    onClicked: assistant.rebuildIndex()
-                    ToolTip.visible: hovered
-                    ToolTip.text: "Пересчитать описания частей записи"
+                RowLayout {
+                    spacing: Theme.gapSm
+                    DangerPill {
+                        text: "Удалить чат"
+                        enabled: !assistant.busy && assistant.messages.length > 0
+                        onClicked: root.requestDeleteChat("")
+                        ToolTip.visible: hovered
+                        ToolTip.text: "Стереть переписку. Расшифровка останется"
+                    }
+                    DangerPill {
+                        visible: assistant.recordDeletable
+                        text: "Удалить запись"
+                        enabled: !assistant.busy
+                        onClicked: root.confirmDeleteOpen = true
+                        ToolTip.visible: hovered
+                        ToolTip.text: "Удалить расшифровку и чат навсегда"
+                    }
                 }
-                PillButton {
-                    compact: true
-                    text: "Удалить чат"
-                    enabled: !assistant.busy && assistant.messages.length > 0
-                    onClicked: assistant.deleteChat()
-                    ToolTip.visible: hovered
-                    ToolTip.text: "Стереть переписку. Расшифровка останется"
-                }
-                PillButton {
-                    compact: true
-                    visible: assistant.recordDeletable
-                    text: "Удалить запись"
-                    enabled: !assistant.busy
-                    onClicked: root.confirmDeleteOpen = true
-                    ToolTip.visible: hovered
-                    ToolTip.text: "Удалить расшифровку и чат навсегда"
+            }
+
+            Rectangle {
+                objectName: "indexProgress"
+                visible: assistant.indexState.active
+                Layout.fillWidth: true
+                implicitHeight: indexCol.implicitHeight + 16
+                radius: Theme.radiusSm
+                color: Theme.fill
+                border.width: 1
+                border.color: Theme.hairline
+                ColumnLayout {
+                    id: indexCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.margins: 10
+                    spacing: 4
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label {
+                            Layout.fillWidth: true
+                            text: "Карта записи: "
+                                  + (assistant.indexState.done || 0)
+                                  + " из "
+                                  + (assistant.indexState.total || 0)
+                            color: Theme.muted
+                            font.pixelSize: Theme.fsMicro
+                            elide: Text.ElideRight
+                        }
+                        Label {
+                            text: Math.round(
+                                Math.max(0, Math.min(1,
+                                    (assistant.indexState.total || 0) > 0
+                                    ? (assistant.indexState.done || 0)
+                                      / (assistant.indexState.total || 1)
+                                    : 0
+                                )) * 100
+                            ) + "%"
+                            color: Theme.text
+                            font.pixelSize: Theme.fsMicro
+                            font.family: Theme.monoFamily
+                        }
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 4
+                        radius: 2
+                        color: Theme.surface2
+                        Rectangle {
+                            width: parent.width * Math.max(0, Math.min(1,
+                                (assistant.indexState.total || 0) > 0
+                                ? (assistant.indexState.done || 0)
+                                  / (assistant.indexState.total || 1)
+                                : 0
+                            ))
+                            height: parent.height
+                            radius: 2
+                            color: Theme.text
+                            Behavior on width { NumberAnimation { duration: Theme.fastMs } }
+                        }
+                    }
                 }
             }
 
@@ -519,6 +657,7 @@ Item {
                 objectName: "assistantActions"
                 Layout.fillWidth: true
                 visible: assistant.recordId !== ""
+                         && Number(assistant.record.segments || 0) > 0
                 spacing: Theme.gapSm
                 Repeater {
                     model: assistant.actions
@@ -585,12 +724,17 @@ Item {
                     spacing: Theme.gapMd
                     model: assistant.messages
                     visible: assistant.messages.length > 0
+                    property bool stickToBottom: true
                     ScrollBar.vertical: ScrollBar { }
+                    onMovementEnded: stickToBottom = atYEnd
                     Connections {
                         target: assistant
-                        function onMessagesChanged() { chat.positionViewAtEnd() }
+                        function onMessagesChanged() {
+                            if (chat.stickToBottom)
+                                chat.positionViewAtEnd()
+                        }
                         function onStreamChanged() {
-                            if (assistant.busy)
+                            if (assistant.busy && chat.stickToBottom)
                                 chat.positionViewAtEnd()
                         }
                     }
@@ -599,6 +743,11 @@ Item {
                         required property var modelData
                         required property int index
                         readonly property bool mine: modelData.role === "user"
+                        readonly property bool linkTimestamps: !bubbleRow.mine
+                                                             && assistant.recordId !== ""
+                                                             && !modelData.pending
+                                                             && modelData.content
+                                                             && modelData.content.length > 0
                         readonly property var fileMeta: (modelData.meta && modelData.meta.attachment)
                                                        ? modelData.meta.attachment : null
                         // Ширина пузыря фиксирована долей списка: иначе
@@ -662,14 +811,19 @@ Item {
                                     selectionColor: Theme.fillPress
                                     selectedTextColor: Theme.text
                                     wrapMode: TextEdit.Wrap
-                                    textFormat: TextEdit.PlainText
+                                    textFormat: bubbleRow.linkTimestamps
+                                                ? TextEdit.RichText
+                                                : TextEdit.PlainText
                                     text: {
                                         if (modelData.pending)
                                             return assistant.pendingReply.length
                                                    ? assistant.pendingReply
                                                    : (assistant.stage.length ? assistant.status : "…")
-                                        if (modelData.content && modelData.content.length)
+                                        if (modelData.content && modelData.content.length) {
+                                            if (bubbleRow.linkTimestamps)
+                                                return root.linkifyTimestamps(modelData.content)
                                             return modelData.content
+                                        }
                                         return assistant.stage.length ? assistant.status : "…"
                                     }
                                     color: (modelData.pending
@@ -678,6 +832,11 @@ Item {
                                            ? Theme.text : Theme.muted
                                     font.family: Theme.fontFamily
                                     font.pixelSize: Theme.fsBody
+                                    onLinkActivated: function (link) {
+                                        if (link.indexOf("seek:") !== 0)
+                                            return
+                                        root.seekTimestamp(Number(link.substring(5)))
+                                    }
                                 }
                             }
                         }
@@ -819,8 +978,120 @@ Item {
                       && String(assistant.attachment.name).length > 0
         if (!text.length && !hasFile)
             return
+        chat.stickToBottom = true
         assistant.ask(text)
         input.clear()
+    }
+
+    function requestDeleteChat(chatId) {
+        root.pendingDeleteChatId = chatId || ""
+        root.confirmClearChatOpen = true
+    }
+
+    function confirmDeleteChat() {
+        if (root.pendingDeleteChatId.length > 0)
+            assistant.deleteChatId(root.pendingDeleteChatId)
+        else
+            assistant.deleteChat()
+        root.pendingDeleteChatId = ""
+        root.confirmClearChatOpen = false
+    }
+
+    function escapeHtml(text) {
+        return String(text)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+    }
+
+    function linkifyTimestamps(text) {
+        var safe = escapeHtml(text)
+        safe = safe.replace(/\[(\d+):(\d{2}):(\d{2})\]/g, function (match, hours, minutes, seconds) {
+            var total = Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds)
+            return '<a href="seek:' + total + '" style="color:' + Theme.muted
+                   + ';text-decoration:underline;">' + match + '</a>'
+        })
+        return safe.replace(/\[(\d{1,2}):(\d{2})\]/g, function (match, minutes, seconds) {
+            var total = Number(minutes) * 60 + Number(seconds)
+            return '<a href="seek:' + total + '" style="color:' + Theme.muted
+                   + ';text-decoration:underline;">' + match + '</a>'
+        })
+    }
+
+    function seekTimestamp(seconds) {
+        if (assistant.recordId === "" || !(seconds >= 0))
+            return
+        if (typeof assistant.openTimestamp === "function") {
+            assistant.openTimestamp(seconds)
+            return
+        }
+        if (typeof bridge !== "undefined" && bridge !== null
+                && typeof bridge.openSessionAt === "function")
+            bridge.openSessionAt(assistant.recordId, seconds)
+    }
+
+    // Подтверждение очистки чата: расшифровка остаётся.
+    Rectangle {
+        anchors.fill: parent
+        visible: root.confirmClearChatOpen
+        z: 20
+        color: Theme.scrim
+        MouseArea { anchors.fill: parent; onClicked: root.confirmClearChatOpen = false }
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: Math.min(420, parent.width - 40)
+            implicitHeight: clearChatCol.implicitHeight + 36
+            radius: Theme.radiusXl
+            color: Theme.surface
+            border.width: 1
+            border.color: Theme.borderHi
+            MouseArea { anchors.fill: parent }
+
+            ColumnLayout {
+                id: clearChatCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 18
+                spacing: Theme.gapMd
+
+                Label {
+                    Layout.fillWidth: true
+                    text: "Удалить чат?"
+                    color: Theme.text
+                    font.pixelSize: Theme.fsSection
+                    font.weight: Font.DemiBold
+                }
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    text: root.pendingDeleteChatId.length > 0
+                          ? ("Чат «" + assistant.recordTitle + "» будет удалён навсегда. Расшифровка записи останется.")
+                          : "Переписка будет стёрта. Расшифровка и карта записи останутся."
+                    color: Theme.muted
+                    font.pixelSize: Theme.fsBody
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.gapSm
+                    Item { Layout.fillWidth: true }
+                    PillButton {
+                        text: "Отмена"
+                        onClicked: {
+                            root.pendingDeleteChatId = ""
+                            root.confirmClearChatOpen = false
+                        }
+                    }
+                    PillButton {
+                        primary: true
+                        text: "Удалить чат"
+                        enabled: !assistant.busy
+                        onClicked: root.confirmDeleteChat()
+                    }
+                }
+            }
+        }
     }
 
     // Подтверждение удаления записи: нельзя вернуть расшифровку.

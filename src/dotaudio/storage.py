@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 RECOVERED_SESSION_STATUS = "interrupted"
 
 # Переписка вне записи (общий чат) хранится под этим ключом: NULL в
@@ -93,6 +93,7 @@ class Store:
                 self._add_history_indexes,
                 self._add_assistant_tables,
                 self._add_session_pin,
+                self._add_transcript_embeddings,
             )
             for target_version in range(version + 1, SCHEMA_VERSION + 1):
                 connection.execute("BEGIN IMMEDIATE")
@@ -237,6 +238,21 @@ class Store:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS ix_sessions_pinned_order "
             "ON sessions(pinned DESC, created_at DESC, id DESC)"
+        )
+
+    @staticmethod
+    def _add_transcript_embeddings(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transcript_embeddings (
+                session_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                content_hash TEXT NOT NULL,
+                model TEXT NOT NULL,
+                vector_json TEXT NOT NULL,
+                PRIMARY KEY (session_id, chunk_index)
+            )
+            """
         )
 
     def create_session(
@@ -516,6 +532,9 @@ class Store:
             connection.execute(
                 "DELETE FROM transcript_digests WHERE session_id = ?", (sid,)
             )
+            connection.execute(
+                "DELETE FROM transcript_embeddings WHERE session_id = ?", (sid,)
+            )
             connection.execute("DELETE FROM sessions WHERE id = ?", (sid,))
         return True
 
@@ -657,6 +676,67 @@ class Store:
         with self._connect() as connection:
             connection.execute(
                 "DELETE FROM transcript_digests WHERE session_id = ?", (session_id,)
+            )
+
+    def save_embedding(
+        self,
+        session_id: str,
+        chunk_index: int,
+        content_hash: str,
+        model: str,
+        vector: Iterable[float],
+    ) -> None:
+        """Запомнить вектор части записи, заменив прежний для этой части."""
+
+        payload = json.dumps(list(vector), ensure_ascii=False)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO transcript_embeddings (
+                    session_id, chunk_index, content_hash, model, vector_json
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, chunk_index) DO UPDATE SET
+                    content_hash = excluded.content_hash,
+                    model = excluded.model,
+                    vector_json = excluded.vector_json
+                """,
+                (
+                    session_id,
+                    int(chunk_index),
+                    content_hash,
+                    model,
+                    payload,
+                ),
+            )
+
+    def list_embeddings(self, session_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT chunk_index, content_hash, model, vector_json
+                FROM transcript_embeddings WHERE session_id = ?
+                ORDER BY chunk_index ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        embeddings: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            raw = item.pop("vector_json", "[]")
+            try:
+                vector = json.loads(raw)
+            except (TypeError, ValueError):
+                vector = []
+            item["vector"] = vector if isinstance(vector, list) else []
+            embeddings.append(item)
+        return embeddings
+
+    def clear_embeddings(self, session_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM transcript_embeddings WHERE session_id = ?",
+                (session_id,),
             )
 
     def get_settings(self) -> dict[str, Any]:

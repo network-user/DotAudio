@@ -134,4 +134,21 @@ Item {
         KaraokeEditor { Layout.fillWidth: true; Layout.horizontalStretchFactor: 47; Layout.fillHeight: true; player: mediaPlayer; segments: bridge.segments; editable: true }
     }
     MediaPlayer { id: mediaPlayer; source: bridge.mediaUrl; videoOutput: mediaVideo; audioOutput: AudioOutput {} }
+
+    function applyPendingSeek() {
+        if (bridge.pendingSeekMs < 0 || mediaPlayer.duration <= 0)
+            return
+        mediaPlayer.position = bridge.pendingSeekMs
+        bridge.clearPendingSeek()
+    }
+
+    Connections {
+        target: bridge
+        function onChanged() { page.applyPendingSeek() }
+    }
+
+    Connections {
+        target: mediaPlayer
+        function onDurationChanged() { page.applyPendingSeek() }
+    }
 }

@@ -170,13 +170,14 @@ Item {
                             Layout.preferredWidth: 190
                             model: [
                                 { key: "auto", label: "Автоматически" },
-                                { key: "llama_cpp", label: "Встроенный llama.cpp" },
+                                { key: "llama_cpp", label: "Встроенный llama.cpp (изолированный процесс)" },
+                                { key: "llama_inplace", label: "Процессор в процессе (без изоляции)" },
                                 { key: "ollama", label: "Ollama" }
                             ]
                             textRole: "label"
-                            currentIndex: ["auto", "llama_cpp", "ollama"].indexOf(assistant.runtimePreference)
+                            currentIndex: ["auto", "llama_cpp", "llama_inplace", "ollama"].indexOf(assistant.runtimePreference)
                             onActivated: function (index) {
-                                assistant.setRuntime(["auto", "llama_cpp", "ollama"][index])
+                                assistant.setRuntime(["auto", "llama_cpp", "llama_inplace", "ollama"][index])
                             }
                         }
                         Item { Layout.fillWidth: true }

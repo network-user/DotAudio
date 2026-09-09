@@ -259,6 +259,21 @@ class Engine:
         self._live_window = True
         self._model_lock = Lock()
         self._inference_lock = Lock()
+        from dotaudio.vram_arbiter import get_arbiter
+
+        get_arbiter().on_evict("asr", self._evict_vram)
+
+    def _evict_vram(self) -> None:
+        self._clear_cached_model()
+
+    def _clear_cached_model(self) -> bool:
+        with self._inference_lock, self._model_lock:
+            if not self._models:
+                return False
+            self._models.clear()
+            self._tokenizers.clear()
+            self._detected_languages.clear()
+            return True
 
     def release_cached_model(self) -> bool:
         """Release the in-process model once the application is idle.
@@ -269,13 +284,12 @@ class Engine:
         model alive until it has returned.
         """
 
-        with self._inference_lock, self._model_lock:
-            if not self._models:
-                return False
-            self._models.clear()
-            self._tokenizers.clear()
-            self._detected_languages.clear()
-            return True
+        cleared = self._clear_cached_model()
+        if cleared:
+            from dotaudio.vram_arbiter import get_arbiter
+
+            get_arbiter().release("asr")
+        return cleared
 
     def transcribe(
         self,
@@ -929,8 +943,10 @@ class Engine:
             # installed from the UI «Настроить GPU» action; loading only hooks
             # what is already on disk so a cold auto path can still fall back.
             from dotaudio.cuda_runtime import register_cuda_dll_directories
+            from dotaudio.vram_arbiter import get_arbiter
 
             register_cuda_dll_directories()
+            get_arbiter().acquire("asr")
         with self._model_lock:
             cached = self._models.get(key)
             if cached is not None:

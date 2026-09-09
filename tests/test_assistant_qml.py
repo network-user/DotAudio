@@ -191,6 +191,19 @@ def test_record_selection_shows_the_ready_made_actions(page, warnings) -> None:
     assert_clean(warnings)
 
 
+def test_actions_hidden_without_segments(page, warnings) -> None:
+    root, assistant, session = page
+    actions = find(root, "assistantActions")
+
+    assistant.selectRecord(session)
+    wait_until(lambda: assistant.recordId == session)
+    assistant._record = {**assistant._record, "segments": 0}
+    assistant.recordChanged.emit()
+    settle()
+    assert actions.property("visible") is False
+    assert_clean(warnings)
+
+
 def test_conversation_grows_with_the_answer(page, warnings) -> None:
     root, assistant, _session = page
     chat = find(root, "assistantChat")

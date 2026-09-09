@@ -14,9 +14,10 @@
    уже не платит за них.
 3. Из выжимок собирается карта записи с таймкодами. Она короткая: даже у
    двухчасового разговора это меньше полутора тысяч токенов.
-4. На вопрос сначала отвечает не модель, а поиск по словам - он даёт
-   кандидатов дешево. Затем модель читает карту и сама говорит, какие части
-   нужно открыть.
+4. На вопрос сначала отвечает не модель, а поиск - лексический по словам и,
+   если есть сохранённые векторы, лёгкий семантический по хеш-эмбеддингам
+   (feature hashing стемов, не нейросеть). Затем модель читает карту и сама
+   говорит, какие части нужно открыть.
 5. Выбранные части раскрываются полным текстом (вместе с соседними, если
    помещаются) и только они идут в контекст ответа.
 6. Если модель отвечает, что в открытых частях ответа нет, идёт второй заход
@@ -30,6 +31,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import threading
 from collections.abc import Callable, Iterable, Sequence
@@ -37,6 +39,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from dotaudio.llm import GenerationOptions
+from dotaudio.speaker_labels import default_speaker_label
 
 # Сколько символов русского текста приходится на токен. Оценка снизу: лучше
 # недобрать контекст, чем упереться в окно на середине ответа.
@@ -80,6 +83,12 @@ _NOT_FOUND_PARAPHRASE = re.compile(
 
 _WORD = re.compile(r"[0-9a-zA-Zа-яёА-ЯЁ]+")
 
+# Таймкоды в квадратных скобках для кликабельных ссылок в ответе.
+TIMESTAMP_RE = re.compile(r"\[(\d{1,2}:\d{2}(?::\d{2})?)\]")
+
+# Вес семантического скора при смешении с лексическим поиском.
+SEMANTIC_BLEND_WEIGHT = 0.35
+
 # Служебные слова не помогают найти нужную часть, зато уводят поиск: «что»
 # и «как» есть в каждом вопросе.
 _STOPWORDS = frozenset(
@@ -120,6 +129,90 @@ def stamp(seconds: float) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _parse_timecode(code: str) -> float | None:
+    parts = str(code or "").split(":")
+    try:
+        if len(parts) == 2:
+            minutes, seconds = int(parts[0]), int(parts[1])
+            return float(minutes * 60 + seconds)
+        if len(parts) == 3:
+            hours, minutes, seconds = int(parts[0]), int(parts[1]), int(parts[2])
+            return float(hours * 3600 + minutes * 60 + seconds)
+    except ValueError:
+        return None
+    return None
+
+
+def parse_timestamp(text: str) -> float | None:
+    """Секунды из строки с таймкодом ``[MM:SS]`` или ``[H:MM:SS]``."""
+
+    match = TIMESTAMP_RE.search(str(text or ""))
+    if match is None:
+        return None
+    return _parse_timecode(match.group(1))
+
+
+def iter_timestamps(text: str) -> list[tuple[int, int, float]]:
+    """Все таймкоды в тексте: начало, конец и секунды."""
+
+    out: list[tuple[int, int, float]] = []
+    for match in TIMESTAMP_RE.finditer(text or ""):
+        seconds = _parse_timecode(match.group(1))
+        if seconds is not None:
+            out.append((match.start(), match.end(), seconds))
+    return out
+
+
+def _looks_like_timestamp_label(label: str) -> bool:
+    return _parse_timecode(label) is not None
+
+
+def _segment_speaker(segment: dict) -> str:
+    """Подпись говорящего из полей сегмента или префикса в тексте."""
+
+    for key in ("speaker", "speaker_label"):
+        value = str(segment.get(key) or "").strip()
+        if value:
+            return value
+    role = segment.get("role")
+    if role is not None:
+        try:
+            return default_speaker_label(int(role))
+        except (TypeError, ValueError):
+            pass
+    text = str(segment.get("text") or "").strip()
+    if text.startswith("[") and "]" in text:
+        label, _rest = text[1:].split("]", 1)
+        label = label.strip()
+        if label and not _looks_like_timestamp_label(label):
+            return label
+    return ""
+
+
+def _strip_speaker_prefix(text: str, speaker: str) -> str:
+    body = str(text or "").strip()
+    if not body.startswith("[") or "]" not in body:
+        return body
+    label, rest = body[1:].split("]", 1)
+    label = label.strip()
+    if not label or _looks_like_timestamp_label(label):
+        return body
+    if speaker and label != speaker:
+        return body
+    return rest.strip()
+
+
+LineTuple = tuple[float, str] | tuple[float, str, str]
+
+
+def normalize_line(line: LineTuple) -> tuple[float, str, str]:
+    """Привести строку части к виду ``(время, текст, говорящий)``."""
+
+    if len(line) == 2:
+        return (float(line[0]), str(line[1]), "")
+    return (float(line[0]), str(line[1]), str(line[2] if len(line) > 2 else ""))
 
 
 def _stem(word: str) -> str:
@@ -170,22 +263,40 @@ class Chunk:
     index: int
     start: float
     end: float
-    lines: tuple[tuple[float, str], ...]
+    lines: tuple[tuple[float, str, str], ...]
     segment_ids: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        normalized = tuple(normalize_line(line) for line in self.lines)
+        object.__setattr__(self, "lines", normalized)
 
     @property
     def text(self) -> str:
-        return " ".join(line for _, line in self.lines)
+        return " ".join(line for _at, line, _speaker in self.lines)
+
+    @property
+    def has_speakers(self) -> bool:
+        return any(speaker for _at, _line, speaker in self.lines)
 
     @property
     def stamped(self) -> str:
         """Текст части с таймкодом у каждой фразы: по нему модель ставит ссылки."""
 
-        return "\n".join(f"[{stamp(at)}] {line}" for at, line in self.lines)
+        rows: list[str] = []
+        for at, line, speaker in self.lines:
+            prefix = f"[{stamp(at)}]"
+            if speaker:
+                rows.append(f"{prefix} {speaker}: {line}")
+            else:
+                rows.append(f"{prefix} {line}")
+        return "\n".join(rows)
 
     @property
     def content_hash(self) -> str:
-        payload = f"{self.start:.2f}|{self.end:.2f}|{self.text}"
+        payload_rows = [
+            f"{at:.2f}|{speaker}|{line}" for at, line, speaker in self.lines
+        ]
+        payload = f"{self.start:.2f}|{self.end:.2f}|" + "\n".join(payload_rows)
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
     @property
@@ -232,13 +343,14 @@ def build_chunks(
     """
 
     chunks: list[Chunk] = []
-    lines: list[tuple[float, str]] = []
+    lines: list[tuple[float, str, str]] = []
     ids: list[int] = []
     start = 0.0
     end = 0.0
     chars = 0
     for segment in segments:
-        text = str(segment.get("text") or "").strip()
+        speaker = _segment_speaker(segment)
+        text = _strip_speaker_prefix(str(segment.get("text") or "").strip(), speaker)
         if not text:
             continue
         try:
@@ -248,7 +360,7 @@ def build_chunks(
             continue
         if not lines:
             start = at
-        lines.append((at, text))
+        lines.append((at, text, speaker))
         chars += len(text) + 1
         end = max(end, until)
         identifier = segment.get("id")
@@ -282,10 +394,121 @@ def transcript_text(chunks: Sequence[Chunk]) -> str:
     return "\n".join(chunk.stamped for chunk in chunks)
 
 
+def _hash_feature(stem: str, dim: int) -> tuple[int, float]:
+    digest = hashlib.blake2b(stem.encode("utf-8"), digest_size=8).digest()
+    value = int.from_bytes(digest, "little")
+    return value % dim, 1.0 if value & 1 else -1.0
+
+
+def embed_text(text: str, dim: int = 256) -> list[float]:
+    """Лёгкий хеш-эмбеддинг стемов слов. Не нейросеть, только feature hashing."""
+
+    vec = [0.0] * dim
+    for stem in _stems(text):
+        index, sign = _hash_feature(stem, dim)
+        vec[index] += sign
+    norm = math.sqrt(sum(value * value for value in vec))
+    if norm <= 0.0:
+        return vec
+    return [value / norm for value in vec]
+
+
+def cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    if len(a) != len(b) or not a:
+        return 0.0
+    return sum(x * y for x, y in zip(a, b, strict=True))
+
+
+def build_chunk_embeddings(
+    chunks: Sequence[Chunk],
+    dim: int = 256,
+) -> dict[int, list[float]]:
+    """Векторы частей для семантического поиска. Сохранение - задача контроллера."""
+
+    return {chunk.index: embed_text(chunk.text, dim=dim) for chunk in chunks}
+
+
+def ensure_embeddings(
+    session_id: str,
+    chunks: Sequence[Chunk],
+    store_callback: Callable[[str, Sequence[Chunk]], dict[int, list[float]] | None]
+    | None = None,
+    dim: int = 256,
+) -> dict[int, list[float]]:
+    """Embeddings частей: из store_callback или считаются на месте."""
+
+    if store_callback is not None and session_id:
+        cached = store_callback(session_id, chunks)
+        if cached is not None:
+            return cached
+    return build_chunk_embeddings(chunks, dim=dim)
+
+
+def score_chunks_semantic(
+    question: str,
+    chunks: Sequence[Chunk],
+    digests: Sequence[Digest] = (),
+    embeddings: dict[int, list[float]] | None = None,
+    dim: int = 256,
+) -> list[tuple[int, float]]:
+    """Семантический скор частей по косинусу хеш-эмбеддингов."""
+
+    vectors = embeddings or build_chunk_embeddings(chunks, dim=dim)
+    if not vectors:
+        return []
+    query = embed_text(question, dim=dim)
+    digest_by_index = {item.index: item for item in digests}
+    scored: list[tuple[int, float]] = []
+    for chunk in chunks:
+        vector = vectors.get(chunk.index)
+        if vector is None:
+            continue
+        score = cosine(query, vector)
+        digest = digest_by_index.get(chunk.index)
+        if digest is not None:
+            digest_vec = embed_text(
+                " ".join((digest.summary, *digest.keywords)),
+                dim=dim,
+            )
+            score += cosine(query, digest_vec) * 0.5
+        if score > 0:
+            scored.append((chunk.index, round(score, 4)))
+    scored.sort(key=lambda item: (-item[1], item[0]))
+    return scored
+
+
+def _blend_chunk_scores(
+    lexical: list[tuple[int, float, int]],
+    semantic: list[tuple[int, float]],
+    semantic_weight: float = SEMANTIC_BLEND_WEIGHT,
+) -> list[tuple[int, float, int]]:
+    if not semantic:
+        return lexical
+    lex_by_index = {index: (score, matched) for index, score, matched in lexical}
+    sem_by_index = dict(semantic)
+    max_lex = max((score for score, _matched in lex_by_index.values()), default=1.0) or 1.0
+    max_sem = max(sem_by_index.values(), default=1.0) or 1.0
+    blended: list[tuple[int, float, int]] = []
+    for index in dict.fromkeys(
+        [item[0] for item in lexical] + [item[0] for item in semantic]
+    ):
+        lex_score, matched = lex_by_index.get(index, (0.0, 0))
+        sem_score = sem_by_index.get(index, 0.0)
+        norm_lex = lex_score / max_lex
+        norm_sem = sem_score / max_sem
+        combined = (1.0 - semantic_weight) * norm_lex + semantic_weight * norm_sem
+        if combined > 0:
+            blended.append((index, round(combined * max(max_lex, max_sem), 3), matched))
+    blended.sort(key=lambda item: (-item[1], item[0]))
+    return blended
+
+
 def score_chunks(
     question: str,
     chunks: Sequence[Chunk],
     digests: Sequence[Digest] = (),
+    embeddings: dict[int, list[float]] | None = None,
+    semantic_weight: float = SEMANTIC_BLEND_WEIGHT,
 ) -> list[tuple[int, float, int]]:
     """Кандидаты по словам вопроса: номер части, вес и сколько слов совпало.
 
@@ -315,6 +538,14 @@ def score_chunks(
         if score > 0:
             scored.append((chunk.index, round(score, 3), len(matched)))
     scored.sort(key=lambda item: (-item[1], item[0]))
+    if embeddings:
+        semantic = score_chunks_semantic(
+            question,
+            chunks,
+            digests,
+            embeddings=embeddings,
+        )
+        return _blend_chunk_scores(scored, semantic, semantic_weight=semantic_weight)
     return scored
 
 
@@ -401,7 +632,9 @@ SYSTEM_RECORD = (
     "по тем выдержкам, которые тебе дали. Не цитируй выдержки построчно и не "
     "повторяй один и тот же факт дважды: нужен ответ, а не пересказ записи. "
     "Таймкод из квадратных скобок добавляй в конце утверждения, к которому он "
-    "относится, например «смета выросла до 3,2 млн [01:12]». Расшифровка речи "
+    "относится, например «смета выросла до 3,2 млн [01:12]». Если в выдержках "
+    "указаны говорящие, связывай обещания, задачи и решения с ними - особенно "
+    "когда спрашивают, кто что обещал или кому что поручили. Расшифровка речи "
     "бывает неточной: если слово выглядит искажённым, скажи об этом, а не "
     "додумывай. Если в выдержках ответа нет, ответь ровно словом "
     f"{NOT_FOUND_MARKER} и ничем больше."
@@ -418,6 +651,7 @@ ACTION_PROMPTS = {
     ),
     "tasks": (
         "Выпиши договорённости, задачи и решения из записи: кто что должен сделать. "
+        "Если в тексте указаны говорящие, называй их в каждом пункте. "
         "Каждый пункт с таймкодом. Если задач нет, скажи об этом одной фразой."
     ),
     "topics": (
@@ -499,10 +733,15 @@ class TranscriptAssistant:
         их надёжнее посчитать, чем просить."""
 
         options = GenerationOptions(temperature=0.2, max_tokens=200)
+        speaker_hint = (
+            " В выдержке указаны говорящие - упоминай их, если это важно для смысла."
+            if chunk.has_speakers
+            else ""
+        )
         prompt = (
             "Ниже кусок расшифровки записи. Опиши двумя-тремя предложениями, о чём здесь "
-            "говорят и что решили. Без вступления, без списка, только описание.\n\n"
-            f"{chunk.stamped}"
+            f"говорят и что решили.{speaker_hint} Без вступления, без списка, только "
+            f"описание.\n\n{chunk.stamped}"
         )
         summary = self._ask(SYSTEM_CHAT, prompt, options).strip()
         if not summary:
@@ -658,6 +897,7 @@ class TranscriptAssistant:
         chunks: Sequence[Chunk],
         history: Sequence[dict] = (),
         on_token=None,
+        embeddings: dict[int, list[float]] | None = None,
     ) -> Answer:
         """Ответ на вопрос по записи с раскрытием нужных частей."""
 
@@ -711,7 +951,13 @@ class TranscriptAssistant:
                     return Answer(text="", mode="cancelled")
                 picked = self._pick_parts(question, digests)
                 lexical = [
-                    index for index, _score, _matched in score_chunks(question, chunks, digests)
+                    index
+                    for index, _score, _matched in score_chunks(
+                        question,
+                        chunks,
+                        digests,
+                        embeddings=embeddings,
+                    )
                 ]
                 chosen = [
                     index
