@@ -37,6 +37,7 @@ from dotaudio.pipeline import (
     open_voice_activity,
     preload_voice_activity,
 )
+from dotaudio.speaker_labels import default_speaker_label
 from dotaudio.storage import Store
 from dotaudio.transcripts import (
     apply_keyword_cooldown,
@@ -417,14 +418,18 @@ class Controller(QObject):
         self._live_diagnostic = ""
         self._capture_started_at = None
         self._session_id, self._media_url, self._query = "", "", ""
+        self._pending_seek_ms = -1
         self._session_title = ""
         self._session_mode = ""
         self._jobs = {}
+        # progress: -1 = неизвестно (анимация indeterminate), 0..1 = доля
+        # готового прохода. engine.transcribe не отдаёт проценты по сегментам,
+        # поэтому во время работы держим -1 и не выдумываем цифры.
         self._trans_state = {
             "phase": "idle", "stage": "", "file": "", "path": "",
             "error": "", "speakers": [], "diarization": False,
             "engine": "", "engineNote": "", "duration": 0.0,
-            "segments": [], "sessionId": "",
+            "segments": [], "sessionId": "", "progress": 0.0,
         }
         self._trans_cancel = threading.Event()
         # Опрос рантайма NeMo - запуск процесса, поэтому он делается один раз
@@ -960,6 +965,9 @@ class Controller(QObject):
     @Property(str, notify=changed)
     def mediaUrl(self): return self._media_url
 
+    @Property(int, notify=changed)
+    def pendingSeekMs(self): return self._pending_seek_ms
+
     @Property(str, notify=changed)
     def coverUrl(self): return self._cover_url
 
@@ -1108,7 +1116,7 @@ class Controller(QObject):
             "caption_contrast": ("normal", "high"),
             "caption_position": ("top", "bottom", "floating"),
             "live_size": ("small", "standard", "wide", "tall"),
-            "assistant_runtime": ("auto", "llama_cpp", "ollama"),
+            "assistant_runtime": ("auto", "llama_cpp", "llama_inplace", "ollama"),
         }
         if name in choices and value not in choices[name]:
             return
@@ -1961,6 +1969,16 @@ class Controller(QObject):
             self.captionChanged.emit()
             self.liveStateChanged.emit()
 
+    def _acquire_asr_vram(self, config: RecognitionConfig | None = None) -> None:
+        """Заранее вытеснить LLM, если Whisper пойдёт на CUDA."""
+
+        config = config or self._config(live_stream=True)
+        if config.device == "cpu":
+            return
+        from dotaudio.vram_arbiter import get_arbiter
+
+        get_arbiter().acquire("asr")
+
     def _arm_idle_model_release(self):
         """Unload the heavy ASR instance after a quiet period, not its files."""
 
@@ -2020,6 +2038,7 @@ class Controller(QObject):
                     daemon=True,
                 ).start()
             return
+        self._acquire_asr_vram(config)
         self._begin_engine_prepare(
             model_label=model,
             prepare_fn=lambda on_status, on_progress: self.engine.prepare(
@@ -2205,6 +2224,9 @@ class Controller(QObject):
             "monitor": "Мониторинг эфира",
         }[mode]
         if mode == "live":
+            live_engine = str(self._settings.get("live_engine") or "whisper")
+            if live_engine != "vosk":
+                self._acquire_asr_vram()
             # Единое Live-окно: отдельное «окно зала» (CaptionOverlay) не
             # дублирует текст поверх, а открывается только кнопкой-оверлеем
             # в самом окне, когда оно нужно отдельным экраном/подчисткой.
@@ -2777,6 +2799,36 @@ class Controller(QObject):
             self._status = session["title"]
             self.changed.emit()
 
+    @Slot(str, float)
+    def openSessionAt(self, sid: str, seconds: float) -> None:
+        """Открыть запись и перейти к нужному моменту в медиа или расшифровке."""
+
+        session = self.store.get_session(str(sid or ""))
+        if session is None:
+            return
+        self.openSession(sid)
+        if self._session_id != sid:
+            return
+        self._page = "media" if self._media_url else "transcript"
+        self._pending_seek_ms = max(0, int(float(seconds) * 1000))
+        self.changed.emit()
+
+    @Slot(float)
+    def seekMediaTo(self, seconds: float) -> None:
+        """Перемотать текущее медиа без смены записи."""
+
+        if not self._media_url:
+            return
+        self._pending_seek_ms = max(0, int(float(seconds) * 1000))
+        self.changed.emit()
+
+    @Slot()
+    def clearPendingSeek(self) -> None:
+        if self._pending_seek_ms < 0:
+            return
+        self._pending_seek_ms = -1
+        self.changed.emit()
+
     def _open_transcript_session(self, session: dict) -> None:
         """Восстановить страницу «Транскрибация» из сохранённой сессии."""
 
@@ -2815,6 +2867,7 @@ class Controller(QObject):
                 "engineNote": "Открыто из истории",
                 "duration": max((float(row.get("end", 0.0)) for row in rows), default=0.0),
                 "sessionId": session.get("id") or "",
+                "progress": 1.0,
             }
         )
         # Легенда говорящих из подписей в тексте, без ролей движка.
@@ -3156,6 +3209,19 @@ class Controller(QObject):
     @Property("QVariantMap", notify=transcribeChanged)
     def transcribeState(self): return self._trans_state
 
+    @Property(str, notify=transcribeChanged)
+    def transcribeMediaUrl(self) -> str:
+        """file:// URL выбранного медиа для QML MediaPlayer.
+
+        Без проверки существования: путь уже задан pick/clear/историей.
+        Пустая строка, если файла ещё нет.
+        """
+
+        path = str(self._trans_state.get("path") or "")
+        if not path:
+            return ""
+        return QUrl.fromLocalFile(path).toString()
+
     @Property("QVariantList", notify=transcribeChanged)
     def transcribeSegments(self): return self._trans_state["segments"]
 
@@ -3286,7 +3352,8 @@ class Controller(QObject):
         self._trans_state.update({"phase": "idle", "stage": "", "path": path,
                                   "file": str(Path(path).name), "error": "", "speakers": [],
                                   "segments": [], "engine": "", "engineNote": "", "duration": 0.0,
-                                  "sessionId": ""})
+                                  "sessionId": "", "progress": 0.0,
+                                  "diarization": False})
         self.transcribeChanged.emit()
 
     @Slot(str)
@@ -3304,7 +3371,8 @@ class Controller(QObject):
         self._trans_state.update({"phase": "idle", "stage": "", "path": str(media),
                                   "file": media.name, "error": "", "speakers": [],
                                   "segments": [], "engine": "", "engineNote": "", "duration": 0.0,
-                                  "sessionId": ""})
+                                  "sessionId": "", "progress": 0.0,
+                                  "diarization": False})
         self.transcribeChanged.emit()
 
     @Slot()
@@ -3321,7 +3389,7 @@ class Controller(QObject):
         state = self._trans_state
         state.update({"phase": "working", "stage": "asr", "error": "", "segments": [],
                       "speakers": [], "diarization": False, "engine": "", "engineNote": "",
-                      "sessionId": ""})
+                      "sessionId": "", "progress": -1.0})
         self._record_log("info", f"Транскрибация (локально): {Path(path).name}")
         self.transcribeChanged.emit()
 
@@ -3333,11 +3401,12 @@ class Controller(QObject):
                 self._record_log("error", str(exc))
             state["stage"] = ""
             if self._trans_cancel.is_set():
-                state.update({"phase": "idle"})
+                state.update({"phase": "idle", "progress": 0.0})
                 self.transcribeStatus.emit("Распознавание отменено (частичный результат не сохранён).")
             else:
                 state["error"] = text if text.startswith("Ошибка") else ""
                 state["phase"] = "idle" if state["error"] else "done"
+                state["progress"] = 0.0 if state["error"] else 1.0
                 if not state["error"] and state.get("sessionId"):
                     self.transcriptPersisted.emit(str(state["sessionId"]))
             self.transcribeChanged.emit()
@@ -3349,6 +3418,9 @@ class Controller(QObject):
         """Показать, чем занят проход: словами или голосами."""
 
         self._trans_state["stage"] = stage
+        # ASR закончен, голоса ещё без доли: оставляем indeterminate.
+        if stage == "voices":
+            self._trans_state["progress"] = -1.0
         self.transcribeChanged.emit()
 
     def _transcribe_local(self, path: str) -> str:
@@ -3514,7 +3586,11 @@ class Controller(QObject):
         for row in rows:
             role = row.get("role")
             key = int(role) + 1 if role is not None else None
-            labelled.append({**row, "role": key, "speaker": f"Человек {key}" if key else ""})
+            labelled.append({
+                **row,
+                "role": key,
+                "speaker": default_speaker_label(key) if key else "",
+            })
         return labelled
 
     @staticmethod
@@ -3548,7 +3624,7 @@ class Controller(QObject):
         self._trans_state.update({"phase": "idle", "stage": "", "file": "", "path": "",
                                   "error": "", "speakers": [], "segments": [],
                                   "diarization": False, "engine": "", "engineNote": "",
-                                  "duration": 0.0, "sessionId": ""})
+                                  "duration": 0.0, "sessionId": "", "progress": 0.0})
         self.transcribeChanged.emit()
 
     @Slot(int, str)

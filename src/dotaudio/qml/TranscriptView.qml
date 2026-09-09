@@ -1,35 +1,48 @@
 ﻿import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import "Theme.js" as Theme
 
 // Отдельный режим «Транскрибация»: файл -> расшифровка с таймкодами и
 // говорящими. Весь обмен идёт через мост bridge.*; распознавание всегда
 // локально (bridge.runTranscript никогда не выбирает сервер), а голоса
 // определяет выбранный движок: NVIDIA NeMo Sortformer или ECAPA.
+//
+// Воспроизведение - через TranscriptPlayer (sibling); busy - через
+// TranscriptBusy. Оба компонента подхватываются Qt Quick по имени файла.
 Rectangle {
     id: view
     color: "transparent"
+    focus: true
 
     property string phase: String(bridge.transcribeState.phase || "idle")
     property string stage: String(bridge.transcribeState.stage || "")
     property string file: String(bridge.transcribeState.file || "")
+    property real progress: {
+        var raw = bridge.transcribeState.progress
+        return raw === undefined || raw === null ? -1 : Number(raw)
+    }
     property bool busyPhase: phase === "working"
     property var segs: bridge.transcribeSegments
     property var speakers: bridge.transcribeState.speakers || []
     property string engineNote: String(bridge.transcribeState.engineNote || "")
     property var voices: bridge.diarizeStatus
     property var engines: bridge.diarizeEngines
+    property string mediaUrl: String(bridge.transcribeMediaUrl || "")
 
     // Показывать только один голос. 0 - показывать всех.
     property int focusKey: 0
-    // Фраза, к которой только что перешли с полосы голосов.
+    // Фраза, к которой только что перешли с полосы голосов или кликом.
     property int markedIndex: -1
+    // Глобальный индекс сегмента, который сейчас играет (по позиции плеера).
+    property int playIndex: -1
 
     readonly property var rows: focusKey > 0
         ? segs.filter(function (row) { return Number(row.role) === view.focusKey })
         : segs
     readonly property real total: Math.max(0.001, Number(bridge.transcribeState.duration || 0))
+    readonly property bool hasMedia: mediaUrl.length > 0 || view.file.length > 0
 
     Component.onCompleted: bridge.refreshDiarizeStatus()
 
@@ -43,6 +56,13 @@ Rectangle {
         if (rest.length < 4) rest = "0" + rest
         return (hours > 0 ? (hours < 10 ? "0" : "") + hours + ":" : "")
                + (minutes < 10 ? "0" : "") + minutes + ":" + rest
+    }
+
+    function applyPendingSeek() {
+        if (bridge.pendingSeekMs < 0 || player.duration <= 0)
+            return
+        player.seekSeconds(bridge.pendingSeekMs / 1000)
+        bridge.clearPendingSeek()
     }
 
     function duration(seconds) {
@@ -70,6 +90,33 @@ Rectangle {
         return 0
     }
 
+    function busyMessage() {
+        if (view.stage === "voices")
+            return "Слова готовы. Определяем, кто из говорящих что произнёс…"
+        return "Распознаём на процессоре и расставляем таймкоды. На длинной записи это занимает время."
+    }
+
+    function focusIsTextEdit() {
+        var win = view.Window.window
+        var item = win ? win.activeFocusItem : null
+        if (!item)
+            return false
+        var name = item.toString()
+        return name.indexOf("TextField") >= 0
+               || name.indexOf("TextInput") >= 0
+               || name.indexOf("TextEdit") >= 0
+    }
+
+    // Воспроизвести фразу и кратко подсветить её в полном списке.
+    function playPhraseAt(startSec, endSec, globalIndex) {
+        if (globalIndex !== undefined && globalIndex >= 0 && view.focusKey === 0) {
+            view.markedIndex = globalIndex
+            markTimer.restart()
+        }
+        if (view.hasMedia)
+            player.playPhrase(Number(startSec), Number(endSec))
+    }
+
     // Переход с полосы голосов к фразе. Фильтр снимается: иначе номер
     // фразы на полосе не совпал бы с номером строки в отфильтрованном списке.
     function revealPhrase(index) {
@@ -81,10 +128,57 @@ Rectangle {
         })
     }
 
+    function syncPlayIndex() {
+        if (!player.playing) {
+            if (view.playIndex !== -1)
+                view.playIndex = -1
+            return
+        }
+        var t = Number(player.position) / 1000
+        var found = -1
+        for (var i = 0; i < view.segs.length; ++i) {
+            var row = view.segs[i]
+            if (t >= Number(row.start) && t < Number(row.end)) {
+                found = i
+                break
+            }
+        }
+        if (found === view.playIndex)
+            return
+        view.playIndex = found
+        if (found < 0 || view.focusKey !== 0)
+            return
+        segList.positionViewAtIndex(found, ListView.Contain)
+    }
+
     Timer {
         id: markTimer
         interval: 1600
         onTriggered: view.markedIndex = -1
+    }
+
+    // Space: play/pause, если фокус не в поле имени говорящего.
+    Shortcut {
+        sequence: "Space"
+        context: Qt.WindowShortcut
+        enabled: view.visible && view.hasMedia
+        onActivated: {
+            if (view.focusIsTextEdit())
+                return
+            player.toggle()
+        }
+    }
+
+    DropArea {
+        anchors.fill: parent
+        enabled: !view.busyPhase
+        keys: ["text/uri-list"]
+        onDropped: function (drop) {
+            if (!drop.hasUrls || drop.urls.length === 0)
+                return
+            bridge.pickTranscriptFilename(String(drop.urls[0]))
+            drop.acceptProposedAction()
+        }
     }
 
     ColumnLayout {
@@ -120,7 +214,7 @@ Rectangle {
                         Label {
                             text: view.file.length
                                   ? "Обработка локально. Аудио не покидает этот компьютер."
-                                  : "Откройте запись, получите слова с таймкодами и метки говорящих."
+                                  : "Откройте запись или перетащите файл сюда. Слова с таймкодами и метки говорящих."
                             color: Theme.muted
                             font.pixelSize: Theme.fsSmall
                             wrapMode: Text.Wrap
@@ -190,17 +284,31 @@ Rectangle {
                     }
                 }
 
-                Label {
-                    visible: view.busyPhase
+                TranscriptBusy {
                     Layout.fillWidth: true
-                    text: view.stage === "voices"
-                          ? "Слова готовы. Определяем, кто из говорящих что произнёс…"
-                          : "Распознаём на процессоре и расставляем таймкоды. На длинной записи это занимает время."
-                    color: Theme.faint
-                    font.pixelSize: Theme.fsSmall
-                    wrapMode: Text.Wrap
+                    active: view.busyPhase
+                    stage: view.stage
+                    progress: view.progress
+                    fileName: view.file
+                    message: view.busyMessage()
                 }
             }
+        }
+
+        // Плеер исходника: доступен сразу после выбора файла, до ASR.
+        TranscriptPlayer {
+            id: player
+            Layout.fillWidth: true
+            visible: view.hasMedia
+            source: view.mediaUrl
+            onPlayingChanged: view.syncPlayIndex()
+            onPositionChanged: view.syncPlayIndex()
+            onDurationChanged: view.applyPendingSeek()
+        }
+
+        Connections {
+            target: bridge
+            function onChanged() { view.applyPendingSeek() }
         }
 
         // Как включить выбранный движок, если его нет на машине.
@@ -380,10 +488,14 @@ Rectangle {
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: view.revealPhrase(parent.index)
+                                onClicked: {
+                                    view.revealPhrase(parent.index)
+                                    view.playPhraseAt(parent.modelData.start, parent.modelData.end, parent.index)
+                                }
                                 ToolTip.visible: containsMouse
                                 ToolTip.text: view.timecode(parent.modelData.start) + " · "
                                               + (parent.modelData.speaker || "голос не определён")
+                                              + " · воспроизвести"
                             }
                         }
                     }
@@ -408,7 +520,7 @@ Rectangle {
                         Label {
                             Layout.fillWidth: true
                             visible: view.focusKey === 0 && view.speakers.length > 1
-                            text: "Нажмите на голос, чтобы оставить в списке только его реплики, или на полосу - чтобы перейти к фразе."
+                            text: "Нажмите на голос, чтобы оставить в списке только его реплики, или на полосу - чтобы перейти к фразе и услышать её."
                             color: Theme.faint
                             font.pixelSize: Theme.fsSmall
                             elide: Text.ElideRight
@@ -462,7 +574,7 @@ Rectangle {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
-                    text: "Этот раздел не касается караоке: выбирается запись, а при желании определяется, кто из говорящих что произнёс."
+                    text: "Откройте или перетащите запись. После расшифровки нажмите на фразу, чтобы услышать её."
                     color: Theme.muted
                     font.pixelSize: Theme.fsBody
                 }
@@ -470,17 +582,22 @@ Rectangle {
             ColumnLayout {
                 anchors.centerIn: parent
                 visible: view.segs.length === 0 && view.file.length && !view.busyPhase
+                width: Math.min(parent.width - 80, 360)
                 spacing: Theme.gapSm
                 Label {
+                    Layout.alignment: Qt.AlignHCenter
                     text: "Файл выбран"
                     color: Theme.text
                     font.pixelSize: Theme.fsLead
                     font.weight: Font.DemiBold
                 }
-                Label {
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
                     color: Theme.muted
                     font.pixelSize: Theme.fsBody
-                    text: "Определение голосов заработает после распознавания."
+                    text: "Можно слушать исходник в плеере выше. После расшифровки нажмите на фразу, чтобы услышать её."
                 }
             }
             ListView {
@@ -490,13 +607,22 @@ Rectangle {
                 model: view.rows
                 spacing: Theme.gapSm
                 clip: true
+                visible: view.segs.length > 0
                 ScrollBar.vertical: ScrollBar {}
                 delegate: Rectangle {
                     id: segCard
                     required property var modelData
                     required property int index
                     readonly property string label: modelData.speaker || ""
-                    readonly property bool marked: view.focusKey === 0 && view.markedIndex === index
+                    readonly property real startSec: Number(modelData.start)
+                    readonly property real endSec: Number(modelData.end)
+                    // В полном списке index совпадает с глобальным; при фильтре
+                    // подсветка markedIndex не ставится (как раньше).
+                    readonly property bool playingNow: player.playing
+                        && (Number(player.position) / 1000) >= segCard.startSec
+                        && (Number(player.position) / 1000) < segCard.endSec
+                    readonly property bool marked: segCard.playingNow
+                        || (view.focusKey === 0 && (view.markedIndex === index || view.playIndex === index))
                     width: ListView.view.width
                     implicitHeight: segBody.implicitHeight + 24
                     radius: Theme.radiusMd
@@ -504,6 +630,12 @@ Rectangle {
                     border.width: 1
                     border.color: segCard.marked ? Theme.borderHi : Theme.border
                     Behavior on color { ColorAnimation { duration: Theme.baseMs } }
+
+                    function replay() {
+                        view.playPhraseAt(segCard.startSec, segCard.endSec,
+                                          view.focusKey === 0 ? segCard.index : -1)
+                    }
+
                     RowLayout {
                         id: segBody
                         anchors.fill: parent
@@ -515,38 +647,72 @@ Rectangle {
                             radius: 2
                             color: Theme.speakerInk(segCard.modelData.role)
                         }
-                        ColumnLayout {
+                        // Клик по тексту/таймкоду - воспроизвести фразу.
+                        // Отдельный MouseArea, чтобы не перехватывать IconButton.
+                        Item {
                             Layout.fillWidth: true
-                            spacing: 4
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: Theme.gapSm
-                                Label {
-                                    text: view.timecode(segCard.modelData.start) + " – " + view.timecode(segCard.modelData.end)
-                                    color: Theme.muted
-                                    font.family: Theme.monoFamily
-                                    font.pixelSize: Theme.fsSmall
+                            implicitHeight: phraseCol.implicitHeight
+                            ColumnLayout {
+                                id: phraseCol
+                                width: parent.width
+                                spacing: 4
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: Theme.gapSm
+                                    Label {
+                                        text: view.timecode(segCard.startSec) + " - " + view.timecode(segCard.endSec)
+                                        color: Theme.muted
+                                        font.family: Theme.monoFamily
+                                        font.pixelSize: Theme.fsSmall
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Label {
+                                        visible: segCard.label.length > 0
+                                        text: segCard.label
+                                        color: Theme.speakerInk(segCard.modelData.role)
+                                        font.pixelSize: Theme.fsSmall
+                                        font.weight: Font.DemiBold
+                                    }
                                 }
-                                Item { Layout.fillWidth: true }
                                 Label {
-                                    visible: segCard.label.length > 0
-                                    text: segCard.label
-                                    color: Theme.speakerInk(segCard.modelData.role)
-                                    font.pixelSize: Theme.fsSmall
-                                    font.weight: Font.DemiBold
+                                    Layout.fillWidth: true
+                                    text: segCard.modelData.text || "-"
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fsBody
+                                    wrapMode: Text.Wrap
+                                    textFormat: Text.PlainText
                                 }
                             }
-                            Label {
-                                Layout.fillWidth: true
-                                text: segCard.modelData.text || "-"
-                                color: Theme.text
-                                font.pixelSize: Theme.fsBody
-                                wrapMode: Text.Wrap
-                                textFormat: Text.PlainText
+                            MouseArea {
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: segCard.replay()
+                                ToolTip.visible: containsMouse
+                                ToolTip.text: "Воспроизвести фразу"
                             }
+                        }
+                        IconButton {
+                            iconName: "live"
+                            Layout.alignment: Qt.AlignVCenter
+                            onClicked: segCard.replay()
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Воспроизвести фразу"
                         }
                     }
                 }
+            }
+
+            // Подсказка под готовым списком - только когда есть фразы и не busy.
+            Label {
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: Theme.gapSm
+                visible: view.segs.length > 0 && view.phase === "done" && !view.busyPhase
+                         && view.focusKey === 0 && view.playIndex < 0 && view.markedIndex < 0
+                text: "Нажмите на фразу, чтобы услышать её. Пробел - пауза или продолжение."
+                color: Theme.faint
+                font.pixelSize: Theme.fsMicro
             }
         }
     }

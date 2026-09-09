@@ -9,6 +9,7 @@ from __future__ import annotations
 from threading import Event
 
 from dotaudio.controller import DIARIZE_ENGINES, Controller
+from dotaudio.speaker_labels import default_speaker_label
 
 
 class _Signal:
@@ -28,7 +29,7 @@ class _Stub:
 
     def __init__(self, engine="off"):
         self._settings = {"diarize_engine": engine}
-        self._trans_state = {"stage": ""}
+        self._trans_state = {"stage": "", "progress": 0.0}
         self._trans_cancel = Event()
         self.transcribeChanged = _Signal()
         self.transcribeStatus = _Signal()
@@ -36,6 +37,8 @@ class _Stub:
 
     def _trans_stage(self, stage):
         self._trans_state["stage"] = stage
+        if stage == "voices":
+            self._trans_state["progress"] = -1.0
 
     def _record_log(self, tone, message):
         self.logs.append((tone, message))
@@ -45,6 +48,11 @@ def test_engine_names_cover_every_stored_choice():
     assert set(DIARIZE_ENGINES) == {"off", "nemo", "ecapa"}
 
 
+def test_default_speaker_label_is_voice_numbered_from_one():
+    assert default_speaker_label(1) == "Голос 1"
+    assert default_speaker_label(2) == "Голос 2"
+
+
 def test_labels_start_at_one_and_skip_unknown_voices():
     rows = Controller._label_speakers([
         {"text": "раз", "role": 0},
@@ -52,14 +60,14 @@ def test_labels_start_at_one_and_skip_unknown_voices():
         {"text": "три", "role": None},
     ])
     assert [row["role"] for row in rows] == [1, 2, None]
-    assert [row["speaker"] for row in rows] == ["Человек 1", "Человек 2", ""]
+    assert [row["speaker"] for row in rows] == ["Голос 1", "Голос 2", ""]
 
 
 def test_legend_counts_phrases_and_speaking_time():
     rows = [
-        {"role": 1, "speaker": "Человек 1", "start": 0.0, "end": 2.0},
-        {"role": 2, "speaker": "Человек 2", "start": 2.0, "end": 3.5},
-        {"role": 1, "speaker": "Человек 1", "start": 4.0, "end": 5.0},
+        {"role": 1, "speaker": "Голос 1", "start": 0.0, "end": 2.0},
+        {"role": 2, "speaker": "Голос 2", "start": 2.0, "end": 3.5},
+        {"role": 1, "speaker": "Голос 1", "start": 4.0, "end": 5.0},
         {"role": None, "speaker": "", "start": 6.0, "end": 7.0},
     ]
     legend = Controller._speaker_legend(rows)
@@ -139,7 +147,7 @@ def test_persist_transcript_writes_history_session(tmp_path):
     path = Path(tmp_path) / "meeting.wav"
     path.write_bytes(b"")
     rows = [
-        {"start": 0.0, "end": 1.5, "text": "привет", "speaker": "Человек 1", "words": []},
+        {"start": 0.0, "end": 1.5, "text": "привет", "speaker": "Голос 1", "words": []},
         {"start": 1.5, "end": 3.0, "text": "мир", "speaker": "", "words": []},
     ]
 
@@ -149,9 +157,73 @@ def test_persist_transcript_writes_history_session(tmp_path):
     assert session is not None
     assert session["mode"] == "transcript"
     assert session["title"] == "meeting.wav"
-    assert session["segments"][0]["text"] == "[Человек 1] привет"
+    assert session["segments"][0]["text"] == "[Голос 1] привет"
     assert session["segments"][1]["text"] == "мир"
     assert any("истори" in text.casefold() for text in stub.statuses)
+
+
+def test_rename_transcript_speaker_updates_segments_and_legend():
+    class _Rename:
+        renameTranscriptSpeaker = Controller.renameTranscriptSpeaker
+
+        def __init__(self):
+            self._trans_state = {
+                "speakers": [
+                    {"key": 1, "label": "Голос 1", "count": 1, "seconds": 1.0},
+                    {"key": 2, "label": "Голос 2", "count": 1, "seconds": 1.0},
+                ],
+                "segments": [
+                    {"role": 1, "speaker": "Голос 1", "text": "раз"},
+                    {"role": 2, "speaker": "Голос 2", "text": "два"},
+                    {"role": None, "speaker": "", "text": "три"},
+                ],
+            }
+            self.transcribeChanged = _Signal()
+
+    stub = _Rename()
+    stub.renameTranscriptSpeaker(1, "Анна")
+    assert stub._trans_state["speakers"][0]["label"] == "Анна"
+    assert stub._trans_state["segments"][0]["speaker"] == "Анна"
+    assert stub._trans_state["segments"][1]["speaker"] == "Голос 2"
+    assert stub._trans_state["segments"][2]["speaker"] == ""
+    assert stub.transcribeChanged.sent
+
+
+def test_transcribe_media_url_from_path():
+    class _Url:
+        transcribeMediaUrl = Controller.transcribeMediaUrl.fget
+
+        def __init__(self, path=""):
+            self._trans_state = {"path": path}
+
+    assert _Url("").transcribeMediaUrl() == ""
+    url = _Url(r"C:\media\talk.wav").transcribeMediaUrl()
+    assert url.startswith("file:")
+    assert "talk.wav" in url.replace("\\", "/")
+
+
+def test_clear_transcript_resets_path_and_progress():
+    class _Clear:
+        clearTranscript = Controller.clearTranscript
+
+        def __init__(self):
+            self._jobs = {}
+            self._trans_state = {
+                "phase": "done", "stage": "asr", "file": "a.wav", "path": r"C:\a.wav",
+                "error": "x", "speakers": [1], "segments": [1],
+                "diarization": True, "engine": "nemo", "engineNote": "ok",
+                "duration": 3.0, "sessionId": "s1", "progress": 1.0,
+            }
+            self.transcribeChanged = _Signal()
+
+    stub = _Clear()
+    stub.clearTranscript()
+    assert stub._trans_state["path"] == ""
+    assert stub._trans_state["file"] == ""
+    assert stub._trans_state["progress"] == 0.0
+    assert stub._trans_state["phase"] == "idle"
+    assert stub._trans_state["segments"] == []
+    assert stub.transcribeChanged.sent
 
 
 def test_open_transcript_in_assistant_emits_session(tmp_path):
