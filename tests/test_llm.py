@@ -192,14 +192,13 @@ def test_recommendation_follows_video_memory_when_offload_works() -> None:
     assert llm.recommend_model(_profile(vram_gb=6, offload=True)) == "qwen3-4b"
 
 
-def test_a_small_card_does_not_downgrade_a_strong_processor() -> None:
-    """Если целиком не влезает даже лёгкая модель, решает процессор.
+def test_a_small_card_falls_back_to_light_cpu_model() -> None:
+    """Маленькая карта не влезает даже в лёгкую модель с запасом.
 
-    Карта на 3 ГБ всё равно возьмёт часть слоёв, но выбирать модель по ней
-    нельзя: на машине с 16 ГБ ОЗУ обычная модель пойдёт, а на слабой - нет.
+    Тогда совет идёт по CPU-пути: на процессоре по умолчанию light, а не 4B.
     """
 
-    assert llm.recommend_model(_profile(threads=16, ram_gb=32, vram_gb=3, offload=True)) == "qwen3-4b"
+    assert llm.recommend_model(_profile(threads=16, ram_gb=32, vram_gb=3, offload=True)) == "qwen3-1.7b"
     assert llm.recommend_model(_profile(threads=4, ram_gb=8, vram_gb=3, offload=True)) == "qwen3-1.7b"
 
 
