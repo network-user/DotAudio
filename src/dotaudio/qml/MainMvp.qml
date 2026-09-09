@@ -9,21 +9,6 @@ import "Theme.js" as Theme
 ApplicationWindow {
     id: root
 
-    // Мини-статистика в сводке железа: подпись над значением.
-    component HwStat: ColumnLayout {
-        property string label: ""
-        property string value: ""
-        spacing: 1
-        Label { text: label; color: Theme.faint; font.pixelSize: Theme.fsMicro }
-        Label {
-            text: value
-            color: Theme.text
-            font.pixelSize: Theme.fsBody
-            font.weight: Font.DemiBold
-            font.family: Theme.monoFamily
-        }
-    }
-
     // Старт - полное окно с навигацией. Остров и Live-сцена открываются
     // по запросу (свёртка / старт записи), а не вместо главной страницы.
     // В режиме app - обычное окно Windows с системной рамкой и кнопками.
