@@ -175,14 +175,7 @@ Window {
                     return
                 dragArmed = false
                 overlay.dragging = true
-                if (bridge.beginWindowDragId(overlay.winId())) {
-                    overlay.dragging = false
-                    bridge.setSetting("caption_position", "floating")
-                    bridge.setSetting("caption_x", Math.round(overlay.x))
-                    bridge.setSetting("caption_y", Math.round(overlay.y))
-                } else {
-                    overlay.startSystemMove()
-                }
+                overlay.startSystemMove()
             }
             onReleased: dragArmed = false
         }

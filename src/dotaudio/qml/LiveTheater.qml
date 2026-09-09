@@ -153,13 +153,10 @@ Rectangle {
                             return
                         dragArmed = false
                         root.shellDragStarted()
-                        if (bridge.beginWindowDrag())
-                            root.shellDragReleased()
-                        else {
-                            var win = Window.window
-                            if (win)
-                                win.startSystemMove()
-                        }
+                        var win = Window.window
+                        if (win)
+                            win.startSystemMove()
+                        // shellDragReleased — из MainMvp по отпусканию кнопки.
                     }
                     onReleased: dragArmed = false
                     onCanceled: dragArmed = false

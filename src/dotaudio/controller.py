@@ -1592,6 +1592,14 @@ class Controller(QObject):
     def primaryButtonDown(self) -> bool:
         return bool(self.desktop.primary_button_down())
 
+    @Slot(result="QVariant")
+    def cursorScreenPos(self):
+        """Cursor in the same coordinate space as QWindow x/y."""
+        from PySide6.QtGui import QCursor
+
+        point = QCursor.pos()
+        return {"x": float(point.x()), "y": float(point.y())}
+
     @Slot(result=bool)
     def beginWindowDrag(self) -> bool:
         """Native drag for the main shell window. Returns after mouse release."""

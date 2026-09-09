@@ -4,10 +4,9 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "Theme.js" as Theme
 
-// Остров. HWND - фиксированный холст в MainMvp. Размер хрома меняется
-// сразу (без Behavior по width/height: каждый кадр ломал layout и давал
-// рывки). Плавность - кроссфейд фаз и лёгкий scale. Drag отдаём Windows
-// (HTCAPTION) после небольшого порога сдвига, чтобы не ломать double-click.
+// Остров. HWND - фиксированный холст в MainMvp. Drag только сигналит
+// порог сдвига: само окно двигает MainMvp визуально (translate на
+// развёрнутом холсте), без SetWindowPos на каждый кадр.
 Rectangle {
     id: root
 
@@ -74,7 +73,7 @@ Rectangle {
 
     signal requestTheater()
     signal requestApp(string page)
-    signal dragStarted()
+    signal dragStarted(real screenX, real screenY)
     signal dragReleased()
     signal requestModePick()
     signal closeModes()
@@ -134,16 +133,8 @@ Rectangle {
             if (dx * dx + dy * dy < 16)
                 return
             dragArmed = false
-            root.dragStarted()
-            // Native drag блокирует до mouse-up. Fallback startSystemMove —
-            // нет: тогда MainMvp сам закончит drag по отпусканию кнопки.
-            if (bridge.beginWindowDrag())
-                root.dragReleased()
-            else {
-                var win = Window.window
-                if (win)
-                    win.startSystemMove()
-            }
+            // Дальше MainMvp ведёт визуальный drag (без SetWindowPos на кадр).
+            root.dragStarted(mouse.screenX, mouse.screenY)
         }
         onReleased: dragArmed = false
         onCanceled: dragArmed = false
