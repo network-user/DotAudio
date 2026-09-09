@@ -62,7 +62,6 @@ from dotaudio.transcript_pro import (
 )
 from dotaudio.transcripts import (
     apply_keyword_cooldown,
-    blend_fragments,
     continues_sentence,
     export_transcript,
     join_fragments,
@@ -490,6 +489,8 @@ class Controller(QObject):
     levelChanged = Signal()
     liveStateChanged = Signal()
     islandRequested = Signal()
+    # Остров диктовки - отдельное Tool-окно, без recreate главного HWND.
+    dictationIslandRequested = Signal()
     segmentArrived = Signal(str, object)
     partialArrived = Signal(str, object)
     # sid, сегменты черновика/финала, подпись статуса прохода
@@ -2641,13 +2642,22 @@ class Controller(QObject):
 
     @Slot()
     def hotkeyRecord(self):
-        if self._hold_active and self._state == "recording":
+        # Зависший refine/stop: повтор hotkey обязан снять busy.
+        if self._state == "processing" and self._jobs:
+            self.forceStop()
             return
+        if self._hold_active and self._state == "recording":
+            # Hold: стоп по отпусканию. Если комбинация уже отпущена, а флаг
+            # завис - не глотаем повтор, а останавливаем запись.
+            if self.desktop.available and self.desktop.combo_held("dictate"):
+                return
+            self._stop_hold()
         if not self._jobs:
             self._page = "dictation"
             self.desktop.remember_target()
-            # Остров должен появиться сразу: иначе hotkey «молчит» в чужом окне.
-            self.islandRequested.emit()
+            # Не collapse главного окна: recreate HWND даёт чёрный квадрат и
+            # ломает ощущение «повтор = стоп». Отдельный сигнал → Tool-остров.
+            self.dictationIslandRequested.emit()
         hold = bool(self._settings.get("dictate_hold")) and self.desktop.available
         if hold and self._state != "recording":
             self._hold_active = True
@@ -3186,26 +3196,19 @@ class Controller(QObject):
         return True
 
     def _refresh_live_caption(self):
-        """Live row: LocalAgreement prefix as confirmed, remainder as draft."""
+        """Живая строка - только текущая фраза, короткая и одна.
+
+        Прежде сюда же подставлялось открытое предложение из истории, и
+        живая строка росла на несколько реплик, переписываясь целиком
+        несколько раз в секунду. Сказанное читается в колонке готовых фраз,
+        поэтому здесь остаётся согласованный префикс текущей фразы как
+        подтверждённая часть и остаток гипотезы как черновик.
+        """
 
         draft = getattr(self, "_partial_source", "") or ""
         stable = getattr(self, "_preview_stable", "") or ""
         if stable and draft:
-            agreed = stable
-            rest = text_after_prefix(draft, stable)
-            if self._open_phrase and self._segments:
-                last = self._segments[-1]
-                head, _ = blend_fragments(
-                    str(last.get("text", "")), bool(last.get("cut")), agreed
-                )
-                confirmed, pending = head or agreed, rest
-            else:
-                confirmed, pending = agreed, rest
-        elif self._open_phrase and self._segments:
-            last = self._segments[-1]
-            confirmed, pending = blend_fragments(
-                str(last.get("text", "")), bool(last.get("cut")), draft
-            )
+            confirmed, pending = stable, text_after_prefix(draft, stable)
         else:
             confirmed, pending = "", draft
         confirmed, pending = split_caption_window(confirmed, pending)

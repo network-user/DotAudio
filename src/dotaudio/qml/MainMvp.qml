@@ -367,21 +367,22 @@ ApplicationWindow {
     Connections {
         target: bridge
         function onIslandRequested() {
+            dictationIsland.visible = false
             root.collapse()
             root.show()
             root.raise()
-            // Сразу видимый хром: иначе после recreate остаётся тёмный холст.
             root.shellFade = 1
             root.shellRise = 0
             bridge.applyIslandClickThrough(false)
             root.refreshIslandMask()
             Qt.callLater(root.refreshIslandMask)
-            // Не забирать фокус у поля ввода - иначе диктовка «глушит» цель,
-            // а вставка потом ищет уже не то окно.
+        }
+        function onDictationIslandRequested() {
+            // Отдельное Tool-окно: главный HWND не трогаем, фокус остаётся
+            // в целевом поле, повтор hotkey продолжает доходить до Desktop.
+            root.showDictationIsland()
         }
         function onCaptureStarted(_sid, _when) {
-            // Старт Live на «динамическом острове» по умолчанию разворачивает
-            // единое Live-окно (авто), если пользователь не выключил это.
             if (Boolean(bridge.settings.live_auto_window)
                     && root.shellMode === "island" && bridge.page === "live") {
                 root.openTheater()
@@ -395,10 +396,66 @@ ApplicationWindow {
                 quietTimer.stop()
                 root.quietHeld = false
             }
-            // Пока идёт диктовка, остров всегда кликабелен (стоп / крестик).
             if (root.shellMode === "island" && bridge.page === "dictation"
                     && (bridge.recording || bridge.busy))
                 bridge.applyIslandClickThrough(false)
+            // Держим Tool-остров, пока идёт диктовка или виден результат.
+            if (dictationIsland.visible) {
+                if (!bridge.recording && !bridge.busy && bridge.page !== "dictation")
+                    dictationIsland.visible = false
+            }
+        }
+    }
+
+    function showDictationIsland() {
+        if (root.islandCenterX >= 0) {
+            dictationIsland.x = Math.round(root.islandCenterX - root.islandW / 2)
+            dictationIsland.y = Math.round(root.islandTopY)
+        } else {
+            dictationIsland.x = Math.round((Screen.width - root.islandW) / 2)
+            dictationIsland.y = 32
+        }
+        dictationIsland.visible = true
+        dictationIsland.show()
+        dictationIsland.raise()
+    }
+
+    // Остров диктовки. Не морфит главное окно - иначе Windows recreate HWND
+    // оставляет чёрный квадрат без текста и ломает повтор hotkey.
+    Window {
+        id: dictationIsland
+        title: "DotAudio · диктовка"
+        visible: false
+        width: root.islandW
+        height: root.islandH
+        color: Theme.surface
+        flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+
+        onWidthChanged: {
+            if (!visible)
+                return
+            var cx = root.islandCenterX >= 0 ? root.islandCenterX : Screen.width / 2
+            x = Math.round(cx - width / 2)
+        }
+
+        MiniIsland {
+            id: dictationChrome
+            anchors.fill: parent
+            phase: root.islandPhase
+            radius: root.islandR
+            clickThrough: false
+            shellRise: 0
+            onRequestApp: {
+                dictationIsland.visible = false
+                root.openApp(page)
+            }
+            onRequestTheater: {
+                dictationIsland.visible = false
+                root.openTheater()
+            }
+            onRequestModePick: { }
+            onCloseModes: { }
+            onDragStarted: dictationIsland.startSystemMove()
         }
     }
 
