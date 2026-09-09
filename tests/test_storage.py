@@ -137,15 +137,121 @@ def test_versionless_database_is_migrated_without_losing_data(tmp_path: Path) ->
     assert migrated.get_session("legacy")["segments"][0]["text"] == "old text"
     with sqlite3.connect(path) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(segments)")}
+        segment_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(segments)")
+        }
+        session_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(sessions)")
+        }
         indexes = {row[1] for row in connection.execute("PRAGMA index_list(sessions)")}
+        event_indexes = {
+            row[1] for row in connection.execute("PRAGMA index_list(keyword_events)")
+        }
         tables = {
             row[0]
-            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
         }
-    assert "words_json" in columns
+    assert "words_json" in segment_columns
+    assert "speaker" in segment_columns
+    assert "audio_path" in session_columns
     assert {"ix_sessions_history_order", "ix_sessions_status"} <= indexes
-    assert {"chat_messages", "transcript_digests", "transcript_embeddings"} <= tables
+    assert {
+        "chat_messages",
+        "transcript_digests",
+        "transcript_embeddings",
+        "keyword_events",
+    } <= tables
+    assert {
+        "ix_keyword_events_created",
+        "ix_keyword_events_session",
+    } <= event_indexes
+
+
+def test_keyword_events_are_stored_and_filtered(tmp_path: Path) -> None:
+    store = Store(tmp_path / "dotaudio.sqlite3")
+    first = store.create_session("Эфир 1", "stream", "http://a", "small")
+    second = store.create_session("Эфир 2", "stream", "http://b", "small")
+
+    first_id = store.save_keyword_event(
+        first,
+        start=1.0,
+        end=2.5,
+        keyword="бюджет",
+        text="говорили про бюджет",
+        source="http://a",
+        clip_path="clips/a.wav",
+    )
+    store.save_keyword_event(
+        second,
+        start=0.0,
+        end=1.0,
+        keyword="срок",
+        text="новый срок",
+    )
+
+    events = store.list_keyword_events(session_id=first)
+    assert len(events) == 1
+    assert events[0]["id"] == first_id
+    assert events[0]["keyword"] == "бюджет"
+    assert events[0]["clip_path"] == "clips/a.wav"
+    assert len(store.list_keyword_events(limit=10)) == 2
+
+
+def test_list_recoverable_sessions_needs_audio_or_segments(tmp_path: Path) -> None:
+    path = tmp_path / "dotaudio.sqlite3"
+    store = Store(path)
+    with_audio = store.create_session(
+        "С аудио", "dictation", "mic", "base", audio_path="rec/a.wav"
+    )
+    with_segments = store.create_session("С текстом", "dictation", "mic", "base")
+    store.append_segments(
+        with_segments, [{"start": 0.0, "end": 1.0, "text": "хвост"}]
+    )
+    empty = store.create_session("Пустая", "dictation", "mic", "base")
+    store.set_session_audio_path(empty, "")
+
+    reopened = Store(path)
+    recoverable = {item["id"]: item for item in reopened.list_recoverable_sessions()}
+
+    assert with_audio in recoverable
+    assert recoverable[with_audio]["audio_path"] == "rec/a.wav"
+    assert with_segments in recoverable
+    assert recoverable[with_segments]["segment_count"] == 1
+    assert empty not in recoverable
+
+
+def test_semantic_search_matches_digest_keywords(tmp_path: Path) -> None:
+    store = Store(tmp_path / "dotaudio.sqlite3")
+    session_id = store.create_session("Совещание", "media", "file.wav", "small")
+    store.append_segments(
+        session_id,
+        [{"start": 0.0, "end": 1.0, "text": "обсудили сроки поставки"}],
+    )
+    store.save_digest(
+        session_id,
+        0,
+        "hash-a",
+        0.0,
+        1.0,
+        "Разговор про смету и людей",
+        ["смета", "люди"],
+        "qwen3-4b",
+    )
+
+    lexical = store.search_sessions("смета", semantic=False)
+    assert lexical == []
+
+    semantic = store.search_sessions("смета", semantic=True)
+    assert len(semantic) == 1
+    assert semantic[0]["id"] == session_id
+    assert semantic[0]["match_kind"] == "semantic"
+    assert float(semantic[0]["match_score"]) > 0
+
+    both = store.search_sessions("сроки", semantic=True)
+    assert both[0]["id"] == session_id
+    assert both[0]["match_kind"] == "lexical"
 
 
 def test_list_sessions_supports_stable_pagination(tmp_path: Path) -> None:
@@ -287,3 +393,70 @@ def test_embeddings_are_replaced_per_part_and_survive_reopen(tmp_path: Path) -> 
 
     store.clear_embeddings("rec")
     assert store.list_embeddings("rec") == []
+
+
+def test_append_segments_stores_speaker_separately(tmp_path: Path) -> None:
+    store = Store(tmp_path / "dotaudio.sqlite3")
+    session_id = store.create_session("Разговор", "transcript", "a.wav", "small")
+    [seg_id] = store.append_segments(
+        session_id,
+        [{"start": 0.0, "end": 1.0, "text": "привет", "speaker": "Анна"}],
+    )
+    segment = store.get_session(session_id)["segments"][0]
+    assert segment["id"] == seg_id
+    assert segment["text"] == "привет"
+    assert segment["speaker"] == "Анна"
+
+    store.update_segment(session_id, seg_id, "здравствуй", speaker="Борис")
+    updated = store.get_session(session_id)["segments"][0]
+    assert updated["text"] == "здравствуй"
+    assert updated["speaker"] == "Борис"
+
+    store.update_segment(session_id, seg_id, "только текст")
+    text_only = store.get_session(session_id)["segments"][0]
+    assert text_only["text"] == "только текст"
+    assert text_only["speaker"] == "Борис"
+
+
+def test_legacy_speaker_prefix_splits_on_migration(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-speaker.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                source TEXT NOT NULL,
+                model TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL DEFAULT 'active'
+            );
+            CREATE TABLE segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                start REAL NOT NULL,
+                end REAL NOT NULL,
+                text TEXT NOT NULL,
+                original_text TEXT NOT NULL
+            );
+            INSERT INTO sessions VALUES
+                ('legacy', 'Old', 'transcript', 'old.wav', 'base',
+                 '2026-01-01T00:00:00+00:00', NULL, 'completed');
+            INSERT INTO segments (session_id, start, end, text, original_text)
+                VALUES
+                ('legacy', 0, 1, '[Анна] привет', '[Анна] привет'),
+                ('legacy', 1, 2, 'без метки', 'без метки'),
+                ('legacy', 2, 3, '[0:12] не имя', '[0:12] не имя');
+            """
+        )
+
+    migrated = Store(path)
+    segments = migrated.get_session("legacy")["segments"]
+    assert segments[0]["speaker"] == "Анна"
+    assert segments[0]["text"] == "привет"
+    assert segments[1]["speaker"] == ""
+    assert segments[1]["text"] == "без метки"
+    assert segments[2]["speaker"] == ""
+    assert "[0:12]" in segments[2]["text"]

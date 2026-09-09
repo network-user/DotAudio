@@ -37,6 +37,8 @@ Rectangle {
     property int markedIndex: -1
     // Глобальный индекс сегмента, который сейчас играет (по позиции плеера).
     property int playIndex: -1
+    // Глобальный индекс карточки в режиме правки (-1 = никто).
+    property int editingIndex: -1
 
     readonly property var rows: focusKey > 0
         ? segs.filter(function (row) { return Number(row.role) === view.focusKey })
@@ -105,6 +107,50 @@ Rectangle {
         return name.indexOf("TextField") >= 0
                || name.indexOf("TextInput") >= 0
                || name.indexOf("TextEdit") >= 0
+               || name.indexOf("TextArea") >= 0
+    }
+
+    // Глобальный индекс в bridge.transcribeSegments / view.segs.
+    // При focusKey > 0 список отфильтрован, index делегата не подходит.
+    function globalIndexOf(row) {
+        if (!row)
+            return -1
+        for (var i = 0; i < view.segs.length; ++i) {
+            var s = view.segs[i]
+            if (Number(s.start) === Number(row.start) && Number(s.end) === Number(row.end)
+                    && String(s.text) === String(row.text)
+                    && String(s.speaker || "") === String(row.speaker || ""))
+                return i
+        }
+        return -1
+    }
+
+    function speakerKindLabel(kind) {
+        var key = String(kind || "voice").toLowerCase()
+        if (key === "male") return "Парень"
+        if (key === "female") return "Девушка"
+        return "Голос"
+    }
+
+    function nextSpeakerKind(kind) {
+        var key = String(kind || "voice").toLowerCase()
+        if (key === "voice") return "male"
+        if (key === "male") return "female"
+        return "voice"
+    }
+
+    function speakerPickModel() {
+        var items = [{ label: "без метки", value: "" }]
+        for (var i = 0; i < view.speakers.length; ++i) {
+            var sp = view.speakers[i]
+            items.push({ label: String(sp.label || ("Голос " + sp.key)), value: String(sp.label || "") })
+        }
+        return items
+    }
+
+    onBusyPhaseChanged: {
+        if (busyPhase)
+            view.editingIndex = -1
     }
 
     // Воспроизвести фразу и кратко подсветить её в полном списке.
@@ -401,11 +447,20 @@ Rectangle {
                             id: chip
                             required property var modelData
                             readonly property bool focused: view.focusKey === Number(modelData.key)
+                            readonly property string kind: String(modelData.kind || "voice")
                             function commit() {
                                 var label = nameField.text.trim()
                                 if (label.length) bridge.renameTranscriptSpeaker(Number(modelData.key), label)
                             }
-                            width: Math.min(320, Math.max(230, nameField.implicitWidth + share.implicitWidth + 74))
+                            function cycleKind() {
+                                if (view.busyPhase)
+                                    return
+                                bridge.setTranscriptSpeakerKind(
+                                    Number(chip.modelData.key),
+                                    view.nextSpeakerKind(chip.kind)
+                                )
+                            }
+                            width: Math.min(360, Math.max(250, nameField.implicitWidth + share.implicitWidth + kindBtn.implicitWidth + 86))
                             implicitHeight: 38
                             radius: Theme.radiusLg
                             color: chip.focused ? Theme.fillHi : Theme.fill
@@ -417,14 +472,14 @@ Rectangle {
                                 anchors.fill: parent
                                 acceptedButtons: Qt.LeftButton
                                 onClicked: view.focusKey = chip.focused ? 0 : Number(chip.modelData.key)
-                                // Имя правится текстовым полем поверх этой области.
+                                // Имя и вид правятся элементами поверх этой области.
                                 propagateComposedEvents: true
                             }
 
                             RowLayout {
                                 anchors.fill: parent
                                 anchors.leftMargin: 12
-                                anchors.rightMargin: 12
+                                anchors.rightMargin: 10
                                 spacing: Theme.gapSm
                                 Rectangle {
                                     Layout.preferredWidth: 8
@@ -438,9 +493,19 @@ Rectangle {
                                     text: String(chip.modelData.label || "")
                                     color: Theme.text
                                     font.pixelSize: Theme.fsLabel
+                                    enabled: !view.busyPhase
                                     onActiveFocusChanged: if (!activeFocus) chip.commit()
                                     onEditingFinished: chip.commit()
                                     background: Item {}
+                                }
+                                PillButton {
+                                    id: kindBtn
+                                    text: view.speakerKindLabel(chip.kind)
+                                    compact: true
+                                    enabled: !view.busyPhase
+                                    onClicked: chip.cycleKind()
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: "Вид: Голос / Парень / Девушка. Своё имя не затирается."
                                 }
                                 Label {
                                     id: share
@@ -616,6 +681,9 @@ Rectangle {
                     readonly property string label: modelData.speaker || ""
                     readonly property real startSec: Number(modelData.start)
                     readonly property real endSec: Number(modelData.end)
+                    readonly property int globalIndex: view.globalIndexOf(modelData)
+                    readonly property bool editing: view.editingIndex >= 0
+                        && segCard.globalIndex === view.editingIndex
                     // В полном списке index совпадает с глобальным; при фильтре
                     // подсветка markedIndex не ставится (как раньше).
                     readonly property bool playingNow: player.playing
@@ -631,9 +699,82 @@ Rectangle {
                     border.color: segCard.marked ? Theme.borderHi : Theme.border
                     Behavior on color { ColorAnimation { duration: Theme.baseMs } }
 
+                    onEditingChanged: {
+                        if (editing)
+                            segCard.prepareEdit()
+                    }
+
+                    Component.onCompleted: {
+                        if (editing)
+                            segCard.prepareEdit()
+                    }
+
+                    function prepareEdit() {
+                        phraseEdit.text = String(segCard.modelData.text || "")
+                        speakerPick.currentIndex = segCard.speakerPickIndex()
+                        Qt.callLater(function () {
+                            if (segCard.editing)
+                                phraseEdit.forceActiveFocus()
+                        })
+                    }
+
                     function replay() {
                         view.playPhraseAt(segCard.startSec, segCard.endSec,
                                           view.focusKey === 0 ? segCard.index : -1)
+                    }
+
+                    function speakerPickIndex() {
+                        var current = String(segCard.label || "")
+                        var model = speakerPick.model
+                        for (var i = 0; i < model.length; ++i) {
+                            if (String(model[i].value) === current)
+                                return i
+                        }
+                        return 0
+                    }
+
+                    function beginEdit() {
+                        if (view.busyPhase)
+                            return
+                        var gi = segCard.globalIndex
+                        if (gi < 0)
+                            return
+                        view.editingIndex = gi
+                    }
+
+                    function savePhrase() {
+                        var gi = segCard.globalIndex
+                        if (gi < 0) {
+                            view.editingIndex = -1
+                            return
+                        }
+                        if (view.busyPhase) {
+                            view.editingIndex = -1
+                            return
+                        }
+                        var next = phraseEdit.text
+                        if (String(next) !== String(segCard.modelData.text || ""))
+                            bridge.editTranscriptSegment(gi, next)
+                        view.editingIndex = -1
+                    }
+
+                    function applySpeaker(pickIndex) {
+                        var gi = segCard.globalIndex
+                        if (gi < 0 || view.busyPhase)
+                            return
+                        var model = speakerPick.model
+                        if (pickIndex < 0 || pickIndex >= model.length)
+                            return
+                        var value = String(model[pickIndex].value || "")
+                        if (value === String(segCard.label || ""))
+                            return
+                        // Сначала текст: смена автора обновляет модель и может
+                        // пересобрать карточку до blur.
+                        var next = phraseEdit.text
+                        if (String(next) !== String(segCard.modelData.text || ""))
+                            bridge.editTranscriptSegment(gi, next)
+                        bridge.setTranscriptSegmentSpeaker(gi, value)
+                        view.editingIndex = gi
                     }
 
                     RowLayout {
@@ -648,7 +789,7 @@ Rectangle {
                             color: Theme.speakerInk(segCard.modelData.role)
                         }
                         // Клик по тексту/таймкоду - воспроизвести фразу.
-                        // Отдельный MouseArea, чтобы не перехватывать IconButton.
+                        // Отдельный MouseArea, чтобы не перехватывать кнопки и поля.
                         Item {
                             Layout.fillWidth: true
                             implicitHeight: phraseCol.implicitHeight
@@ -667,7 +808,7 @@ Rectangle {
                                     }
                                     Item { Layout.fillWidth: true }
                                     Label {
-                                        visible: segCard.label.length > 0
+                                        visible: !segCard.editing && segCard.label.length > 0
                                         text: segCard.label
                                         color: Theme.speakerInk(segCard.modelData.role)
                                         font.pixelSize: Theme.fsSmall
@@ -676,21 +817,123 @@ Rectangle {
                                 }
                                 Label {
                                     Layout.fillWidth: true
+                                    visible: !segCard.editing
                                     text: segCard.modelData.text || "-"
                                     color: Theme.text
                                     font.pixelSize: Theme.fsBody
                                     wrapMode: Text.Wrap
                                     textFormat: Text.PlainText
                                 }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    visible: segCard.editing
+                                    spacing: Theme.gapSm
+                                    TextArea {
+                                        id: phraseEdit
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: Math.max(56, contentHeight + 16)
+                                        wrapMode: TextEdit.Wrap
+                                        color: Theme.text
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.fsBody
+                                        selectByMouse: true
+                                        selectionColor: Theme.fillPress
+                                        selectedTextColor: Theme.text
+                                        placeholderText: "Текст фразы"
+                                        placeholderTextColor: Theme.faint
+                                        enabled: !view.busyPhase
+                                        Keys.onReturnPressed: function (event) {
+                                            if (event.modifiers & Qt.ShiftModifier) {
+                                                event.accepted = false
+                                                return
+                                            }
+                                            segCard.savePhrase()
+                                            event.accepted = true
+                                        }
+                                        Keys.onEnterPressed: function (event) {
+                                            if (event.modifiers & Qt.ShiftModifier) {
+                                                event.accepted = false
+                                                return
+                                            }
+                                            segCard.savePhrase()
+                                            event.accepted = true
+                                        }
+                                        onActiveFocusChanged: {
+                                            if (activeFocus || !segCard.editing)
+                                                return
+                                            // Откладываем: фокус мог уйти на Dropdown или «Готово».
+                                            Qt.callLater(function () {
+                                                if (!segCard.editing)
+                                                    return
+                                                if (phraseEdit.activeFocus
+                                                        || speakerPick.activeFocus
+                                                        || doneBtn.activeFocus
+                                                        || speakerPick.popup.visible)
+                                                    return
+                                                segCard.savePhrase()
+                                            })
+                                        }
+                                        background: Rectangle {
+                                            radius: Theme.radiusSm
+                                            color: Theme.fill
+                                            border.width: 1
+                                            border.color: phraseEdit.activeFocus ? Theme.borderHi : Theme.hairline
+                                        }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: Theme.gapSm
+                                        Dropdown {
+                                            id: speakerPick
+                                            Layout.fillWidth: true
+                                            Layout.preferredWidth: 160
+                                            enabled: !view.busyPhase
+                                            model: view.speakerPickModel()
+                                            textRole: "label"
+                                            currentIndex: segCard.speakerPickIndex()
+                                            onActivated: function (index) {
+                                                segCard.applySpeaker(index)
+                                            }
+                                            ToolTip.visible: hovered
+                                            ToolTip.text: "Кто произнёс эту фразу"
+                                        }
+                                        PillButton {
+                                            id: doneBtn
+                                            text: "Готово"
+                                            compact: true
+                                            primary: true
+                                            enabled: !view.busyPhase
+                                            onClicked: segCard.savePhrase()
+                                            ToolTip.visible: hovered
+                                            ToolTip.text: "Сохранить текст фразы"
+                                        }
+                                    }
+                                }
                             }
                             MouseArea {
                                 anchors.fill: parent
+                                enabled: !segCard.editing
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: segCard.replay()
-                                ToolTip.visible: containsMouse
+                                ToolTip.visible: containsMouse && !segCard.editing
                                 ToolTip.text: "Воспроизвести фразу"
                             }
+                        }
+                        IconButton {
+                            iconName: "edit"
+                            Layout.alignment: Qt.AlignVCenter
+                            enabled: !view.busyPhase
+                            onClicked: {
+                                if (segCard.editing)
+                                    segCard.savePhrase()
+                                else
+                                    segCard.beginEdit()
+                            }
+                            ToolTip.visible: hovered
+                            ToolTip.text: segCard.editing
+                                          ? "Сохранить правку"
+                                          : "Править слова или автора"
                         }
                         IconButton {
                             iconName: "live"
@@ -710,7 +953,7 @@ Rectangle {
                 anchors.bottomMargin: Theme.gapSm
                 visible: view.segs.length > 0 && view.phase === "done" && !view.busyPhase
                          && view.focusKey === 0 && view.playIndex < 0 && view.markedIndex < 0
-                text: "Нажмите на фразу, чтобы услышать её. Пробел - пауза или продолжение."
+                text: "Нажмите Править, если модель ошиблась в словах или авторе. Пробел - пауза или продолжение."
                 color: Theme.faint
                 font.pixelSize: Theme.fsMicro
             }

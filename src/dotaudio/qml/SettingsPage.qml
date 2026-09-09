@@ -401,6 +401,15 @@ Item {
                             }
                         }
                     }
+                    TextField {
+                        Layout.fillWidth: true
+                        placeholderText: "Своя комбинация диктовки, например Ctrl+Alt+D"
+                        text: bridge.settings.dictate_hotkey
+                        color: Theme.text
+                        placeholderTextColor: Theme.muted
+                        onEditingFinished: bridge.setHotkeys(text.trim(), bridge.settings.island_hotkey)
+                        background: Rectangle { radius: 12; color: Theme.fill; border.width: 1; border.color: Theme.border }
+                    }
                     RowLayout {
                         Layout.fillWidth: true
                         Label { text: "Остров"; color: Theme.muted; font.pixelSize: Theme.fsLabel; Layout.preferredWidth: 90 }
@@ -413,6 +422,15 @@ Item {
                                 onClicked: bridge.setHotkeys(bridge.settings.dictate_hotkey, modelData)
                             }
                         }
+                    }
+                    TextField {
+                        Layout.fillWidth: true
+                        placeholderText: "Своя комбинация острова"
+                        text: bridge.settings.island_hotkey
+                        color: Theme.text
+                        placeholderTextColor: Theme.muted
+                        onEditingFinished: bridge.setHotkeys(bridge.settings.dictate_hotkey, text.trim())
+                        background: Rectangle { radius: 12; color: Theme.fill; border.width: 1; border.color: Theme.border }
                     }
                     RowLayout {
                         Layout.fillWidth: true

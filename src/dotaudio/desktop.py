@@ -24,7 +24,14 @@ VK_RWIN = 0x5C
 KEYEVENTF_KEYUP = 0x0002
 _ASYNC_DOWN = 0x8000
 
-_HOTKEY_IDS = {"dictate": 41, "island": 42, "paste_last": 43, "quit": 44}
+_HOTKEY_IDS = {
+    "dictate": 41,
+    "island": 42,
+    "paste_last": 43,
+    "quit": 44,
+    "cancel": 45,
+}
+VK_ESCAPE = 0x1B
 _REQUIRED_HOTKEYS = {"dictate", "island"}
 _ALLOWED_MODIFIERS = MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN | MOD_NOREPEAT
 
@@ -196,6 +203,7 @@ class Desktop(QObject, QAbstractNativeEventFilter):
     island = Signal()
     paste_last = Signal()
     quit_requested = Signal()
+    cancel_requested = Signal()
 
     def __init__(self, app):
         QObject.__init__(self)
@@ -209,6 +217,7 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         # потому что пользователь переопределяет только dictate/island/пасту
         # последнего, а quit обязан пережить это переназначение.
         self._quit_hotkey = Hotkey(MOD_NOREPEAT | MOD_ALT | MOD_CONTROL, 0x58)
+        self._cancel_hotkey = Hotkey(MOD_NOREPEAT, VK_ESCAPE)
         # Why the last paste() returned False: "" | "no_target" | "focus" | "elevated" | "sendinput".
         self.last_paste_block = ""
         if sys.platform == "win32":
@@ -221,6 +230,7 @@ class Desktop(QObject, QAbstractNativeEventFilter):
                     "island": Hotkey(MOD_NOREPEAT | MOD_ALT | MOD_CONTROL, 0x4F),
                     "paste_last": Hotkey(MOD_NOREPEAT | MOD_SHIFT | MOD_ALT, 0x5A),
                     "quit": self._quit_hotkey,
+                    "cancel": self._cancel_hotkey,
                 }
             )
 
@@ -281,6 +291,9 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         # on the hotkeys page cannot silently unregister the exit shortcut.
         merged = dict(bindings)
         merged.setdefault("quit", self._quit_hotkey)
+        if "cancel" in bindings and isinstance(bindings["cancel"], Hotkey):
+            self._cancel_hotkey = bindings["cancel"]
+        merged.setdefault("cancel", self._cancel_hotkey)
         bindings = merged
         if len({(hotkey.modifiers, hotkey.key) for hotkey in bindings.values()}) != len(bindings):
             raise ValueError("DotAudio actions cannot use the same hotkey")
@@ -335,6 +348,8 @@ class Desktop(QObject, QAbstractNativeEventFilter):
                     self.paste_last.emit()
                 elif msg.wParam == 44:
                     self.quit_requested.emit()
+                elif msg.wParam == 45:
+                    self.cancel_requested.emit()
         return False, 0
 
     def remember_target(self):

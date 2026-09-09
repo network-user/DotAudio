@@ -329,6 +329,7 @@ Rectangle {
                     pixelSize: Theme.fsCompact
                     maxLines: 2
                     align: Text.AlignLeft
+                    reduceMotion: Boolean(bridge.settings.reduce_motion)
                 }
 
                 Waveform {

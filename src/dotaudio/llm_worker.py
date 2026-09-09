@@ -28,7 +28,8 @@ def _load(payload: dict) -> None:
     context = int(payload["context"])
     layers = int(payload["layers"])
     threads = int(payload["threads"])
-    key = (path, context, layers, threads)
+    batch = int(payload.get("batch") or 256)
+    key = (path, context, layers, threads, batch)
     state: dict[str, Any] = _load.state  # type: ignore[attr-defined]
     if state.get("key") == key and state.get("model") is not None:
         _write({"type": "ok"})
@@ -40,6 +41,7 @@ def _load(payload: dict) -> None:
             n_ctx=context,
             n_threads=threads,
             n_gpu_layers=layers,
+            n_batch=batch,
             verbose=False,
         )
     except OSError as error:

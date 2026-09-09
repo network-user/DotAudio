@@ -203,7 +203,7 @@ CHAT_MODELS: tuple[ChatModel, ...] = (
 )
 
 MODELS_BY_ID = {model.id: model for model in CHAT_MODELS}
-DEFAULT_MODEL_ID = "qwen3-4b"
+DEFAULT_MODEL_ID = "qwen3-1.7b"
 
 # Запас видеопамяти поверх веса модели: под контекст, буферы вычислений и то,
 # что уже занял рабочий стол. Без него «влезает ровно» превращается в отказ
@@ -232,7 +232,12 @@ def usable_vram_gb(profile: HardwareProfile) -> float:
 
 
 def recommend_model(profile: HardwareProfile | None = None) -> str:
-    """Модель под это устройство: сначала по видеопамяти, иначе по ОЗУ и потокам."""
+    """Модель под это устройство: сначала по видеопамяти, иначе лёгкая на CPU.
+
+    Без GPU-offload llama.cpp на 4B уже даёт единицы токенов в секунду.
+    Поэтому на процессоре советуем light-ступень; тяжёлую пользователь
+    выбирает сам, если готов ждать.
+    """
 
     profile = profile or hardware.probe()
     vram = usable_vram_gb(profile)
@@ -240,14 +245,6 @@ def recommend_model(profile: HardwareProfile | None = None) -> str:
         for model in ("qwen3-14b", "qwen3-8b", "qwen3-4b", "qwen3-1.7b"):
             if vram >= MODELS_BY_ID[model].vram_gb + VRAM_HEADROOM_GB:
                 return model
-    ram = profile.ram_gb
-    threads = int(profile.threads or 0)
-    if ram is None:
-        return DEFAULT_MODEL_ID if threads >= 8 else "qwen3-1.7b"
-    if ram >= 12 and threads >= 8:
-        return "qwen3-4b"
-    if ram >= 8 and threads >= 4:
-        return "qwen3-1.7b"
     return "qwen3-1.7b"
 
 
@@ -278,6 +275,11 @@ def model_fit(model: ChatModel, profile: HardwareProfile | None = None) -> dict:
         return {"state": "slow", "note": "Мало потоков процессора: возьмите лёгкую модель"}
     if model.tier in ("quality", "heavy") and not vram:
         return {"state": "slow", "note": "На процессоре ответ будет идти долго"}
+    if model.tier not in ("light",) and not vram:
+        return {
+            "state": "slow",
+            "note": "На процессоре быстрее лёгкая модель (1.7B / Vikhr 2B)",
+        }
     return {"state": "ok", "note": "Подходит этому устройству"}
 
 
@@ -301,14 +303,36 @@ def plan_gpu_layers(model: ChatModel, profile: HardwareProfile | None = None) ->
     return max(0, min(model.layers, int(model.layers * share)))
 
 
+def plan_threads(profile: HardwareProfile | None = None) -> int:
+    """Потоки llama.cpp: почти все ядра, одно оставляем интерфейсу."""
+
+    profile = profile or hardware.probe()
+    available = max(1, int(profile.threads or 4))
+    if available <= 2:
+        return available
+    return available - 1
+
+
+def plan_batch(profile: HardwareProfile | None = None) -> int:
+    """Размер батча промпта: на CPU меньше, чтобы не раздувать ОЗУ."""
+
+    profile = profile or hardware.probe()
+    if usable_vram_gb(profile) > 0:
+        return 512
+    return 256
+
+
 def plan_context(model: ChatModel, profile: HardwareProfile | None = None) -> int:
     """Окно контекста под доступную память.
 
     Полное окно самой модели на слабой машине занимает столько же памяти,
-    сколько её вес, поэтому на маленьком ОЗУ оно урезается.
+    сколько её вес, поэтому на маленьком ОЗУ оно урезается. Без GPU
+    длинный контекст ещё и сильно тормозит прогон промпта - держим 4K.
     """
 
     profile = profile or hardware.probe()
+    if usable_vram_gb(profile) <= 0:
+        return min(model.context, 4096)
     ram = profile.ram_gb
     if ram is not None and ram < model.ram_gb + 2:
         return min(model.context, 4096)
@@ -549,8 +573,9 @@ class LlamaCppRuntime:
             raise RuntimeUnavailable(f"Файл модели не скачан: {path.name}")
         layers = plan_gpu_layers(model, profile)
         context = plan_context(model, profile)
-        threads = max(1, min(int(profile.threads or 4), 8))
-        key = (str(path), context, layers, threads)
+        threads = plan_threads(profile)
+        batch = plan_batch(profile)
+        key = (str(path), context, layers, threads, batch)
         with self._lock:
             if self._loaded is not None and self._loaded_key == key:
                 return self._loaded
@@ -565,6 +590,7 @@ class LlamaCppRuntime:
                     n_ctx=context,
                     n_threads=threads,
                     n_gpu_layers=layers,
+                    n_batch=batch,
                     verbose=False,
                 )
             except OSError as error:
@@ -794,8 +820,9 @@ class SubprocessLlamaRuntime:
             raise RuntimeUnavailable(f"Файл модели не скачан: {path.name}")
         layers = plan_gpu_layers(model, profile)
         context = plan_context(model, profile)
-        threads = max(1, min(int(profile.threads or 4), 8))
-        key = (str(path), context, layers, threads)
+        threads = plan_threads(profile)
+        batch = plan_batch(profile)
+        key = (str(path), context, layers, threads, batch)
         with self._lock:
             if self._loaded_key == key:
                 return self
@@ -811,6 +838,7 @@ class SubprocessLlamaRuntime:
                         "context": context,
                         "layers": layers,
                         "threads": threads,
+                        "batch": batch,
                     }
                 )
             except RuntimeUnavailable:

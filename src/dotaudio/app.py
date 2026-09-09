@@ -156,6 +156,14 @@ def main():
         tray.setContextMenu(menu)
         tray.setToolTip("DotAudio")
         tray.setIcon(app_icon)
+        def on_tray_activated(reason):
+            # ЛКМ по иконке возвращает окно, ПКМ оставляет меню.
+            if int(reason) == int(QSystemTrayIcon.ActivationReason.Trigger):
+                show_app_shell()
+                window.show()
+                window.raise_()
+                window.requestActivate()
+        tray.activated.connect(on_tray_activated)
         tray.show()
         window.setProperty("trayPresent", True)
     # По умолчанию - полное окно (навигация + главная страница Live).

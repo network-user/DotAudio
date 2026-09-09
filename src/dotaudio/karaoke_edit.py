@@ -13,6 +13,7 @@ a GUI and reused by any future offline realign pass.
 
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 from typing import Any
 
 Segment = dict[str, Any]
@@ -20,6 +21,7 @@ Word = dict[str, Any]
 
 
 EPS = 1e-6
+MIN_WORD = 0.04
 
 
 def sanitize_word(word: Any) -> Word | None:
@@ -192,3 +194,78 @@ def set_word_text(segment: Segment, index: int, text: str) -> Segment:
     out["text"] = rebuild_text(words)
     out["words"] = words
     return sanitize_row(out)
+
+def _phrase_tokens(text: str) -> list[str]:
+    return [part for part in str(text).split() if part]
+
+
+def sync_words_to_text(segment: Segment, new_text: str) -> Segment:
+    """Align word timings to an edited phrase text without inventing ASR.
+
+    Path (A) for the song MVP: the user corrects ASR words / the whole line.
+    Existing timings are reused via SequenceMatcher on token text. Matched
+    tokens keep their edges; replace spans redistribute the old time window
+    across the new tokens; inserts take a slice of the gap between neighbours
+    (never outside the phrase window). If the row had no words, words stay
+    empty - phrase-only edit, no silent fake-split.
+    """
+    text = str(new_text)
+    start = float(segment["start"])
+    end = float(segment["end"])
+    old = [dict(w) for w in (segment.get("words") or [])]
+    tokens = _phrase_tokens(text)
+    if not old or not tokens:
+        return sanitize_row({
+            "start": start, "end": end, "text": text, "words": [],
+        })
+
+    old_keys = [str(w.get("text", "")).strip().casefold() for w in old]
+    new_keys = [t.casefold() for t in tokens]
+    built: list[Word] = []
+    for tag, i1, i2, j1, j2 in SequenceMatcher(
+        a=old_keys, b=new_keys, autojunk=False
+    ).get_opcodes():
+        if tag == "equal":
+            for oi, ti in zip(range(i1, i2), range(j1, j2), strict=True):
+                word = dict(old[oi])
+                word["text"] = tokens[ti]
+                built.append(word)
+        elif tag == "replace":
+            span_start = float(old[i1]["start"])
+            span_end = float(old[i2 - 1]["end"])
+            built.extend(_spread_tokens(tokens[j1:j2], span_start, span_end))
+        elif tag == "insert":
+            left = float(built[-1]["end"]) if built else start
+            right = float(old[i1]["start"]) if i1 < len(old) else end
+            left = max(start, min(left, end))
+            right = max(left, min(right, end))
+            need = len(tokens[j1:j2]) * MIN_WORD
+            if right - left < need:
+                right = min(end, left + need)
+            built.extend(_spread_tokens(tokens[j1:j2], left, right))
+
+    for word in built:
+        word["start"] = min(max(float(word["start"]), start), end)
+        word["end"] = min(max(float(word["end"]), float(word["start"])), end)
+
+    return sanitize_row({
+        "start": start, "end": end, "text": text, "words": built,
+    })
+
+
+def _spread_tokens(tokens: list[str], start: float, end: float) -> list[Word]:
+    """Split ``[start, end]`` evenly across tokens (editor rebuild only)."""
+    count = len(tokens)
+    if count == 0:
+        return []
+    lo = float(start)
+    hi = max(lo, float(end))
+    step = (hi - lo) / count
+    words: list[Word] = []
+    for index, token in enumerate(tokens):
+        word_start = lo + index * step
+        word_end = hi if index == count - 1 else lo + (index + 1) * step
+        if word_end < word_start:
+            word_end = word_start
+        words.append({"text": token, "start": word_start, "end": word_end})
+    return words

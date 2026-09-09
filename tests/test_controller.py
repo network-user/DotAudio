@@ -212,6 +212,7 @@ def _live_controller() -> Controller:
     controller._partial_end = 0.0
     controller._confirmed_caption = ""
     controller._partial_caption = ""
+    controller._partial_source = ""
     controller._caption_revision = 0
     controller._started = 0.0
     controller._live_latency_ms = 0.0
@@ -232,7 +233,7 @@ def _live_controller() -> Controller:
 def test_late_live_final_does_not_replace_a_newer_preview() -> None:
     controller = _live_controller()
     controller._partial_end = 5.0
-    controller._partial_caption = "новая фраза продолжается"
+    controller._partial_source = "новая фраза продолжается"
     controller._caption_revision = 3
 
     Controller._on_segment(
@@ -244,6 +245,7 @@ def test_late_live_final_does_not_replace_a_newer_preview() -> None:
     # продолжает; законченного предложения здесь ещё нет.
     assert controller._confirmed_caption == "старая фраза"
     assert controller._partial_caption == "новая фраза продолжается"
+    assert controller._partial_source == "новая фраза продолжается"
     assert controller._partial_end == 5.0
     # Готовая фраза не перетряхивает весь интерфейс: настройки, устройства и
     # карточки моделей не перечитываются на каждой реплике говорящего.
@@ -282,6 +284,21 @@ def test_live_finals_of_one_sentence_are_joined_into_one_row() -> None:
     assert controller._confirmed_caption == ""
     assert controller._partial_caption == ""
     assert controller._settled_caption == "Сегодня мы говорим о распознавании речи в реальном времени."
+
+
+def test_live_caption_window_shows_readable_tail_only() -> None:
+    controller = _live_controller()
+    long_open = (
+        "Это очень длинное незаконченное предложение про живые субтитры, "
+        "которое не должно целиком висеть в живой строке на экране зала"
+    )
+    Controller._on_segment(controller, "live", {
+        "start": 0.0, "end": 4.0, "audio_end": 4.0, "cut": True, "text": long_open,
+    })
+    shown = Controller.displayCaption.fget(controller)
+    assert shown.endswith("на экране зала")
+    assert len(shown) <= 120
+    assert controller._segments[0]["text"] == long_open
 
 
 def test_live_cut_seam_reads_as_one_sentence() -> None:
@@ -596,9 +613,13 @@ def test_open_session_at_sets_page_and_pending_seek(tmp_path) -> None:
     controller._status = ""
     controller._trans_state = {}
     controller._pending_seek_ms = -1
+    controller._media_peaks = []
+    controller._media_peaks_duration = 0.0
+    controller._media_peaks_token = 0
     controller.segmentsChanged = _Signal()
     controller.transcribeChanged = _Signal()
     controller.changed = _Counting()
+    controller.mediaPeaksReady = _Signal()
     session_id = "rec-with-media"
     controller.store = type(
         "Store",

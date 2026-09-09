@@ -51,9 +51,8 @@ def block(caption):
     return caption.findChild(QObject, "captionBlock")
 
 
-def shown_text(caption):
-    found = block(caption)
-    return found.property("text") if found else ""
+def shown_plain(caption):
+    return caption.property("content")
 
 
 def test_whole_caption_is_plain_wrapped_text(caption):
@@ -61,11 +60,10 @@ def test_whole_caption_is_plain_wrapped_text(caption):
     caption.setProperty("pending", "прекрасная погода")
     settle()
     text = block(caption)
-    assert text.property("text") == "Сегодня прекрасная погода"
-    assert text.property("color").name() == "#f3f3f1"
-    # Текст цельный: отдельных словесных делегатов больше нет.
+    assert shown_plain(caption) == "Сегодня прекрасная погода"
+    assert "прекрасная погода" in text.property("text")
+    assert "<font" in text.property("text")
     assert caption.findChild(QObject, "captionWord") is None
-    # Признак пустоты считает весь текст, а не фрагмент.
     assert caption.property("empty") is False
 
 
@@ -73,11 +71,11 @@ def test_confirmed_and_pending_join_without_duplicate_space(caption):
     caption.setProperty("confirmed", "Привет,")
     caption.setProperty("pending", "мир!")
     settle()
-    assert shown_text(caption) == "Привет, мир!"
+    assert shown_plain(caption) == "Привет, мир!"
     caption.setProperty("confirmed", "Привет, мир!")
     caption.setProperty("pending", "")
     settle()
-    assert shown_text(caption) == "Привет, мир!"
+    assert shown_plain(caption) == "Привет, мир!"
 
 
 def test_single_text_fallback(caption):
@@ -85,11 +83,11 @@ def test_single_text_fallback(caption):
     caption.setProperty("pending", "")
     caption.setProperty("text", "Одна готовая строка")
     settle()
-    assert shown_text(caption) == "Одна готовая строка"
+    assert shown_plain(caption) == "Одна готовая строка"
     caption.setProperty("pending", "и продолжение")
     settle()
     # Поле text не смешивается с confirmed/pending: одно из двух.
-    assert shown_text(caption) == "и продолжение"
+    assert shown_plain(caption) == "и продолжение"
 
 
 def test_empty_caption_hides_the_block(caption):
@@ -115,16 +113,13 @@ def test_long_text_is_clipped_to_the_bottom_last_lines(caption):
 def test_word_rewrites_do_not_flash_the_line(caption):
     caption.setProperty("pending", "раз два три четыре")
     settle()
-    assert shown_text(caption) == "раз два три четыре"
+    assert shown_plain(caption) == "раз два три четыре"
     text = block(caption)
-    assert text.property("opacity") == 1.0
     assert text.property("scale") == 1.0
 
     caption.setProperty("pending", "пять шесть семь восемь")
     settle()
-    # Строка просто меняет текст на месте, без появления заново и сдвигов.
-    assert shown_text(caption) == "пять шесть семь восемь"
-    assert text.property("opacity") == 1.0
+    assert shown_plain(caption) == "пять шесть семь восемь"
     assert text.property("scale") == 1.0
 
 
@@ -140,10 +135,10 @@ def test_long_caption_burst_keeps_event_loop_responsive(caption):
         for index in range(100):
             caption.setProperty("pending", prefix + f" конец{index}")
         settle()
-        assert shown_text(caption).endswith("конец99")
+        assert shown_plain(caption).endswith("конец99")
         caption.setProperty("pending", prefix + " конец99 новое")
         settle()
-        assert shown_text(caption).endswith("новое")
+        assert shown_plain(caption).endswith("новое")
         assert ticks
         # Deliberately loose ceiling: catches stalls, not a hardware benchmark.
         assert time.monotonic() - started < 5

@@ -8,6 +8,7 @@ from dotaudio.karaoke_edit import (
     rebuild_text,
     sanitize_row,
     set_word_text,
+    sync_words_to_text,
 )
 from dotaudio.storage import Store
 
@@ -26,7 +27,6 @@ def _words():
 
 def test_apply_word_start_is_bounded_by_previous_end() -> None:
     result = apply_word(_row(words=_words()), 2, "start", 20.0)
-    # начало слова 2 (index 2) не может уйти правее собственного конца
     assert result["words"][2]["start"] <= result["words"][2]["end"]
     assert result["clamped"] is True
 
@@ -44,11 +44,41 @@ def test_set_word_text_rebuilds_phrase_text() -> None:
     assert result["text"] == "Здравствуй мир !"
 
 
+def test_sync_words_to_text_keeps_timings_on_rename() -> None:
+    row = _row(words=_words(), text="Привет мир !")
+    result = sync_words_to_text(row, "Здравствуй мир !")
+    assert result["text"] == "Здравствуй мир !"
+    assert result["words"][0]["text"] == "Здравствуй"
+    assert result["words"][0]["start"] == 0.2
+    assert result["words"][0]["end"] == 1.2
+    assert len(result["words"]) == 3
+
+
+def test_sync_words_to_text_without_words_stays_phrase_only() -> None:
+    row = _row(words=[], text="старое")
+    result = sync_words_to_text(row, "новое без слов")
+    assert result["text"] == "новое без слов"
+    assert result["words"] == []
+
+
+def test_sync_words_to_text_replace_redistributes_span() -> None:
+    row = _row(
+        words=[{"text": "раз", "start": 0.0, "end": 2.0}],
+        text="раз",
+        start=0.0,
+        end=2.0,
+    )
+    result = sync_words_to_text(row, "раз два")
+    assert result["text"] == "раз два"
+    assert len(result["words"]) == 2
+    assert result["words"][0]["start"] == 0.0
+    assert result["words"][-1]["end"] == 2.0
+
+
 def test_clamp_row_never_drops_out_of_window_words() -> None:
     row = _row(words=_words())
     tight = clamp_row(row, start=0.0, end=3.1)
     assert len(tight["words"]) == 3
-    # попытка сузить строку до участка без части слова не отсекает слова
     narrowed = clamp_row(row, start=0.2, end=1.0)
     assert len(narrowed["words"]) == 3
     assert narrowed["clamped"] is True

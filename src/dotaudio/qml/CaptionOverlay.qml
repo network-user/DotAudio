@@ -248,6 +248,7 @@ Window {
             align: Text.AlignLeft
             ink: overlay.highContrast ? "#ffffff" : Theme.text
             mutedInk: overlay.highContrast ? "#d8d8d4" : Theme.muted
+            reduceMotion: Boolean(bridge.settings.reduce_motion)
         }
     }
 }

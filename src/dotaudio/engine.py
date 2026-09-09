@@ -80,6 +80,10 @@ MODEL_FILE_PATTERNS = (
 REPO_ALIASES = {"turbo": "large-v3-turbo"}
 
 
+class DownloadCancelled(RuntimeError):
+    """Загрузка модели остановлена по просьбе пользователя."""
+
+
 class DownloadTracker:
     """Складывает отдельные файловые бары tqdm в один честный прогресс.
 
@@ -89,15 +93,26 @@ class DownloadTracker:
     интерфейс обновлениями.
     """
 
-    def __init__(self, emit: ProgressCallback, interval: float = 0.3, silent: bool = False) -> None:
+    def __init__(
+        self,
+        emit: ProgressCallback,
+        interval: float = 0.3,
+        silent: bool = False,
+        cancel: Event | None = None,
+    ) -> None:
         self._emit = emit
         self._interval = interval
         self._silent = silent
+        self._cancel = cancel
         self._lock = Lock()
         self._total = 0
         self._received = 0
         self._samples: deque[tuple[float, int]] = deque()
         self._last_emit = 0.0
+
+    def raise_if_cancelled(self) -> None:
+        if self._cancel is not None and self._cancel.is_set():
+            raise DownloadCancelled("model download cancelled")
 
     def _snapshot(self) -> dict:
         now = time.monotonic()
@@ -119,6 +134,7 @@ class DownloadTracker:
         }
 
     def _push(self, force: bool = False) -> None:
+        self.raise_if_cancelled()
         now = time.monotonic()
         if not force and now - self._last_emit < self._interval:
             return
@@ -130,12 +146,14 @@ class DownloadTracker:
             return
 
     def register(self, total: int | None, initial: int) -> None:
+        self.raise_if_cancelled()
         with self._lock:
             self._total += max(0, int(total or 0))
             self._received += max(0, int(initial or 0))
         self._push()
 
     def add(self, delta: int) -> None:
+        self.raise_if_cancelled()
         with self._lock:
             self._received += max(0, int(delta))
         self._push()
@@ -324,6 +342,7 @@ class Engine:
         config: RecognitionConfig,
         on_status: StatusCallback | None = None,
         on_progress: ProgressCallback | None = None,
+        cancel: Event | None = None,
     ) -> str:
         """Download and initialise a local model before the user starts recording.
 
@@ -336,8 +355,14 @@ class Engine:
         if config.backend == "remote":
             self._status(on_status, "remote_model_managed_by_server")
             return "remote"
+        if self._cancelled(cancel):
+            self._status(on_status, "cancelled")
+            raise DownloadCancelled("model prepare cancelled")
         self._status(on_status, "loading_model")
-        self._ensure_model_files(config.model, on_progress)
+        self._ensure_model_files(config.model, on_progress, cancel=cancel)
+        if self._cancelled(cancel):
+            self._status(on_status, "cancelled")
+            raise DownloadCancelled("model prepare cancelled")
         model, device = self._model_for(config.model, config.device)
         if config.live_stream:
             warm_error = self._warm_live_decoder(model, config, device)
@@ -891,7 +916,12 @@ class Engine:
         except Exception:
             return
 
-    def _ensure_model_files(self, model_name: str, on_progress: ProgressCallback | None) -> None:
+    def _ensure_model_files(
+        self,
+        model_name: str,
+        on_progress: ProgressCallback | None,
+        cancel: Event | None = None,
+    ) -> None:
         """Pre-fetch model files so the UI sees real byte progress.
 
         Runs only when the cache looks incomplete; an already downloaded
@@ -902,6 +932,8 @@ class Engine:
 
         if Engine.disk_status(model_name)["ready"]:
             return
+        if self._cancelled(cancel):
+            raise DownloadCancelled("model download cancelled")
         repo = None
         try:
             from faster_whisper.utils import _MODELS
@@ -919,6 +951,7 @@ class Engine:
         tracker = DownloadTracker(
             lambda info: Engine._emit_progress(on_progress, info),
             silent=on_progress is None,
+            cancel=cancel,
         )
         try:
             snapshot_download(
@@ -926,6 +959,8 @@ class Engine:
                 allow_patterns=list(MODEL_FILE_PATTERNS),
                 tqdm_class=progress_tqdm_class(tracker),
             )
+        except DownloadCancelled:
+            raise
         except Exception:
             # Сетевые ошибки оставляем WhisperModel: он повторит загрузку и
             # поднимет свою понятную ошибку вместо нашей обёртки.

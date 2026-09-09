@@ -262,6 +262,30 @@ def test_question_with_distinct_words_skips_building_the_map() -> None:
     assert "смета выросла" in model.prompts[-1]
 
 
+def test_early_record_hit_still_reaches_the_ui_stream() -> None:
+    """Ответ на первом заходе без last: раньше токены не шли, пузырь пустел."""
+
+    chunks = _long_record()
+    streamed: list[str] = []
+    model = _Recorder(replies=["Смета выросла [03:20]"])
+    helper = TranscriptAssistant(
+        respond=model,
+        context_tokens=1024,
+        digests=DigestCache(),
+    )
+
+    answer = helper.answer(
+        "что со сметой?",
+        "rec",
+        chunks,
+        on_token=streamed.append,
+    )
+
+    assert answer.rounds == 1
+    assert answer.not_found is False
+    assert "".join(streamed) == answer.text == "Смета выросла [03:20]"
+
+
 def test_vague_question_goes_through_the_map_of_parts() -> None:
     """Вопрос без общих слов с записью: часть выбирает модель по карте."""
 

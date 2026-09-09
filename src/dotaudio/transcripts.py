@@ -17,7 +17,10 @@ _SENTENCE_END = re.compile(r"[.!?…](?:[\"'»)]*)$")
 # finals means the speaker finished the thought, whatever the punctuation.
 LIVE_SENTENCE_GAP_SECONDS = 2.0
 # A sentence longer than this is closed so the live row stays readable.
-LIVE_SENTENCE_MAX_CHARS = 320
+# Tuned for ~2-3 lines at stage type (fs 30-34 on a ~600-700 px card).
+LIVE_SENTENCE_MAX_CHARS = 140
+# Soft window for what the live row paints. History keeps the full sentence.
+LIVE_CAPTION_VISIBLE_CHARS = 110
 
 
 def sentence_open(text: str, cut: bool = False) -> bool:
@@ -90,6 +93,70 @@ def join_fragments(previous_text: str, previous_cut: bool, next_text: str) -> st
 
     previous, following = blend_fragments(previous_text, previous_cut, next_text)
     return " ".join(part for part in (previous, following) if part)
+
+
+def window_caption(text: str, max_chars: int = LIVE_CAPTION_VISIBLE_CHARS) -> str:
+    """Keep a live caption to its readable tail without cutting a word in half."""
+
+    clean = str(text).strip()
+    limit = max(24, int(max_chars))
+    if len(clean) <= limit:
+        return clean
+    tail = clean[-limit:]
+    space = tail.find(" ")
+    if space >= 0 and space < len(tail) - 12:
+        return tail[space + 1 :].lstrip()
+    return tail.lstrip()
+
+
+def split_caption_window(
+    confirmed: str,
+    pending: str,
+    max_chars: int = LIVE_CAPTION_VISIBLE_CHARS,
+) -> tuple[str, str]:
+    """Apply window_caption while preserving the confirmed/pending seam."""
+
+    head = str(confirmed).strip()
+    tail = str(pending).strip()
+    full = " ".join(part for part in (head, tail) if part)
+    visible = window_caption(full, max_chars)
+    if not visible:
+        return "", ""
+    if not tail:
+        return visible, ""
+    if not head:
+        return "", visible
+    if visible == full:
+        return head, tail
+    if full.endswith(tail) and visible.endswith(tail) and len(visible) > len(tail):
+        prefix = visible[: -len(tail)].rstrip()
+        return prefix, tail
+    if tail.endswith(visible) or visible == tail:
+        return "", visible
+    return "", visible
+
+
+def text_after_prefix(text: str, prefix: str) -> str:
+    """Хвост после согласованного префикса: точное или пословное совпадение."""
+
+    body = str(text or "").strip()
+    head = str(prefix or "").strip()
+    if not head:
+        return body
+    if not body:
+        return ""
+    if body.startswith(head):
+        return body[len(head):].lstrip()
+    body_words = body.split()
+    head_words = head.split()
+    index = 0
+    while (
+        index < len(head_words)
+        and index < len(body_words)
+        and body_words[index].casefold() == head_words[index].casefold()
+    ):
+        index += 1
+    return " ".join(body_words[index:])
 
 
 def _normalise(value: str) -> str:

@@ -49,13 +49,24 @@ Item {
                     PillButton { Layout.alignment: Qt.AlignHCenter; text: "Выбрать медиа"; primary: true; onClicked: bridge.importFile() }
                 }
             }
-            // Транспорт воспроизведения. Без него по записи
-            // можно было двигаться только кликом по таймкоду
-            // в списке фраз, а паузы не было вовсе.
-            RowLayout {
+            // Транспорт + waveform timeline (peaks в воркере, не Live Waveform).
+            ColumnLayout {
                 Layout.fillWidth: true
                 visible: bridge.mediaUrl.length > 0
                 spacing: Theme.gapSm
+
+                MediaTimeline {
+                    Layout.fillWidth: true
+                    height: 56
+                    player: mediaPlayer
+                    segments: bridge.segments
+                    peaks: bridge.mediaPeaks
+                    peaksDuration: bridge.mediaPeaksDuration
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.gapSm
 
                 IconButton {
                     readonly property bool running:
@@ -112,8 +123,26 @@ Item {
                     font.family: Theme.monoFamily
                     font.pixelSize: Theme.fsSmall
                 }
+                }
             }
 
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.gapSm
+                PillButton { text: "Папка автоимпорта"; onClicked: bridge.chooseWatchFolder() }
+                ToggleSwitch {
+                    text: "Следить"
+                    checked: Boolean(bridge.settings.watch_folder_enabled)
+                    onToggled: bridge.setWatchFolderEnabled(checked)
+                }
+                Label {
+                    Layout.fillWidth: true
+                    text: bridge.settings.watch_folder || "Папка не выбрана"
+                    color: Theme.muted
+                    font.pixelSize: Theme.fsSmall
+                    elide: Text.ElideMiddle
+                }
+            }
             RowLayout {
                 Layout.fillWidth: true
                 PillButton { text: "Открыть"; onClicked: bridge.importFile() }

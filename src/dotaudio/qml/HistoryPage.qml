@@ -25,13 +25,18 @@ Item {
         spacing: Theme.gapMd
         TextField {
             Layout.fillWidth: true
-            placeholderText: "Поиск по названию или тексту"
+            placeholderText: "Поиск по названию, тексту или смыслу выжимок"
             color: Theme.text
             placeholderTextColor: Theme.muted
             leftPadding: 16
             rightPadding: 16
             onTextChanged: bridge.refreshHistory(text)
             background: Rectangle { radius: 14; color: Theme.surface; border.width: 1; border.color: Theme.border }
+        }
+        ToggleSwitch {
+            text: "Семантический поиск по выжимкам"
+            checked: Boolean(bridge.settings.history_semantic)
+            onToggled: bridge.setSetting("history_semantic", checked)
         }
         Item {
             Layout.fillWidth: true
@@ -127,6 +132,8 @@ Item {
                                     Text {
                                         text: root.modeLabel(historyCard.modelData.mode)
                                               + " · " + historyCard.modelData.segment_count + " фрагм."
+                                              + (historyCard.modelData.status === "interrupted" ? " · прервана" : "")
+                                              + (historyCard.modelData.match_kind ? (" · " + historyCard.modelData.match_kind) : "")
                                         color: Theme.muted
                                         font.pixelSize: Theme.fsSmall
                                     }

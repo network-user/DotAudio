@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 RECOVERED_SESSION_STATUS = "interrupted"
 
 # Переписка вне записи (общий чат) хранится под этим ключом: NULL в
@@ -30,7 +30,36 @@ def _unicode_fold(value: str) -> str:
     return unicodedata.normalize("NFC", value).casefold().replace("ё", "е")
 
 
-def _validate_segment(segment: dict[str, Any]) -> tuple[float, float, str, str]:
+def _looks_like_timestamp_label(label: str) -> bool:
+    """Метка вида 0:12 / 12.3 - не имя говорящего при backfill."""
+
+    text = str(label or "").strip()
+    if not text:
+        return True
+    if ":" in text:
+        parts = text.split(":")
+        return len(parts) in (2, 3) and all(part.replace(".", "", 1).isdigit() for part in parts)
+    try:
+        float(text.replace(",", "."))
+    except ValueError:
+        return False
+    return True
+
+
+def _split_speaker_prefix(text: str) -> tuple[str, str]:
+    """Вернуть (speaker, body) если текст начинается с ``[Имя]``."""
+
+    body = str(text or "")
+    if not body.startswith("[") or "]" not in body:
+        return "", body
+    label, rest = body[1:].split("]", 1)
+    label = label.strip()
+    if not label or _looks_like_timestamp_label(label):
+        return "", body
+    return label, rest.strip()
+
+
+def _validate_segment(segment: dict[str, Any]) -> tuple[float, float, str, str, str]:
     try:
         start = float(segment["start"])
         end = float(segment["end"])
@@ -59,7 +88,15 @@ def _validate_segment(segment: dict[str, Any]) -> tuple[float, float, str, str]:
             continue
         if word_text and math.isfinite(word_start) and math.isfinite(word_end):
             safe_words.append({"text": word_text, "start": max(0.0, word_start), "end": max(word_start, word_end)})
-    return start, end, text, json.dumps(safe_words, ensure_ascii=False)
+    speaker = str(segment.get("speaker") or "").strip()
+    if speaker:
+        # Отдельное поле важнее префикса в тексте: не дублируем [Имя].
+        _prefixed, plain = _split_speaker_prefix(text)
+        if _prefixed:
+            text = plain
+    else:
+        speaker, text = _split_speaker_prefix(text)
+    return start, end, text, json.dumps(safe_words, ensure_ascii=False), speaker
 
 
 class Store:
@@ -94,6 +131,8 @@ class Store:
                 self._add_assistant_tables,
                 self._add_session_pin,
                 self._add_transcript_embeddings,
+                self._add_recovery_and_events,
+                self._add_segment_speaker,
             )
             for target_version in range(version + 1, SCHEMA_VERSION + 1):
                 connection.execute("BEGIN IMMEDIATE")
@@ -255,23 +294,93 @@ class Store:
             """
         )
 
+    @staticmethod
+    def _add_recovery_and_events(connection: sqlite3.Connection) -> None:
+        """Путь к аудио хвосту и журнал совпадений эфира с клипами."""
+
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(sessions)")}
+        if "audio_path" not in columns:
+            connection.execute(
+                "ALTER TABLE sessions ADD COLUMN audio_path TEXT NOT NULL DEFAULT ''"
+            )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS keyword_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                start REAL NOT NULL,
+                end REAL NOT NULL,
+                keyword TEXT NOT NULL,
+                text TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT '',
+                clip_path TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_keyword_events_created "
+            "ON keyword_events(created_at DESC, id DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_keyword_events_session "
+            "ON keyword_events(session_id, start)"
+        )
+
+    @staticmethod
+    def _add_segment_speaker(connection: sqlite3.Connection) -> None:
+        """Отдельная колонка говорящего; старый префикс ``[Имя]`` в text снимаем."""
+
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(segments)")}
+        if "speaker" not in columns:
+            connection.execute(
+                "ALTER TABLE segments ADD COLUMN speaker TEXT NOT NULL DEFAULT ''"
+            )
+        rows = connection.execute(
+            "SELECT id, text, speaker FROM segments WHERE IFNULL(speaker, '') = ''"
+        ).fetchall()
+        for row in rows:
+            speaker, body = _split_speaker_prefix(str(row["text"] or ""))
+            if not speaker:
+                continue
+            connection.execute(
+                "UPDATE segments SET speaker = ?, text = ? WHERE id = ?",
+                (speaker, body, int(row["id"])),
+            )
+
     def create_session(
         self,
         title: str,
         mode: str,
         source: str,
         model: str,
+        audio_path: str = "",
     ) -> str:
         session_id = uuid.uuid4().hex
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO sessions (id, title, mode, source, model, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions (id, title, mode, source, model, created_at, audio_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (session_id, title, mode, source, model, _utc_now()),
+                (
+                    session_id,
+                    title,
+                    mode,
+                    source,
+                    model,
+                    _utc_now(),
+                    str(audio_path or ""),
+                ),
             )
         return session_id
+
+    def set_session_audio_path(self, session_id: str, path: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE sessions SET audio_path = ? WHERE id = ?",
+                (str(path or ""), session_id),
+            )
 
     def append_segments(
         self,
@@ -283,13 +392,15 @@ class Store:
             return []
         identifiers: list[int] = []
         with self._connect() as connection:
-            for start, end, text, words in rows:
+            for start, end, text, words, speaker in rows:
                 cursor = connection.execute(
                     """
-                    INSERT INTO segments (session_id, start, end, text, original_text, words_json)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO segments (
+                        session_id, start, end, text, original_text, words_json, speaker
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (session_id, start, end, text, text, words),
+                    (session_id, start, end, text, text, words, speaker),
                 )
                 identifiers.append(int(cursor.lastrowid))
         return identifiers
@@ -303,7 +414,7 @@ class Store:
                 return None
             segments = connection.execute(
                 """
-                SELECT id, start, end, text, words_json
+                SELECT id, start, end, text, words_json, speaker
                 FROM segments
                 WHERE session_id = ?
                 ORDER BY start ASC, id ASC
@@ -321,6 +432,7 @@ class Store:
                 words = []
             if isinstance(words, list) and words:
                 item["words"] = words
+            item["speaker"] = str(item.get("speaker") or "")
             result["segments"].append(item)
         return result
 
@@ -376,6 +488,8 @@ class Store:
                     s.source,
                     s.model,
                     s.created_at,
+                    s.status,
+                    COALESCE(s.audio_path, '') AS audio_path,
                     COALESCE(s.pinned, 0) AS pinned,
                     COALESCE((
                         SELECT GROUP_CONCAT(ordered.text, char(10))
@@ -399,6 +513,211 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def search_sessions(
+        self,
+        query: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        semantic: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Поиск по истории; при ``semantic`` - LIKE + выжимки + эмбеддинги."""
+
+        if not semantic or not str(query or "").strip():
+            return self.list_sessions(query, limit=limit, offset=offset)
+
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 0
+        ):
+            raise ValueError("limit must be a non-negative integer or None")
+
+        folded = _unicode_fold(str(query).strip())
+        tokens = [token for token in folded.split() if token]
+        lexical_rows = self.list_sessions(query)
+        by_id: dict[str, dict[str, Any]] = {
+            str(row["id"]): dict(row) for row in lexical_rows
+        }
+        scores: dict[str, float] = {sid: 1.0 for sid in by_id}
+        kinds: dict[str, set[str]] = {sid: {"lexical"} for sid in by_id}
+
+        with self._connect() as connection:
+            digests = connection.execute(
+                "SELECT session_id, summary, keywords FROM transcript_digests"
+            ).fetchall()
+            embeddings = connection.execute(
+                "SELECT session_id, vector_json FROM transcript_embeddings"
+            ).fetchall()
+
+        for row in digests:
+            try:
+                keywords = json.loads(row["keywords"] or "[]")
+            except (TypeError, ValueError):
+                keywords = []
+            if not isinstance(keywords, list):
+                keywords = []
+            haystack = _unicode_fold(
+                f"{row['summary'] or ''} {' '.join(str(item) for item in keywords)}"
+            )
+            hits = sum(1 for token in tokens if token in haystack)
+            if hits <= 0:
+                continue
+            sid = str(row["session_id"])
+            scores[sid] = scores.get(sid, 0.0) + float(hits)
+            kinds.setdefault(sid, set()).add("semantic")
+
+        from dotaudio.assistant import cosine, embed_text
+
+        query_vector = embed_text(str(query))
+        embed_best: dict[str, float] = {}
+        for row in embeddings:
+            try:
+                vector = json.loads(row["vector_json"] or "[]")
+            except (TypeError, ValueError):
+                vector = []
+            if not isinstance(vector, list) or not vector:
+                continue
+            try:
+                numeric = [float(value) for value in vector]
+            except (TypeError, ValueError):
+                continue
+            score = float(cosine(query_vector, numeric))
+            if score <= 0:
+                continue
+            sid = str(row["session_id"])
+            embed_best[sid] = max(embed_best.get(sid, 0.0), score)
+        for sid, score in embed_best.items():
+            scores[sid] = scores.get(sid, 0.0) + score
+            kinds.setdefault(sid, set()).add("semantic")
+
+        missing = [sid for sid in scores if sid not in by_id]
+        if missing:
+            catalog = {str(row["id"]): dict(row) for row in self.list_sessions()}
+            for sid in missing:
+                row = catalog.get(sid)
+                if row is None:
+                    scores.pop(sid, None)
+                    kinds.pop(sid, None)
+                    continue
+                by_id[sid] = row
+
+        results: list[dict[str, Any]] = []
+        for sid, score in scores.items():
+            row = by_id.get(sid)
+            if row is None:
+                continue
+            item = dict(row)
+            kind_set = kinds.get(sid, set())
+            if "lexical" in kind_set and "semantic" in kind_set:
+                item["match_kind"] = "both"
+            elif "semantic" in kind_set:
+                item["match_kind"] = "semantic"
+            else:
+                item["match_kind"] = "lexical"
+            item["match_score"] = float(score)
+            results.append(item)
+        results.sort(
+            key=lambda item: (
+                -float(item.get("match_score", 0.0)),
+                -int(item.get("pinned", 0) or 0),
+                str(item.get("created_at", "")),
+            )
+        )
+        if offset:
+            results = results[offset:]
+        if limit is not None:
+            results = results[:limit]
+        return results
+
+    def save_keyword_event(
+        self,
+        session_id: str,
+        *,
+        start: float,
+        end: float,
+        keyword: str,
+        text: str,
+        source: str = "",
+        clip_path: str = "",
+    ) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO keyword_events (
+                    session_id, start, end, keyword, text, source, clip_path, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    float(start),
+                    float(end),
+                    str(keyword),
+                    str(text),
+                    str(source or ""),
+                    str(clip_path or ""),
+                    _utc_now(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def list_keyword_events(
+        self,
+        *,
+        limit: int = 200,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 1000))
+        with self._connect() as connection:
+            if session_id:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM keyword_events
+                    WHERE session_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (session_id, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM keyword_events
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_recoverable_sessions(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    s.id,
+                    s.title,
+                    s.mode,
+                    s.source,
+                    s.model,
+                    s.created_at,
+                    s.status,
+                    COALESCE(s.audio_path, '') AS audio_path,
+                    (SELECT COUNT(*) FROM segments WHERE session_id = s.id)
+                        AS segment_count
+                FROM sessions s
+                WHERE s.status = ?
+                  AND (
+                    COALESCE(s.audio_path, '') != ''
+                    OR EXISTS (SELECT 1 FROM segments g WHERE g.session_id = s.id)
+                  )
+                ORDER BY s.created_at DESC, s.id DESC
+                """,
+                (RECOVERED_SESSION_STATUS,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def count_chat_messages(self, session_id: str) -> int:
         with self._connect() as connection:
             row = connection.execute(
@@ -412,18 +731,31 @@ class Store:
         session_id: str,
         segment_id: int,
         text: str,
+        speaker: str | None = None,
     ) -> None:
         if not isinstance(text, str):
             raise ValueError("segment text must be a string")
         with self._connect() as connection:
-            connection.execute(
-                """
-                UPDATE segments
-                SET text = ?, original_text = COALESCE(original_text, text)
-                WHERE id = ? AND session_id = ?
-                """,
-                (text, segment_id, session_id),
-            )
+            if speaker is None:
+                connection.execute(
+                    """
+                    UPDATE segments
+                    SET text = ?, original_text = COALESCE(original_text, text)
+                    WHERE id = ? AND session_id = ?
+                    """,
+                    (text, segment_id, session_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE segments
+                    SET text = ?,
+                        speaker = ?,
+                        original_text = COALESCE(original_text, text)
+                    WHERE id = ? AND session_id = ?
+                    """,
+                    (text, str(speaker).strip(), segment_id, session_id),
+                )
 
     def extend_segment(
         self,
@@ -467,15 +799,15 @@ class Store:
         segment always consistent instead of applying partial updates that can
         break monotonicity in between calls.
         """
-        start, end, text, words = _validate_segment(segment)
+        start, end, text, words, speaker = _validate_segment(segment)
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE segments
-                SET start = ?, end = ?, text = ?, words_json = ?
+                SET start = ?, end = ?, text = ?, words_json = ?, speaker = ?
                 WHERE id = ? AND session_id = ?
                 """,
-                (start, end, text, words, segment_id, session_id),
+                (start, end, text, words, speaker, segment_id, session_id),
             )
 
     def finish_session(

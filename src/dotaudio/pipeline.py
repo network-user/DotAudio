@@ -416,6 +416,7 @@ class LiveSession:
         # finals while capture is still open; stop() keeps draining finals.
         self._last_task = ""
         self._audio_gap_reported = False
+        self._dropped_audio_blocks = 0
         self._slow_reported = False
         self._worker_started = False
         self._done_emitted = False
@@ -436,9 +437,21 @@ class LiveSession:
     def note_audio_gap(self, dropped_blocks: int) -> None:
         """Surface capture overload without turning a Live session fatal."""
 
-        if dropped_blocks > 0 and not self.cancel.is_set() and not self._audio_gap_reported:
-            self._audio_gap_reported = True
+        dropped = int(dropped_blocks)
+        if dropped <= 0 or self.cancel.is_set():
+            return
+        self._dropped_audio_blocks += dropped
+        if not self._audio_gap_reported:
             self.on_status("live_audio_gap")
+            self._audio_gap_reported = True
+        if self.catch_up:
+            self._clear_preview()
+            self._last_preview_position = self.buffer.position
+
+    def dropped_audio_blocks(self) -> int:
+        """Сколько блоков захвата вытеснено с начала сессии."""
+
+        return int(self._dropped_audio_blocks)
 
     def _mark_done(self):
         if self._done_emitted:
@@ -590,6 +603,8 @@ class LiveSession:
         # stop refreshing the caption.  If decoding falls behind, the user
         # must still see the newest rolling window instead of a frozen phrase.
         if not self.catch_up and not self.queue.empty():
+            return
+        if self.catch_up and not self.queue.empty() and self._decode_seconds > 0.8:
             return
         if self.buffer.size < self._preview_min_samples:
             return

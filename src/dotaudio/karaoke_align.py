@@ -111,3 +111,32 @@ def decode_file(path: str, rate: int = 16000) -> np.ndarray:
     if arr.ndim == 2:
         arr = arr.mean(axis=1)
     return arr.reshape(-1)
+
+
+def compute_peaks(
+    samples: np.ndarray,
+    rate: int,
+    buckets: int = 480,
+) -> tuple[list[float], float]:
+    """Downsample decoded audio to a short peak envelope for the media timeline.
+
+    Runs off the GUI thread. Values are 0..1 (peak abs per bucket). Duration is
+    derived from sample count so the QML scrubber matches the file, not the
+    player metadata race on open.
+    """
+    x = np.ascontiguousarray(np.asarray(samples, dtype=np.float32).reshape(-1))
+    duration = float(x.size) / float(max(1, int(rate)))
+    count = max(1, int(buckets))
+    if x.size == 0:
+        return [0.0] * count, 0.0
+    edges = np.linspace(0, x.size, count + 1, dtype=np.int64)
+    peaks = np.empty(count, dtype=np.float32)
+    for i in range(count):
+        lo = int(edges[i])
+        hi = max(lo + 1, int(edges[i + 1]))
+        chunk = x[lo:hi]
+        peaks[i] = float(np.max(np.abs(chunk))) if chunk.size else 0.0
+    peak = float(np.max(peaks)) if peaks.size else 0.0
+    if peak > 0:
+        peaks = peaks / peak
+    return [float(v) for v in peaks], duration

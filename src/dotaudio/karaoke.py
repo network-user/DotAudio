@@ -26,7 +26,17 @@ def _escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", "\\N")
 
 
-def _words(segment: dict[str, Any]) -> list[tuple[str, float, float]]:
+def _words(
+    segment: dict[str, Any],
+    *,
+    uniform_fallback: bool = False,
+) -> list[tuple[str, float, float]]:
+    """Collect word timings for karaoke \\k tags.
+
+    Default: only real ``words``. Equal-time fake-split of the phrase text is
+    opt-in via ``uniform_fallback`` so karaoke export never silently invents
+    per-word timing for songs.
+    """
     start = float(segment["start"])
     end = max(start, float(segment["end"]))
     raw = segment.get("words")
@@ -44,15 +54,30 @@ def _words(segment: dict[str, Any]) -> list[tuple[str, float, float]]:
                 result.append((text, max(start, word_start), min(end, max(word_start, word_end))))
     if result:
         return result
+    if not uniform_fallback:
+        return []
     tokens = str(segment["text"]).split()
     if not tokens:
         return []
     duration = (end - start) / len(tokens)
-    return [(token, start + index * duration, start + (index + 1) * duration) for index, token in enumerate(tokens)]
+    return [
+        (token, start + index * duration, start + (index + 1) * duration)
+        for index, token in enumerate(tokens)
+    ]
 
 
-def export_ass(segments: Iterable[dict[str, Any]]) -> str:
-    """Return an ASS file whose current word is filled in the active style."""
+def export_ass(
+    segments: Iterable[dict[str, Any]],
+    *,
+    uniform_karaoke: bool = False,
+) -> str:
+    """Return an ASS file for karaoke or phrase-level dialogue.
+
+    With word timestamps: fill-style \\k per word. Without words: one
+    Dialogue line for the whole phrase (no fake word split). Pass
+    ``uniform_karaoke=True`` only when the caller explicitly wants equal \\k
+    slices from whitespace tokens.
+    """
 
     header = """[Script Info]
 ScriptType: v4.00+
@@ -69,15 +94,25 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 """
     lines = [header]
     for segment in segments:
-        words = _words(segment)
-        if not words:
+        words = _words(segment, uniform_fallback=uniform_karaoke)
+        if words:
+            chunks = []
+            for text, start, end in words:
+                centiseconds = max(1, int(round((end - start) * 100)))
+                chunks.append("{\\k%s}%s" % (centiseconds, _escape(text)))
+            lines.append(
+                "Dialogue: 0,%s,%s,Karaoke,,0,0,0,,%s\n"
+                % (_ass_time(words[0][1]), _ass_time(words[-1][2]), " ".join(chunks))
+            )
             continue
-        chunks = []
-        for text, start, end in words:
-            centiseconds = max(1, int(round((end - start) * 100)))
-            chunks.append(f"{{\\k{centiseconds}}}{_escape(text)}")
+        text = str(segment.get("text", "")).strip()
+        if not text:
+            continue
+        start = float(segment["start"])
+        end = max(start, float(segment["end"]))
         lines.append(
-            f"Dialogue: 0,{_ass_time(words[0][1])},{_ass_time(words[-1][2])},Karaoke,,0,0,0,,{' '.join(chunks)}\n"
+            "Dialogue: 0,%s,%s,Karaoke,,0,0,0,,%s\n"
+            % (_ass_time(start), _ass_time(end), _escape(text))
         )
     return "".join(lines)
 

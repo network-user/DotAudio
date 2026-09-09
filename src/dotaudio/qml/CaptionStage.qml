@@ -10,6 +10,7 @@ Item {
     property string confirmed: ""
     property string pending: ""
     property string placeholder: ""
+    property bool reduceMotion: false
 
     property int pixelSize: Theme.fsStage
     property int maxLines: 2
@@ -66,6 +67,11 @@ Item {
             }
         }
         onTextChanged: if (stage.previous.length) {
+            if (stage.reduceMotion) {
+                promoted.opacity = Theme.historyAlpha
+                promoted.riseAnim = 0
+                return
+            }
             promoted.opacity = 0
             promoted.riseAnim = 8
             promoteIn.restart()
@@ -110,8 +116,11 @@ Item {
         maxLines: stage.maxLines
         align: stage.align
         ink: stage.ink
+        pendingInk: stage.mutedInk
+        reduceMotion: stage.reduceMotion
         opacity: stage.hasCaption ? 1 : 0
         Behavior on opacity {
+            enabled: !stage.reduceMotion
             NumberAnimation {
                 duration: Theme.fastMs
                 easing.type: Easing.Bezier

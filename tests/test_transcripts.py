@@ -5,7 +5,9 @@ import json
 import pytest
 
 from dotaudio.transcripts import (
+    LIVE_CAPTION_VISIBLE_CHARS,
     LIVE_SENTENCE_GAP_SECONDS,
+    LIVE_SENTENCE_MAX_CHARS,
     apply_keyword_cooldown,
     blend_fragments,
     continues_sentence,
@@ -14,7 +16,9 @@ from dotaudio.transcripts import (
     match_keywords,
     regroup_for_subtitles,
     sentence_open,
+    split_caption_window,
     timestamp,
+    window_caption,
 )
 
 
@@ -36,7 +40,25 @@ def test_continuation_follows_case_and_pause() -> None:
     # Долгая пауза заканчивает мысль, какой бы ни была пунктуация.
     assert continues_sentence("в реальном", False, "времени.", LIVE_SENTENCE_GAP_SECONDS + 0.1) is False
     # Слишком длинное предложение закрывается, чтобы живая строка читалась.
-    assert continues_sentence("слово " * 60, True, "ещё", 0.1) is False
+    long_head = "слово " * ((LIVE_SENTENCE_MAX_CHARS // 6) + 2)
+    assert continues_sentence(long_head, True, "ещё", 0.1) is False
+
+
+def test_caption_window_keeps_a_readable_tail() -> None:
+    assert window_caption("коротко", 40) == "коротко"
+    long = "один два три четыре пять шесть семь восемь девять десять"
+    shown = window_caption(long, 28)
+    assert shown.endswith("десять")
+    assert "один" not in shown
+    head, tail = split_caption_window(
+        "начало длинной подтверждённой фразы про субтитры в зале",
+        "черновик хвоста",
+        max_chars=40,
+    )
+    assert tail == "черновик хвоста"
+    assert "начало длинной" not in head
+    assert " ".join(part for part in (head, tail) if part).endswith("черновик хвоста")
+    assert LIVE_CAPTION_VISIBLE_CHARS <= LIVE_SENTENCE_MAX_CHARS
 
 
 def test_cut_seam_becomes_a_comma_and_lower_case() -> None:

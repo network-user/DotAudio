@@ -219,7 +219,7 @@ Rectangle {
             pending: bridge.partialCaption
             placeholder: root.stageHint
             pixelSize: root.embedded ? Theme.fsStageSm : Theme.fsStage
-            liveLines: 3
+            liveLines: 2
             showTimes: root.showTimes
             reduceMotion: Boolean(bridge.settings.reduce_motion)
             onCopyRequested: text => bridge.copyPhrase(text)

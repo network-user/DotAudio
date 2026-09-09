@@ -901,9 +901,8 @@ class TranscriptAssistant:
     ) -> Answer:
         """Ответ на вопрос по записи с раскрытием нужных частей."""
 
-        # Потолок вдвое ниже, чем у изложения: ответ на вопрос - несколько
-        # предложений, а зацикленный пересказ на процессоре стоит минуты.
-        options = GenerationOptions(temperature=0.3, max_tokens=600)
+        # Ответ по записи - коротко: длинная генерация на CPU съедает минуты.
+        options = GenerationOptions(temperature=0.3, max_tokens=400)
         whole = transcript_text(chunks)
         if len(whole) <= self.material_chars:
             self._stage("answer_start", mode="full", opened=len(chunks))
@@ -985,8 +984,9 @@ class TranscriptAssistant:
                 for index in opened
             )
             self._stage("answer_start", mode=mode, opened=len(opened), round=rounds)
-            # Поток в интерфейс идёт только на последнем заходе: иначе
-            # пользователь увидит служебное слово «нет в записи» как ответ.
+            # Промежуточный заход без стрима: иначе в пузыре мелькнет
+            # служебное «нет в записи». Если ответ нашёлся на этом заходе -
+            # отдаём готовый текст одним куском в on_token, иначе UI пустой.
             last = rounds >= MAX_ROUNDS or len(used) >= len(chunks)
             text = self._ask(
                 SYSTEM_RECORD,
@@ -996,6 +996,8 @@ class TranscriptAssistant:
             )
             answer_text, missing = self._clean(text)
             if not missing:
+                if not last and on_token is not None and answer_text:
+                    on_token(answer_text)
                 break
             if last:
                 break

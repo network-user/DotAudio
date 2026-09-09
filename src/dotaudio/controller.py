@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import inspect
 import os
 import re
 import threading
 import time
+import wave
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -26,10 +28,11 @@ from dotaudio.capture import (
     source_for_mode,
 )
 from dotaudio.desktop import MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, Hotkey
-from dotaudio.engine import Engine, RecognitionConfig
+from dotaudio.engine import DownloadCancelled, Engine, RecognitionConfig
 from dotaudio.karaoke import export_ass, render_video
-from dotaudio.karaoke_align import align_words, decode_file
-from dotaudio.karaoke_edit import apply_word, clamp_row, set_word_text
+from dotaudio.karaoke_align import align_words, compute_peaks, decode_file
+from dotaudio.karaoke_edit import apply_word, clamp_row, set_word_text, sync_words_to_text
+from dotaudio.monitor_clips import PcmRing, extract_match_clip
 from dotaudio.pipeline import (
     LIVE_SPEECH_THRESHOLD,
     SAMPLE_RATE,
@@ -37,7 +40,11 @@ from dotaudio.pipeline import (
     open_voice_activity,
     preload_voice_activity,
 )
-from dotaudio.speaker_labels import default_speaker_label
+from dotaudio.speaker_labels import (
+    default_speaker_label,
+    is_default_speaker_label,
+    speaker_label_for_kind,
+)
 from dotaudio.storage import Store
 from dotaudio.transcripts import (
     apply_keyword_cooldown,
@@ -48,8 +55,11 @@ from dotaudio.transcripts import (
     match_keywords,
     regroup_for_subtitles,
     sentence_open,
+    split_caption_window,
+    text_after_prefix,
 )
 from dotaudio.vosk_engine import VoskEngine
+from dotaudio.watch_folder import WatchFolder
 
 MODEL_BY_PROFILE = {"fast": "base", "balanced": "small", "quality": "large-v3"}
 
@@ -98,6 +108,10 @@ DEFAULTS = {
     "dictate_hotkey": "Ctrl+Alt+Space", "island_hotkey": "Ctrl+Alt+O",
     "paste_last_hotkey": "Shift+Alt+Z", "dictate_hold": False,
     "quit_hotkey": "Ctrl+Alt+X",
+    "cancel_hotkey": "Escape",
+    "watch_folder": "",
+    "watch_folder_enabled": False,
+    "history_semantic": True,
     # Движок определения голосов на странице «Транскрибация». "nemo" -
     # нативный рантайм NVIDIA NeMo с моделью Sortformer: он размечает
     # дорожку по времени и потому умеет резать фразу по смене голоса.
@@ -221,20 +235,15 @@ def sensitivity_label(value: str) -> str:
 
 
 def parse_hotkey(value: str) -> Hotkey | None:
-    """Разбор свободной комбинации вроде ``Ctrl+Shift+A``.
-
-    Берёт только модификаторы (Ctrl/Alt/Shift/Win/Cmd) и одну клавишу A-Z или
-    цифру - безраскладочные и тем самым безопасные для RegisterHotKey. Строит
-    Hotkey(MOD_NOREPEAT|модификаторы, VK). Невалидную строку возвращает None,
-    не трогая уже установленный биндинг.
-    """
+    """Разбор свободной комбинации вроде ``Ctrl+Shift+A`` или ``Escape``."""
 
     if not value or not isinstance(value, str):
         return None
     mods = {"ctrl": MOD_CONTROL, "alt": MOD_ALT, "shift": MOD_SHIFT,
             "win": MOD_WIN, "cmd": MOD_WIN}
+    special = {"space": 0x20, "escape": 0x1B, "esc": 0x1B}
     mod = 0
-    key: str | None = None
+    key_code: int | None = None
     for raw in value.replace("+", " ").replace("_", " ").split():
         token = raw.strip()
         if not token:
@@ -243,12 +252,32 @@ def parse_hotkey(value: str) -> Hotkey | None:
         if low in mods:
             mod |= mods[low]
             continue
-        if key is not None or len(token) != 1 or not token.isalnum():
+        if key_code is not None:
             return None
-        key = token.upper()
-    if key is None or mod == 0:
+        if low in special:
+            key_code = special[low]
+            continue
+        if len(token) != 1 or not token.isalnum():
+            return None
+        key_code = ord(token.upper())
+    if key_code is None:
         return None
-    return Hotkey(MOD_NOREPEAT | mod, ord(key))
+    if mod == 0 and key_code != 0x1B:
+        return None
+    return Hotkey(MOD_NOREPEAT | mod, key_code)
+
+
+def resolve_hotkey(value: str) -> Hotkey | None:
+    """Пресет из каталога или свободный разбор строки."""
+
+    name = str(value or "").strip()
+    if not name:
+        return None
+    return (
+        HOTKEY_OPTIONS.get(name)
+        or QUIT_HOTKEY_OPTIONS.get(name)
+        or parse_hotkey(name)
+    )
 
 
 def hotkey_id(value: str) -> str:
@@ -356,9 +385,13 @@ class Controller(QObject):
     deviceTestFinished = Signal(str, str)
     renderFinished = Signal(str)
     realignReady = Signal(object)
+    mediaPeaksReady = Signal(object)
+    mediaPeaksChanged = Signal()
     shutdownReady = Signal()
     transcribeChanged = Signal()
     transcribeStatus = Signal(str)
+    # Тик прогресса ASR/диаризации: только GUI-поток обновляет _trans_state.
+    transcribeTick = Signal(object)
     # Успешная транскрибация записана в историю: GUI обновляет списки.
     transcriptPersisted = Signal(str)
     # Открыть ассистента с уже сохранённой записью транскрибации.
@@ -380,13 +413,17 @@ class Controller(QObject):
         self._vosk_size: str = ""
         self._settings = {**DEFAULTS, **self.store.get_settings()}
         saved_bindings = {
-            "dictate": HOTKEY_OPTIONS.get(str(self._settings["dictate_hotkey"])),
-            "island": HOTKEY_OPTIONS.get(str(self._settings["island_hotkey"])),
-            "paste_last": HOTKEY_OPTIONS.get(str(self._settings["paste_last_hotkey"])),
+            "dictate": resolve_hotkey(str(self._settings["dictate_hotkey"])),
+            "island": resolve_hotkey(str(self._settings["island_hotkey"])),
+            "paste_last": resolve_hotkey(str(self._settings["paste_last_hotkey"])),
         }
+        cancel_combo = resolve_hotkey(str(self._settings.get("cancel_hotkey") or "Escape"))
+        if cancel_combo is not None:
+            saved_bindings["cancel"] = cancel_combo
         if (
-            all(saved_bindings.values())
-            and len({(item.modifiers, item.key) for item in saved_bindings.values()}) == 3
+            all(saved_bindings.get(key) for key in ("dictate", "island", "paste_last"))
+            and len({(item.modifiers, item.key) for item in saved_bindings.values()})
+            == len(saved_bindings)
         ):
             self.desktop.set_hotkeys(saved_bindings)
         # Сохранённая комбинация выхода побеждает значение по умолчанию, которым
@@ -403,6 +440,9 @@ class Controller(QObject):
         self._input_state = "Ожидает запуска"
         self._segments, self._history, self._hits, self._devices = [], [], [], []
         self._partial_caption = ""
+        # Полный черновик от пайплайна; на экран кладётся окно после split.
+        self._partial_source = ""
+        self._preview_stable = ""
         self._partial_end = 0.0
         self._final_end = 0.0
         self._confirmed_caption = ""
@@ -432,6 +472,8 @@ class Controller(QObject):
             "segments": [], "sessionId": "", "progress": 0.0,
         }
         self._trans_cancel = threading.Event()
+        # sessionId с воркера до доставки QueuedConnection от transcribeTick.
+        self._trans_result_session_id = ""
         # Опрос рантайма NeMo - запуск процесса, поэтому он делается один раз
         # в фоне и кешируется. Пустой словарь значит «ещё не проверяли».
         self._diarize_probe: dict = {}
@@ -495,8 +537,12 @@ class Controller(QObject):
         }
         self._gpu_setup_cancel = threading.Event()
         threading.Thread(target=self._probe_hardware, daemon=True, name="hardware-probe").start()
-        self._edit_undo: list[tuple[int, str, str]] = []
-        self._edit_redo: list[tuple[int, str, str]] = []
+        # Each entry is a batch of (segment_id, before, after) snapshots.
+        self._edit_undo: list[list[tuple[int, dict, dict]]] = []
+        self._edit_redo: list[list[tuple[int, dict, dict]]] = []
+        self._media_peaks: list[float] = []
+        self._media_peaks_duration = 0.0
+        self._media_peaks_token = 0
         # Общий сигнал остаётся надмножеством точечных: код, который уже
         # сообщал об изменении через changed, продолжает работать как прежде.
         self.changed.connect(self.statusChanged)
@@ -508,6 +554,7 @@ class Controller(QObject):
         self.partialArrived.connect(self._on_partial)
         self.jobFinished.connect(self._on_finished)
         self.transcriptPersisted.connect(self._on_transcript_persisted)
+        self.transcribeTick.connect(self._on_transcribe_tick)
         self.statusArrived.connect(self._set_status)
         self.levelArrived.connect(self._set_level)
         self.captureStarted.connect(self._on_capture_started)
@@ -522,6 +569,7 @@ class Controller(QObject):
         self.deviceTestFinished.connect(self._on_device_test_finished)
         self.renderFinished.connect(self._on_render_finished)
         self.realignReady.connect(self._on_realign_ready)
+        self.mediaPeaksReady.connect(self._on_media_peaks_ready)
         self.diarizeProbed.connect(self._on_diarize_probed)
         self.gpuSetupProgress.connect(self._on_gpu_setup_progress)
         self.gpuSetupFinished.connect(self._on_gpu_setup_finished)
@@ -529,6 +577,7 @@ class Controller(QObject):
         desktop.dictate.connect(self.hotkeyRecord)
         desktop.island.connect(self.islandRequested)
         desktop.paste_last.connect(self.pasteLastTranscript)
+        desktop.cancel_requested.connect(self.cancel)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(1000)
@@ -541,11 +590,23 @@ class Controller(QObject):
         self._hold_timer = QTimer(self)
         self._hold_timer.setInterval(50)
         self._hold_timer.timeout.connect(self._poll_hold)
+        self._data_dir = Path(data_dir)
+        self._watch_queue: list[str] = []
+        self._pcm_rings: dict[str, PcmRing] = {}
+        self._watch = WatchFolder(None, self._on_watch_file, poll_seconds=2.0)
         self.refreshHistory("")
+        self._hits = self.store.list_keyword_events(limit=200)
         self.refreshDevices()
         self.refreshOutputs()
         self.refreshLoopbacks()
+        self._sync_watch_folder()
         self._record_log("system", "DotAudio запущен. Выберите модель или начните работу.")
+        recoverable = self.store.list_recoverable_sessions()
+        if recoverable:
+            self._record_log(
+                "warning",
+                f"Найдено прерванных сессий: {len(recoverable)}. Откройте историю для правки.",
+            )
 
     @Property(str, notify=changed)
     def page(self): return self._page
@@ -986,6 +1047,15 @@ class Controller(QObject):
     @Property(bool, notify=changed)
     def canRedoEdit(self): return bool(self._edit_redo)
 
+    @Property("QVariantList", notify=mediaPeaksChanged)
+    def mediaPeaks(self):
+        """Precomputed peak envelope for the media timeline (worker-filled)."""
+        return list(self._media_peaks)
+
+    @Property(float, notify=mediaPeaksChanged)
+    def mediaPeaksDuration(self):
+        return float(self._media_peaks_duration)
+
     @Property(str, notify=changed)
     def liveSourceLabel(self):
         return live_source_label(str(self._settings.get("live_source") or "system"))
@@ -1125,6 +1195,7 @@ class Controller(QObject):
             "island_snap", "caption_autohide", "caption_locked", "reduce_motion",
             "live_auto_window", "live_show_times", "live_locked",
             "live_greedy_finals", "gpu_hint_dismissed", "setup_completed",
+            "watch_folder_enabled", "history_semantic",
         ):
             value = bool(value)
         if name in ("caption_x", "caption_y", "caption_screen"):
@@ -1158,6 +1229,10 @@ class Controller(QObject):
         self.store.save_settings(self._settings)
         if name == "quit_hotkey":
             self._apply_quit_hotkey()
+        if name in ("watch_folder", "watch_folder_enabled"):
+            self._sync_watch_folder()
+        if name == "history_semantic":
+            self.refreshHistory(self._query)
         if name == "model":
             self._model_state = {
                 "phase": "idle",
@@ -1188,12 +1263,15 @@ class Controller(QObject):
         """Re-register the exit combo after it changes in Settings."""
 
         quit_name = str(self._settings.get("quit_hotkey") or "Ctrl+Alt+X")
-        combo = QUIT_HOTKEY_OPTIONS.get(quit_name) or parse_hotkey(quit_name)
+        combo = resolve_hotkey(quit_name)
         base = {
-            "dictate": HOTKEY_OPTIONS.get(str(self._settings.get("dictate_hotkey"))),
-            "island": HOTKEY_OPTIONS.get(str(self._settings.get("island_hotkey"))),
-            "paste_last": HOTKEY_OPTIONS.get(str(self._settings.get("paste_last_hotkey"))),
+            "dictate": resolve_hotkey(str(self._settings.get("dictate_hotkey"))),
+            "island": resolve_hotkey(str(self._settings.get("island_hotkey"))),
+            "paste_last": resolve_hotkey(str(self._settings.get("paste_last_hotkey"))),
         }
+        cancel = resolve_hotkey(str(self._settings.get("cancel_hotkey") or "Escape"))
+        if cancel is not None:
+            base["cancel"] = cancel
         if combo is None or None in base.values() or not self.desktop.available:
             if combo is None:
                 self._notice = f"Не понимаю комбинацию «{quit_name}». Формат: Ctrl+Alt+A."
@@ -1240,10 +1318,14 @@ class Controller(QObject):
         if live_stream:
             values["live_sensitivity"] = str(self._settings["live_sensitivity"])
             values["live_greedy_finals"] = bool(self._settings.get("live_greedy_finals", False))
-        values["initial_prompt"] = "; ".join(
-            str(entry.get("term", "")).strip()
-            for entry in self.dictionary if isinstance(entry, dict)
-        )
+        if str(values.get("backend") or "local") == "remote":
+            values["initial_prompt"] = ""
+        else:
+            values["initial_prompt"] = "; ".join(
+                str(entry.get("term", "")).strip()
+                for entry in self.dictionary
+                if isinstance(entry, dict) and str(entry.get("term", "")).strip()
+            )
         return RecognitionConfig(
             **values, media_mode=bool(media_mode), live_stream=bool(live_stream)
         )
@@ -1270,12 +1352,16 @@ class Controller(QObject):
 
     def _apply_hotkey_bindings(self, dictate: str, island: str, paste_last: str) -> bool:
         bindings = {
-            "dictate": HOTKEY_OPTIONS.get(str(dictate)),
-            "island": HOTKEY_OPTIONS.get(str(island)),
-            "paste_last": HOTKEY_OPTIONS.get(str(paste_last)),
+            "dictate": resolve_hotkey(str(dictate)),
+            "island": resolve_hotkey(str(island)),
+            "paste_last": resolve_hotkey(str(paste_last)),
         }
-        if None in bindings.values() or len({(item.modifiers, item.key) for item in bindings.values()}) != 3:
-            self._notice = "Выберите разные поддерживаемые комбинации для диктовки, острова и вставки."
+        cancel = resolve_hotkey(str(self._settings.get("cancel_hotkey") or "Escape"))
+        if cancel is not None:
+            bindings["cancel"] = cancel
+        if None in (bindings.get("dictate"), bindings.get("island"), bindings.get("paste_last")) or \
+                len({(item.modifiers, item.key) for item in bindings.values()}) != len(bindings):
+            self._notice = "Выберите разные понятные комбинации для диктовки, острова и вставки."
             self.changed.emit()
             return False
         if not self.desktop.set_hotkeys(bindings):
@@ -1963,6 +2049,8 @@ class Controller(QObject):
             self._close_open_phrase()
             self._confirmed_caption = ""
             self._partial_caption = ""
+            self._partial_source = ""
+            self._preview_stable = ""
             self._settled_caption = ""
             self._partial_end = 0.0
             self._caption_revision += 1
@@ -2016,7 +2104,8 @@ class Controller(QObject):
             self._begin_engine_prepare(
                 model_label=str(model),
                 prepare_fn=lambda on_status, on_progress: engine.prepare(
-                    self._config(live_stream=True), on_status, on_progress
+                    self._config(live_stream=True), on_status, on_progress,
+                    cancel=self._prepare_cancel,
                 ),
                 preload_vad=preload_needed,
             )
@@ -2042,7 +2131,7 @@ class Controller(QObject):
         self._begin_engine_prepare(
             model_label=model,
             prepare_fn=lambda on_status, on_progress: self.engine.prepare(
-                config, on_status, on_progress
+                config, on_status, on_progress, cancel=self._prepare_cancel,
             ),
             preload_vad=preload_needed,
         )
@@ -2086,6 +2175,8 @@ class Controller(QObject):
                 if self._prepare_cancel.is_set():
                     self.modelFinished.emit(model_label, "", "Подготовка отменена")
                     return
+            except DownloadCancelled:
+                self.modelFinished.emit(model_label, "", "Подготовка отменена")
             except Exception as exc:
                 self.modelFinished.emit(model_label, "", str(exc))
             else:
@@ -2201,6 +2292,8 @@ class Controller(QObject):
         self._segments = []
         self.segmentsChanged.emit()
         self._partial_caption = ""
+        self._partial_source = ""
+        self._preview_stable = ""
         self._partial_end = 0.0
         self._final_end = 0.0
         self._confirmed_caption = ""
@@ -2210,6 +2303,7 @@ class Controller(QObject):
         self._edit_undo = []
         self._edit_redo = []
         self._media_url = ""
+        self._clear_media_peaks()
         self._hits = []
         self._started = time.monotonic()
         self._last_signal_at = self._started
@@ -2310,6 +2404,9 @@ class Controller(QObject):
                     if mode == "live" and not clock["started"] and len(audio):
                         clock["started"] = True
                         self.captureStarted.emit(sid, time.monotonic() - len(audio) / SAMPLE_RATE)
+                    if mode == "monitor":
+                        ring = self._pcm_rings.setdefault(sid, PcmRing(seconds=90.0))
+                        ring.write(audio)
                     live.feed(audio)
 
                 def on_gap(dropped, sid=sid, live=live):
@@ -2478,6 +2575,7 @@ class Controller(QObject):
         self._session_title = media.name
         self._media_url = QUrl.fromLocalFile(str(media.resolve())).toString()
         self._cover_url = ""
+        self._schedule_media_peaks(str(media.resolve()))
         self._page, self._state = "media", "processing"
         self._status = "Открываем файл и загружаем модель…"
         self._notice = ""
@@ -2524,6 +2622,8 @@ class Controller(QObject):
             # preview of newer sound stays after the sentence it continues.
             if self._partial_end <= self._final_end:
                 self._partial_caption = ""
+                self._partial_source = ""
+                self._preview_stable = ""
                 self._partial_end = 0.0
             self._refresh_live_caption()
             self._live_latency_ms = max(
@@ -2531,7 +2631,7 @@ class Controller(QObject):
                 (time.monotonic() - self._started - segment_end) * 1000,
             )
             self._live_phase = (
-                "speech" if self._partial_caption
+                "speech" if self._partial_source
                 else "listening" if self.recording
                 else "stopping"
             )
@@ -2544,7 +2644,36 @@ class Controller(QObject):
                 time.monotonic(),
             )
             if matches:
-                self._hits.insert(0, {**segment, "source": job["name"], "matches": ", ".join(matches), "session_id": sid})
+                clip_path = ""
+                ring = self._pcm_rings.get(sid)
+                if ring is not None:
+                    clip = extract_match_clip(
+                        ring,
+                        match_start=float(segment.get("start", 0.0)),
+                        match_end=float(segment.get("end", 0.0)),
+                        stream_end=float(ring.written_seconds),
+                        out_dir=self._data_dir / "clips",
+                        stem=f"{sid[:8]}_{int(float(segment.get('start', 0.0)))}",
+                    )
+                    clip_path = str(clip) if clip is not None else ""
+                for keyword in matches:
+                    self.store.save_keyword_event(
+                        sid,
+                        start=float(segment.get("start", 0.0)),
+                        end=float(segment.get("end", 0.0)),
+                        keyword=keyword,
+                        text=str(segment.get("text", "")),
+                        source=str(job["name"]),
+                        clip_path=clip_path,
+                    )
+                hit = {
+                    **segment,
+                    "source": job["name"],
+                    "matches": ", ".join(matches),
+                    "session_id": sid,
+                    "clip_path": clip_path,
+                }
+                self._hits.insert(0, hit)
                 self._hits = self._hits[:200]
                 self._record_log("warning", f"Совпадение в эфире {job['name']}: {', '.join(matches)}")
         elif sid == self._session_id:
@@ -2594,17 +2723,31 @@ class Controller(QObject):
         return True
 
     def _refresh_live_caption(self):
-        """The live row: the unfinished sentence so far, then the preview."""
+        """Live row: LocalAgreement prefix as confirmed, remainder as draft."""
 
-        if self._open_phrase and self._segments:
+        draft = getattr(self, "_partial_source", "") or ""
+        stable = getattr(self, "_preview_stable", "") or ""
+        if stable and draft:
+            agreed = stable
+            rest = text_after_prefix(draft, stable)
+            if self._open_phrase and self._segments:
+                last = self._segments[-1]
+                head, _ = blend_fragments(
+                    str(last.get("text", "")), bool(last.get("cut")), agreed
+                )
+                confirmed, pending = head or agreed, rest
+            else:
+                confirmed, pending = agreed, rest
+        elif self._open_phrase and self._segments:
             last = self._segments[-1]
-            head, tail = blend_fragments(
-                str(last.get("text", "")), bool(last.get("cut")), self._partial_caption
+            confirmed, pending = blend_fragments(
+                str(last.get("text", "")), bool(last.get("cut")), draft
             )
         else:
-            head, tail = "", self._partial_caption
-        self._confirmed_caption = head
-        self._partial_caption = tail
+            confirmed, pending = "", draft
+        confirmed, pending = split_caption_window(confirmed, pending)
+        self._confirmed_caption = confirmed
+        self._partial_caption = pending
         self._caption_revision += 1
         self.captionChanged.emit()
 
@@ -2636,7 +2779,8 @@ class Controller(QObject):
         end = float(segment.get("end", 0.0))
         if end < self._partial_end or end <= self._final_end:
             return
-        self._partial_caption = text
+        self._partial_source = text
+        self._preview_stable = str(segment.get("stable_text", "")).strip()
         self._partial_end = end
         self._live_diagnostic = ""
         self._live_phase = "speech"
@@ -2682,6 +2826,8 @@ class Controller(QObject):
                 self._close_open_phrase()
                 self._confirmed_caption = ""
                 self._partial_caption = ""
+                self._partial_source = ""
+                self._preview_stable = ""
                 self._partial_end = 0.0
                 self._live_phase = "error" if error else "idle"
                 self._caption_revision += 1
@@ -2723,6 +2869,59 @@ class Controller(QObject):
             )
         self.changed.emit()
 
+
+    def _on_watch_file(self, path: Path) -> None:
+        """Новый файл из watch-folder: очередь, чтобы не стартовать поверх busy."""
+
+        target = str(Path(path))
+        if target in self._watch_queue:
+            return
+        self._watch_queue.append(target)
+        QTimer.singleShot(0, self._drain_watch_queue)
+
+    def _drain_watch_queue(self) -> None:
+        if self._jobs or self._state != "idle" or not self._watch_queue:
+            if self._watch_queue and not self._jobs:
+                QTimer.singleShot(1500, self._drain_watch_queue)
+            return
+        path = self._watch_queue.pop(0)
+        self._record_log("info", f"Автоимпорт из папки: {path}")
+        try:
+            self.transcribePath(path)
+        except Exception as exc:
+            self._record_log("error", f"Автоимпорт не удался: {exc}")
+        if self._watch_queue:
+            QTimer.singleShot(1500, self._drain_watch_queue)
+
+    def _sync_watch_folder(self) -> None:
+        enabled = bool(self._settings.get("watch_folder_enabled"))
+        folder = str(self._settings.get("watch_folder") or "").strip()
+        if enabled and folder:
+            self._watch.set_path(folder)
+            self._watch.start()
+        else:
+            self._watch.set_path(None)
+            self._watch.stop()
+
+    @Slot()
+    def chooseWatchFolder(self) -> None:
+        path = QFileDialog.getExistingDirectory(None, "Папка автоимпорта медиа", "")
+        if not path:
+            return
+        self._settings["watch_folder"] = path
+        self._settings["watch_folder_enabled"] = True
+        self.store.save_settings(self._settings)
+        self._sync_watch_folder()
+        self._notice = f"Следим за папкой: {path}"
+        self.changed.emit()
+
+    @Slot(bool)
+    def setWatchFolderEnabled(self, enabled: bool) -> None:
+        self._settings["watch_folder_enabled"] = bool(enabled)
+        self.store.save_settings(self._settings)
+        self._sync_watch_folder()
+        self.changed.emit()
+
     @Slot()
     def pasteLastTranscript(self):
         text = self._last_transcript
@@ -2762,7 +2961,10 @@ class Controller(QObject):
     @Slot(str)
     def refreshHistory(self, query):
         self._query = query
-        self._history = self.store.list_sessions(query)
+        semantic = bool(self._settings.get("history_semantic", True))
+        self._history = self.store.search_sessions(
+            query, semantic=semantic and bool(str(query or "").strip())
+        )
         self.changed.emit()
 
     def _on_transcript_persisted(self, _session_id: str) -> None:
@@ -2788,6 +2990,10 @@ class Controller(QObject):
             source = session["source"]
             is_media = session["mode"] in ("media", "transcript")
             self._media_url = QUrl.fromLocalFile(source).toString() if is_media and Path(source).is_file() else ""
+            if is_media and Path(source).is_file():
+                self._schedule_media_peaks(source)
+            else:
+                self._clear_media_peaks()
             if is_media and source and not self._media_url:
                 self._notice = "Исходный медиафайл не найден. Расшифровку всё ещё можно редактировать и экспортировать."
             if session["mode"] == "transcript":
@@ -2835,13 +3041,10 @@ class Controller(QObject):
         source = str(session.get("source") or "")
         rows = []
         for segment in session.get("segments") or []:
-            text = str(segment.get("text") or "").strip()
-            speaker = ""
-            if text.startswith("[") and "]" in text:
-                label, rest = text[1:].split("]", 1)
-                if label.strip():
-                    speaker = label.strip()
-                    text = rest.strip()
+            text, speaker = self._split_stored_segment(
+                str(segment.get("text") or ""),
+                segment.get("speaker"),
+            )
             rows.append(
                 {
                     "id": segment.get("id"),
@@ -2892,6 +3095,23 @@ class Controller(QObject):
         self._page = "transcript"
         self.transcribeChanged.emit()
 
+    @staticmethod
+    def _split_stored_segment(text: str, speaker_field) -> tuple[str, str]:
+        """Dual-read: колонка speaker, иначе legacy-префикс ``[Имя]`` в тексте."""
+
+        body = str(text or "").strip()
+        speaker = str(speaker_field or "").strip() if speaker_field is not None else ""
+        if speaker:
+            prefix = f"[{speaker}]"
+            if body.startswith(prefix):
+                body = body[len(prefix):].strip()
+            return body, speaker
+        if body.startswith("[") and "]" in body:
+            label, rest = body[1:].split("]", 1)
+            if label.strip():
+                return rest.strip(), label.strip()
+        return body, ""
+
     @Slot(str, str)
     def renameSession(self, sid, title):
         """Переименовать сессию в истории и на активной странице."""
@@ -2920,10 +3140,12 @@ class Controller(QObject):
             before = next((item for item in self._segments if item["id"] == segment_id), None)
             if before is None or before["text"] == text:
                 return
+            snapshot = self._row_snapshot(before)
+            after = sync_words_to_text(snapshot, text)
             self._apply_row_change(
                 segment_id,
-                before,
-                {**before, "text": text},
+                snapshot,
+                {**after, "id": segment_id},
                 info=f"Изменён текст сегмента {segment_id}.",
             )
 
@@ -2943,18 +3165,18 @@ class Controller(QObject):
         self.store.update_segment_edit(self._session_id, segment_id, after)
         self._segments = self.store.get_session(self._session_id)["segments"]
         self.segmentsChanged.emit()
-        self._edit_undo.append((segment_id, before, {**after, "id": after_id}))
+        self._edit_undo.append([(segment_id, before, {**after, "id": after_id})])
         self._edit_undo = self._edit_undo[-100:]
         self._edit_redo = []
         self._record_log("info", info)
         self.changed.emit()
 
-    def _apply_edit(self, change, use_after):
-        segment_id, before, after = change
-        value = after if use_after else before
-        row = dict(value)
-        row.pop("id", None)
-        self.store.update_segment_edit(self._session_id, segment_id, row)
+    def _apply_edit_batch(self, batch, *, use_after: bool) -> None:
+        for segment_id, before, after in (batch if use_after else reversed(batch)):
+            value = after if use_after else before
+            row = dict(value)
+            row.pop("id", None)
+            self.store.update_segment_edit(self._session_id, segment_id, row)
         self._segments = self.store.get_session(self._session_id)["segments"]
         self.segmentsChanged.emit()
 
@@ -2962,9 +3184,9 @@ class Controller(QObject):
     def undoEdit(self):
         if not self._session_id or not self._edit_undo:
             return
-        change = self._edit_undo.pop()
-        self._apply_edit(change, False)
-        self._edit_redo.append(change)
+        batch = self._edit_undo.pop()
+        self._apply_edit_batch(batch, use_after=False)
+        self._edit_redo.append(batch)
         self._record_log("info", "Отменена правка сегмента.")
         self.changed.emit()
 
@@ -2972,9 +3194,9 @@ class Controller(QObject):
     def redoEdit(self):
         if not self._session_id or not self._edit_redo:
             return
-        change = self._edit_redo.pop()
-        self._apply_edit(change, True)
-        self._edit_undo.append(change)
+        batch = self._edit_redo.pop()
+        self._apply_edit_batch(batch, use_after=True)
+        self._edit_undo.append(batch)
         self._record_log("info", "Повторена правка сегмента.")
         self.changed.emit()
 
@@ -3111,15 +3333,82 @@ class Controller(QObject):
             self._record_log("error", self._notice)
         else:
             rows = list((result or {}).get("rows") or [])
+            batch: list[tuple[int, dict, dict]] = []
             if self._session_id:
                 for row in rows:
-                    self.store.update_segment_edit(self._session_id, row["id"], row)
-                self._segments = self.store.get_session(self._session_id)["segments"]
-                self.segmentsChanged.emit()
-            self._notice = "Слова выровнены к тишине." if rows else "Границы слов уже на тишине."
+                    current = self._seg_row(row["id"])
+                    if current is None:
+                        continue
+                    before = self._row_snapshot(current)
+                    after = {
+                        "id": row["id"],
+                        "start": float(row["start"]),
+                        "end": float(row["end"]),
+                        "text": str(row["text"]),
+                        "words": [dict(w) for w in (row.get("words") or [])],
+                    }
+                    self.store.update_segment_edit(self._session_id, row["id"], {
+                        "start": after["start"],
+                        "end": after["end"],
+                        "text": after["text"],
+                        "words": after["words"],
+                    })
+                    batch.append((row["id"], before, after))
+                if batch:
+                    self._segments = self.store.get_session(self._session_id)["segments"]
+                    self.segmentsChanged.emit()
+                    self._edit_undo.append(batch)
+                    self._edit_undo = self._edit_undo[-100:]
+                    self._edit_redo = []
+            self._notice = "Слова выровнены к тишине." if batch else "Границы слов уже на тишине."
             self._status = "Готово"
             self._record_log("success", self._notice)
         self.changed.emit()
+
+    def _clear_media_peaks(self) -> None:
+        self._media_peaks_token += 1
+        self._media_peaks = []
+        self._media_peaks_duration = 0.0
+        self.mediaPeaksChanged.emit()
+
+    def _schedule_media_peaks(self, path: str) -> None:
+        """Decode peaks in a worker; never from a Q_PROPERTY getter."""
+        media = Path(path)
+        if not media.is_file():
+            self._clear_media_peaks()
+            return
+        self._media_peaks_token += 1
+        token = self._media_peaks_token
+        source = str(media.resolve())
+
+        def work():
+            error = ""
+            peaks: list[float] = []
+            duration = 0.0
+            try:
+                samples = decode_file(source)
+                peaks, duration = compute_peaks(samples, 16000, buckets=480)
+            except Exception as exc:  # noqa: BLE001 - surface in UI notice
+                error = str(exc)
+            self.mediaPeaksReady.emit({
+                "token": token,
+                "peaks": peaks,
+                "duration": duration,
+                "error": error,
+            })
+
+        threading.Thread(target=work, name="dotaudio-media-peaks", daemon=True).start()
+
+    def _on_media_peaks_ready(self, result) -> None:
+        payload = result or {}
+        if int(payload.get("token") or 0) != self._media_peaks_token:
+            return
+        self._media_peaks = [float(v) for v in (payload.get("peaks") or [])]
+        self._media_peaks_duration = float(payload.get("duration") or 0.0)
+        error = str(payload.get("error") or "")
+        if error:
+            self._record_log("warning", f"Волна медиа не построена: {error}")
+        self.mediaPeaksChanged.emit()
 
     @Slot(str)
     def exportFile(self, format):
@@ -3148,7 +3437,20 @@ class Controller(QObject):
             return
         try:
             Path(path).write_text(export_ass(self._segments), encoding="utf-8")
-            self._notice = "Караоке-субтитры сохранены. Их можно открыть в FFmpeg, OBS или видеоредакторе."
+            phrase_only = any(
+                str(seg.get("text", "")).strip() and not (seg.get("words") or [])
+                for seg in self._segments
+            )
+            if phrase_only:
+                self._notice = (
+                    "ASS сохранён: фразы без слов записаны пофразово "
+                    "(без karaoke \\k). Для пословного режима нужна разметка слов."
+                )
+            else:
+                self._notice = (
+                    "Караоке-субтитры сохранены. Их можно открыть в FFmpeg, "
+                    "OBS или видеоредакторе."
+                )
             self._record_log("success", f"Караоке-экспорт: {Path(path).name}")
         except OSError as exc:
             self._notice = f"Не удалось сохранить ASS: {exc}"
@@ -3390,6 +3692,7 @@ class Controller(QObject):
         state.update({"phase": "working", "stage": "asr", "error": "", "segments": [],
                       "speakers": [], "diarization": False, "engine": "", "engineNote": "",
                       "sessionId": "", "progress": -1.0})
+        self._trans_result_session_id = ""
         self._record_log("info", f"Транскрибация (локально): {Path(path).name}")
         self.transcribeChanged.emit()
 
@@ -3399,84 +3702,189 @@ class Controller(QObject):
             except Exception as exc:  # noqa: BLE001
                 text = f"Ошибка: {exc}"
                 self._record_log("error", str(exc))
-            state["stage"] = ""
+            session_id = self._trans_result_session_id
             if self._trans_cancel.is_set():
-                state.update({"phase": "idle", "progress": 0.0})
+                self.transcribeTick.emit({"phase": "idle", "progress": 0.0, "stage": ""})
                 self.transcribeStatus.emit("Распознавание отменено (частичный результат не сохранён).")
+            elif text.startswith("Ошибка"):
+                self.transcribeTick.emit({
+                    "phase": "idle", "progress": 0.0, "stage": "", "error": text,
+                })
             else:
-                state["error"] = text if text.startswith("Ошибка") else ""
-                state["phase"] = "idle" if state["error"] else "done"
-                state["progress"] = 0.0 if state["error"] else 1.0
-                if not state["error"] and state.get("sessionId"):
-                    self.transcriptPersisted.emit(str(state["sessionId"]))
-            self.transcribeChanged.emit()
+                self.transcribeTick.emit({
+                    "phase": "done", "stage": "", "error": "", "progress": 1.0,
+                })
+                if session_id:
+                    self.transcriptPersisted.emit(str(session_id))
 
         threading.Thread(target=process, name="dotaudio-transcribe", daemon=True).start()
         self.transcribeStatus.emit("Распознаём файл на этом устройстве…")
 
+    def _on_transcribe_tick(self, payload) -> None:
+        """Применить снимок прогресса в GUI-потоке и уведомить QML."""
+
+        if isinstance(payload, dict):
+            self._trans_state.update(payload)
+        self.transcribeChanged.emit()
+
     def _trans_stage(self, stage: str) -> None:
         """Показать, чем занят проход: словами или голосами."""
 
-        self._trans_state["stage"] = stage
+        payload: dict = {"stage": stage}
         # ASR закончен, голоса ещё без доли: оставляем indeterminate.
         if stage == "voices":
-            self._trans_state["progress"] = -1.0
-        self.transcribeChanged.emit()
+            payload["progress"] = -1.0
+        self.transcribeTick.emit(payload)
+
+    @staticmethod
+    def _probe_wav_duration(path: str) -> float:
+        """Длительность WAV через stdlib wave; иначе 0 (не выдумываем)."""
+
+        try:
+            with wave.open(path, "rb") as handle:
+                rate = int(handle.getframerate() or 0)
+                frames = int(handle.getnframes() or 0)
+            if rate > 0 and frames > 0:
+                return frames / float(rate)
+        except Exception:  # noqa: BLE001
+            return 0.0
+        return 0.0
+
+    def _store_supports_speaker_column(self) -> bool:
+        """Колонка speaker в Store: смотрим сигнатуру update_segment."""
+
+        try:
+            return "speaker" in inspect.signature(self.store.update_segment).parameters
+        except (TypeError, ValueError):
+            return False
+
+    def _write_segment_to_store(
+        self,
+        session_id: str,
+        segment_id: int,
+        text: str,
+        speaker: str,
+    ) -> None:
+        """Обновить сегмент: speaker kwargs, иначе legacy ``[Имя]`` в тексте."""
+
+        body = str(text or "").strip()
+        label = str(speaker or "").strip()
+        if self._store_supports_speaker_column():
+            self.store.update_segment(session_id, segment_id, body, speaker=label)
+            return
+        stored = f"[{label}] {body}" if label else body
+        self.store.update_segment(session_id, segment_id, stored)
 
     def _transcribe_local(self, path: str) -> str:
         # Параметры движения как в караоке (слова), но backend принудительно
         # «local»: транскрибация никогда не отправляет аудио на сервер.
         config = replace(self._config(media_mode=True), backend="local")
         collected: list[dict] = []
+        duration = self._probe_wav_duration(path)
+        audio = None
+        diarize = str(self._settings.get("diarize_engine") or "off")
+        if diarize != "off":
+            try:
+                from dotaudio.speaker_id import decode_audio
+
+                audio = decode_audio(path)
+                if duration <= 0 and audio is not None and len(audio) > 0:
+                    duration = float(len(audio)) / float(SAMPLE_RATE)
+            except Exception:  # noqa: BLE001
+                audio = None
+        source = audio if audio is not None else path
 
         def on_segment(segment):
-            collected.append({
+            row = {
                 "start": float(segment.get("start", 0.0)),
                 "end": float(segment.get("end", 0.0)),
                 "text": str(segment.get("text", "")).strip(),
                 "words": segment.get("words", []),
+            }
+            collected.append(row)
+            end = float(row["end"])
+            progress = min(0.99, end / duration) if duration > 0 else -1.0
+            self.transcribeTick.emit({
+                "segments": [dict(item) for item in collected],
+                "progress": progress,
+                "duration": duration,
+                "stage": "asr",
             })
 
-        results = self.engine.transcribe(path, config, self._trans_cancel,
-                                         on_segment, lambda s: self.transcribeStatus.emit(s.upper()))
+        results = self.engine.transcribe(
+            source,
+            config,
+            self._trans_cancel,
+            on_segment,
+            lambda s: self.transcribeStatus.emit(s.upper()),
+        )
         collected = [item for item in collected if item["text"]] or results
         if self._trans_cancel.is_set():
             return ""
-        rows, engine, note = self._identify_voices(path, collected)
-        state = self._trans_state
-        state["segments"] = rows
-        state["speakers"] = self._speaker_legend(rows)
-        state["diarization"] = bool(state["speakers"])
-        state["engine"] = engine
-        state["engineNote"] = note
-        state["duration"] = max((float(row.get("end", 0.0)) for row in rows), default=0.0)
+        if duration > 0 and collected:
+            end = max(float(item.get("end", 0.0)) for item in collected)
+            self.transcribeTick.emit({
+                "segments": [dict(item) for item in collected],
+                "progress": min(0.99, end / duration),
+                "duration": duration,
+                "stage": "asr",
+            })
+        elif collected:
+            self.transcribeTick.emit({
+                "segments": [dict(item) for item in collected],
+                "progress": -1.0,
+                "duration": duration,
+                "stage": "asr",
+            })
+        rows, engine, note = self._identify_voices(path, collected, audio=audio)
+        if self._trans_cancel.is_set():
+            return ""
+        legend = self._speaker_legend(rows)
+        duration_final = max(
+            duration,
+            max((float(row.get("end", 0.0)) for row in rows), default=0.0),
+        )
         session_id = self._persist_transcript(path, rows)
-        state["sessionId"] = session_id
+        self._trans_result_session_id = session_id
+        self.transcribeTick.emit({
+            "segments": rows,
+            "speakers": legend,
+            "diarization": bool(legend),
+            "engine": engine,
+            "engineNote": note,
+            "duration": duration_final,
+            "sessionId": session_id,
+            "progress": 1.0,
+            "stage": "",
+        })
         return ""
 
     def _persist_transcript(self, path: str, rows: list[dict]) -> str:
         """Записать результат страницы «Транскрибация» в историю.
 
-        Без этого расшифровка жила только в оперативной памяти и пропадала
-        после смены файла или перезапуска. Говорящий сохраняется в тексте
-        сегмента: схема segments не знает отдельного поля speaker.
+        Текст хранится без префикса ``[Имя]``, если Store уже принимает
+        колонку speaker. Иначе - совместимый fallback в тексте сегмента.
         """
 
         media = Path(path)
+        use_speaker = self._store_supports_speaker_column()
         payload: list[dict] = []
+        kept: list[dict] = []
         for row in rows:
             text = str(row.get("text") or "").strip()
             if not text:
                 continue
             speaker = str(row.get("speaker") or "").strip()
-            payload.append(
-                {
-                    "start": float(row.get("start", 0.0)),
-                    "end": float(row.get("end", 0.0)),
-                    "text": f"[{speaker}] {text}" if speaker else text,
-                    "words": row.get("words") or [],
-                }
-            )
+            item: dict = {
+                "start": float(row.get("start", 0.0)),
+                "end": float(row.get("end", 0.0)),
+                "text": text if use_speaker else (f"[{speaker}] {text}" if speaker else text),
+                "words": row.get("words") or [],
+            }
+            if use_speaker:
+                item["speaker"] = speaker
+            payload.append(item)
+            kept.append(row)
         if not payload:
             return ""
         session_id = self.store.create_session(
@@ -3485,7 +3893,9 @@ class Controller(QObject):
             str(media),
             str(self._settings.get("model") or "small"),
         )
-        self.store.append_segments(session_id, payload)
+        identifiers = self.store.append_segments(session_id, payload)
+        for row, seg_id in zip(kept, identifiers, strict=False):
+            row["id"] = int(seg_id)
         self.store.finish_session(session_id, "completed")
         maybe_title = getattr(self, "_maybe_autotitle_session", None)
         if callable(maybe_title):
@@ -3515,7 +3925,12 @@ class Controller(QObject):
         if self._trans_state.get("sessionId") == session_id:
             self._trans_state["file"] = cleaned
 
-    def _identify_voices(self, path: str, segments: list[dict]) -> tuple[list[dict], str, str]:
+    def _identify_voices(
+        self,
+        path: str,
+        segments: list[dict],
+        audio=None,
+    ) -> tuple[list[dict], str, str]:
         """Определить говорящих выбранным движком.
 
         Неудача диаризации не отменяет расшифровку: текст с таймкодами
@@ -3529,9 +3944,9 @@ class Controller(QObject):
         self._trans_stage("voices")
         try:
             rows, note = (
-                self._voices_nemo(path, segments)
+                self._voices_nemo(path, segments, audio=audio)
                 if engine == "nemo"
-                else self._voices_ecapa(path, segments)
+                else self._voices_ecapa(path, segments, audio=audio)
             )
         except Exception as exc:  # noqa: BLE001
             if self._trans_cancel.is_set():
@@ -3543,16 +3958,16 @@ class Controller(QObject):
         self.transcribeStatus.emit("Готово: текст и говорящие.")
         return self._label_speakers(rows), engine, note
 
-    def _voices_nemo(self, path: str, segments: list[dict]) -> tuple[list[dict], str]:
+    def _voices_nemo(self, path: str, segments: list[dict], audio=None) -> tuple[list[dict], str]:
         """Разметка дорожки моделью NVIDIA Sortformer через нативный рантайм."""
 
         from dotaudio.nemo_diarize import MAX_SPEAKERS, diarize_audio
         from dotaudio.speaker_id import assign_turns, decode_audio
 
-        audio = decode_audio(path)
+        samples = audio if audio is not None else decode_audio(path)
         # Выбор устройства общий с Whisper: если пользователь увёл всё на
         # процессор, диаризация не должна втихую занимать видеокарту.
-        turns = diarize_audio(audio, device=str(self._settings.get("device") or "auto"),
+        turns = diarize_audio(samples, device=str(self._settings.get("device") or "auto"),
                               cancel=self._trans_cancel,
                               on_status=self.transcribeStatus.emit)
         rows = assign_turns(segments, turns)
@@ -3565,15 +3980,15 @@ class Controller(QObject):
             note += f" · модель различает не больше {MAX_SPEAKERS}"
         return rows, note
 
-    def _voices_ecapa(self, path: str, segments: list[dict]) -> tuple[list[dict], str]:
+    def _voices_ecapa(self, path: str, segments: list[dict], audio=None) -> tuple[list[dict], str]:
         """Прежний путь: один эмбеддинг на фразу и онлайн-кластеризация."""
 
         from platformdirs import user_cache_dir
 
         from dotaudio.speaker_id import apply_roles, decode_audio, diarize_segments
 
-        audio = decode_audio(path)
-        roles = diarize_segments(audio, segments, user_cache_dir("dotaudio", "dotcore"))
+        samples = audio if audio is not None else decode_audio(path)
+        roles = diarize_segments(samples, segments, user_cache_dir("dotaudio", "dotcore"))
         rows = apply_roles(segments, roles)
         voices = len({role for role in roles if role is not None})
         return rows, f"SpeechBrain ECAPA · голосов: {voices} · метка на фразу целиком"
@@ -3594,9 +4009,17 @@ class Controller(QObject):
         return labelled
 
     @staticmethod
-    def _speaker_legend(rows: list[dict]) -> list[dict]:
+    def _speaker_legend(
+        rows: list[dict],
+        previous: list[dict] | None = None,
+    ) -> list[dict]:
         """Легенда с числом реплик и временем речи каждого голоса."""
 
+        prev_by_key = {
+            int(item["key"]): item
+            for item in (previous or [])
+            if item.get("key") is not None
+        }
         legend: dict[int, dict] = {}
         for row in rows:
             key = row.get("role")
@@ -3606,6 +4029,10 @@ class Controller(QObject):
                 int(key),
                 {"key": int(key), "label": str(row.get("speaker") or ""), "count": 0, "seconds": 0.0},
             )
+            if "kind" not in entry:
+                prev = prev_by_key.get(int(key))
+                if prev and prev.get("kind"):
+                    entry["kind"] = prev["kind"]
             entry["count"] += 1
             entry["seconds"] += max(
                 0.0, float(row.get("end", 0.0)) - float(row.get("start", 0.0))
@@ -3628,6 +4055,92 @@ class Controller(QObject):
         self.transcribeChanged.emit()
 
     @Slot(int, str)
+    def editTranscriptSegment(self, index: int, text: str) -> None:
+        """Править текст одной фразы в полной расшифровке."""
+
+        segments = self._trans_state.get("segments") or []
+        idx = int(index)
+        if idx < 0 or idx >= len(segments):
+            return
+        cleaned = str(text or "").strip()
+        row = segments[idx]
+        row["text"] = cleaned
+        session_id = str(self._trans_state.get("sessionId") or "")
+        seg_id = row.get("id")
+        if session_id and seg_id is not None:
+            self._write_segment_to_store(
+                session_id,
+                int(seg_id),
+                cleaned,
+                str(row.get("speaker") or ""),
+            )
+        self.transcribeChanged.emit()
+
+    @Slot(int, str)
+    def setTranscriptSegmentSpeaker(self, index: int, label: str) -> None:
+        """Назначить автора одной фразе; пустая строка снимает метку."""
+
+        segments = self._trans_state.get("segments") or []
+        idx = int(index)
+        if idx < 0 or idx >= len(segments):
+            return
+        cleaned = " ".join(str(label or "").strip().split())
+        row = segments[idx]
+        if not cleaned:
+            row["speaker"] = ""
+            row["role"] = None
+        else:
+            found_key = None
+            for item in self._trans_state.get("speakers") or []:
+                if str(item.get("label") or "") == cleaned:
+                    found_key = int(item["key"])
+                    break
+            if found_key is None:
+                keys = [
+                    int(item["key"])
+                    for item in (self._trans_state.get("speakers") or [])
+                    if item.get("key") is not None
+                ]
+                found_key = (max(keys) if keys else 0) + 1
+            row["speaker"] = cleaned
+            row["role"] = found_key
+        self._trans_state["speakers"] = self._speaker_legend(
+            segments,
+            previous=self._trans_state.get("speakers"),
+        )
+        self._trans_state["diarization"] = bool(self._trans_state["speakers"])
+        session_id = str(self._trans_state.get("sessionId") or "")
+        seg_id = row.get("id")
+        if session_id and seg_id is not None:
+            self._write_segment_to_store(
+                session_id,
+                int(seg_id),
+                str(row.get("text") or ""),
+                str(row.get("speaker") or ""),
+            )
+        self.transcribeChanged.emit()
+
+    @Slot(int, str)
+    def setTranscriptSpeakerKind(self, key: int, kind: str) -> None:
+        """Ручной вид роли: voice|male|female → Голос/Парень/Девушка N."""
+
+        role = int(key)
+        normalized = str(kind or "voice").strip().lower()
+        if normalized not in ("voice", "male", "female"):
+            normalized = "voice"
+        speakers = self._trans_state.get("speakers") or []
+        entry = next((item for item in speakers if int(item.get("key", -1)) == role), None)
+        if entry is None:
+            return
+        entry["kind"] = normalized
+        current = str(entry.get("label") or "")
+        if is_default_speaker_label(current, role):
+            self.renameTranscriptSpeaker(role, speaker_label_for_kind(role, normalized))
+            entry["kind"] = normalized
+            return
+        self.transcribeChanged.emit()
+
+    @Slot(int, str)
     def renameTranscriptSpeaker(self, key, label):
         label = " ".join(str(label or "").strip().split())
         if not label:
@@ -3643,8 +4156,7 @@ class Controller(QObject):
                 continue
             if int(seg["role"]) == int(key):
                 seg["speaker"] = label
-        # История хранит говорящего в тексте «[Имя] фраза» - без записи
-        # переименование пропадало бы после повторного открытия сессии.
+        # История хранит говорящего отдельно или в тексте «[Имя] фраза».
         self._persist_transcript_speaker_labels()
         self.transcribeChanged.emit()
 
@@ -3657,7 +4169,9 @@ class Controller(QObject):
         session = self.store.get_session(session_id)
         if session is None or session.get("mode") != "transcript":
             return
-        by_span: dict[tuple[float, float], str] = {}
+        use_speaker = self._store_supports_speaker_column()
+        by_id: dict[int, tuple[str, str]] = {}
+        by_span: dict[tuple[float, float], tuple[str, str]] = {}
         for row in self._trans_state.get("segments") or []:
             span = (
                 round(float(row.get("start", 0.0)), 3),
@@ -3665,13 +4179,29 @@ class Controller(QObject):
             )
             body = str(row.get("text") or "").strip()
             speaker = str(row.get("speaker") or "").strip()
-            by_span[span] = f"[{speaker}] {body}" if speaker else body
+            stored = body if use_speaker else (f"[{speaker}] {body}" if speaker else body)
+            by_span[span] = (stored, speaker)
+            if row.get("id") is not None:
+                by_id[int(row["id"])] = (stored, speaker)
         for item in session.get("segments") or []:
-            span = (round(float(item["start"]), 3), round(float(item["end"]), 3))
-            new_text = by_span.get(span)
-            if new_text is None or new_text == item.get("text"):
-                continue
-            self.store.update_segment(session_id, int(item["id"]), new_text)
+            item_id = int(item["id"])
+            if item_id in by_id:
+                new_text, speaker = by_id[item_id]
+            else:
+                span = (round(float(item["start"]), 3), round(float(item["end"]), 3))
+                pair = by_span.get(span)
+                if pair is None:
+                    continue
+                new_text, speaker = pair
+            if use_speaker:
+                old_speaker = str(item.get("speaker") or "").strip()
+                if new_text == item.get("text") and speaker == old_speaker:
+                    continue
+                self.store.update_segment(session_id, item_id, new_text, speaker=speaker)
+            else:
+                if new_text == item.get("text"):
+                    continue
+                self.store.update_segment(session_id, item_id, new_text)
 
     @Slot()
     def transcriptExport(self):

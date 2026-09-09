@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from dotaudio.karaoke_align import align_words, energy_times
+from dotaudio.karaoke_align import align_words, compute_peaks, energy_times
 
 
 def _audio(seconds: float = 2.2, rate: int = 16000) -> np.ndarray:
@@ -64,3 +64,12 @@ def test_align_keeps_texts_intact_after_nudge() -> None:
     assert [w["text"] for w in out] == ["раз", "два", "три"]
     # соседняя строка уводит правый край, но не раньше предыдущей
     assert out[1]["start"] >= out[0]["end"] - 1e-6
+
+
+def test_compute_peaks_normalizes_and_reports_duration() -> None:
+    x = _audio(1.0)
+    peaks, duration = compute_peaks(x, 16000, buckets=32)
+    assert len(peaks) == 32
+    assert abs(duration - 1.0) < 0.02
+    assert max(peaks) <= 1.0 + 1e-6
+    assert min(peaks) >= 0.0

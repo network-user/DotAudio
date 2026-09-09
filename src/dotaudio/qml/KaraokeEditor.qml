@@ -149,6 +149,39 @@ Rectangle {
         var t = wordBox.text
         if (t && t.trim()) bridge.editWordText(Number(c.row.id), c.wi, t)
     }
+    function activeRow() {
+        var a = activeIndex()
+        return a < 0 ? null : segAt(a)
+    }
+    function commitPhraseText() {
+        var row = activeRow()
+        if (!row || !bridgeAvailable() || typeof bridge.editSegment !== "function") return
+        var t = phraseBox.text
+        if (t !== undefined && String(t) !== String(row.text))
+            bridge.editSegment(Number(row.id), t)
+    }
+    function commitPhraseWindow() {
+        var row = activeRow()
+        if (!row || !bridgeAvailable() || typeof bridge.setPhraseWindow !== "function") {
+            refresh(); return
+        }
+        var a = parseTime(phraseStartField.text)
+        var b = parseTime(phraseEndField.text)
+        if (!isFinite(a) || !isFinite(b)) { refresh(); return }
+        bridge.setPhraseWindow(Number(row.id), a, b)
+        refresh()
+    }
+    function setPhraseEdgePlayhead(fromStart) {
+        var row = activeRow()
+        if (!row || !bridgeAvailable() || !root.player || typeof bridge.setPhraseWindow !== "function") {
+            refresh(); return
+        }
+        var v = root.player.position / 1000
+        var a = fromStart ? v : Number(row.start)
+        var b = fromStart ? Number(row.end) : v
+        bridge.setPhraseWindow(Number(row.id), a, b)
+        refresh()
+    }
     function refresh() {
         var c = currentWord()
         if (typeof startField === "undefined") return
@@ -262,6 +295,69 @@ Rectangle {
                 font.pixelSize: Theme.fsSmall
             }
 
+            Flow {
+                width: parent.width
+                spacing: 6
+                Text {
+                    text: "фраза"
+                    color: Theme.muted
+                    font.pixelSize: Theme.fsSmall
+                }
+                TextField {
+                    id: phraseBox
+                    implicitWidth: Math.min(220, parent.width - 20)
+                    color: Theme.text
+                    font.pixelSize: Theme.fsSmall
+                    placeholderTextColor: Theme.faint
+                    background: Rectangle {
+                        radius: Theme.radiusSm
+                        color: Theme.fill
+                        border.width: phraseBox.activeFocus ? 1 : 0
+                        border.color: Theme.borderHi
+                    }
+                    onEditingFinished: root.commitPhraseText()
+                    onAccepted: root.commitPhraseText()
+                }
+                TextField {
+                    id: phraseStartField
+                    implicitWidth: 84
+                    font.family: Theme.monoFamily
+                    color: Theme.text
+                    font.pixelSize: Theme.fsSmall
+                    background: Rectangle {
+                        radius: Theme.radiusSm
+                        color: Theme.fill
+                        border.width: phraseStartField.activeFocus ? 1 : 0
+                        border.color: Theme.borderHi
+                    }
+                    onEditingFinished: root.commitPhraseWindow()
+                }
+                TextField {
+                    id: phraseEndField
+                    implicitWidth: 84
+                    font.family: Theme.monoFamily
+                    color: Theme.text
+                    font.pixelSize: Theme.fsSmall
+                    background: Rectangle {
+                        radius: Theme.radiusSm
+                        color: Theme.fill
+                        border.width: phraseEndField.activeFocus ? 1 : 0
+                        border.color: Theme.borderHi
+                    }
+                    onEditingFinished: root.commitPhraseWindow()
+                }
+                PillButton {
+                    text: "окно ←"
+                    enabled: root.activeRow() !== null && !!player
+                    onClicked: root.setPhraseEdgePlayhead(true)
+                }
+                PillButton {
+                    text: "окно →"
+                    enabled: root.activeRow() !== null && !!player
+                    onClicked: root.setPhraseEdgePlayhead(false)
+                }
+            }
+
             // Кнопки переносятся на вторую строку, а не уезжают за край:
             // панель бывает узкой, когда редактор занимает половину окна.
             Flow {
@@ -337,4 +433,11 @@ Rectangle {
             }
         }
     }
+
+    Connections {
+        target: typeof bridge !== "undefined" ? bridge : null
+        function onSegmentsChanged() { root.refresh() }
+    }
+
+    Component.onCompleted: root.refresh()
 }

@@ -34,7 +34,7 @@ Item {
     property int pixelSize: Theme.fsStageSm
     // Сколько строк держит живая строка. Место отводится заранее, поэтому
     // растущая фраза не выталкивает историю вверх на каждом черновике.
-    property int liveLines: 3
+    property int liveLines: 2
     property bool showTimes: true
     property bool reduceMotion: false
     // Цвет фона под потоком: по нему строится затухание у верхнего края.

@@ -204,11 +204,24 @@ def test_a_small_card_does_not_downgrade_a_strong_processor() -> None:
 
 
 def test_recommendation_falls_back_to_processor_memory() -> None:
-    assert llm.recommend_model(_profile(threads=16, ram_gb=32)) == "qwen3-4b"
+    # Без GPU-offload даже на сильном CPU советуем лёгкую: 4B ползёт.
+    assert llm.recommend_model(_profile(threads=16, ram_gb=32)) == "qwen3-1.7b"
     assert llm.recommend_model(_profile(threads=4, ram_gb=8)) == "qwen3-1.7b"
     assert llm.recommend_model(_profile(threads=2, ram_gb=4)) == "qwen3-1.7b"
-    # Неизвестный объём памяти не должен превращаться в ноль.
-    assert llm.recommend_model(_profile(threads=16, ram_gb=None)) == llm.DEFAULT_MODEL_ID
+    assert llm.recommend_model(_profile(threads=16, ram_gb=None)) == "qwen3-1.7b"
+
+
+def test_plan_threads_leaves_one_core_for_the_ui() -> None:
+    assert llm.plan_threads(_profile(threads=16)) == 15
+    assert llm.plan_threads(_profile(threads=2)) == 2
+    assert llm.plan_batch(_profile(offload=False)) == 256
+    assert llm.plan_batch(_profile(vram_gb=12, offload=True)) == 512
+
+
+def test_context_shrinks_without_gpu_offload() -> None:
+    model = llm.MODELS_BY_ID["qwen3-4b"]
+    assert llm.plan_context(model, _profile(ram_gb=32, offload=False)) == 4096
+    assert llm.plan_context(model, _profile(ram_gb=32, vram_gb=12, offload=True)) == model.context
 
 
 def test_recommendation_ignores_a_card_from_another_vendor_without_offload() -> None:
@@ -242,8 +255,17 @@ def test_gpu_layer_plan_is_all_or_a_share() -> None:
 
 def test_context_shrinks_on_a_small_machine() -> None:
     model = llm.MODELS_BY_ID["qwen3-4b"]
-    assert llm.plan_context(model, _profile(ram_gb=32)) == model.context
+    # Без offload контекст всегда ужат: длинный промпт на CPU дорог.
+    assert llm.plan_context(model, _profile(ram_gb=32)) == 4096
     assert llm.plan_context(model, _profile(ram_gb=6)) == 4096
+    assert llm.plan_context(model, _profile(ram_gb=32, vram_gb=12, offload=True)) == model.context
+
+
+def test_cpu_model_fit_warns_about_non_light_tiers() -> None:
+    note = llm.model_fit(llm.MODELS_BY_ID["qwen3-4b"], _profile(threads=8, ram_gb=16))
+    assert note["state"] == "slow"
+    light = llm.model_fit(llm.MODELS_BY_ID["qwen3-1.7b"], _profile(threads=8, ram_gb=16))
+    assert light["state"] == "ok"
 
 
 def test_thinking_block_is_removed_even_when_split_between_chunks() -> None:
