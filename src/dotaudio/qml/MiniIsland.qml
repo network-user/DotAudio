@@ -318,18 +318,29 @@ Rectangle {
                 spacing: 5
 
                 RowLayout {
-                    visible: root.phase === "result" || (root.dictationMode && bridge.busy && !bridge.recording)
+                    visible: root.dictationMode && bridge.busy && !bridge.recording
                     spacing: 8
                     Label {
-                        text: root.phase === "result"
-                              ? "В буфере"
-                              : (bridge.status.length ? bridge.status : "Уточняем…")
+                        text: bridge.status.length ? bridge.status : "Уточняем…"
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsSmall
+                        font.family: Theme.fontFamily
+                    }
+                }
+
+                RowLayout {
+                    // Ручная «Вставить» только вне диктовки: hotkey-диктовка
+                    // вставляет сама и закрывает остров.
+                    visible: root.phase === "result" && !root.dictationMode
+                    spacing: 8
+                    Label {
+                        text: "В буфере"
                         color: Theme.muted
                         font.pixelSize: Theme.fsSmall
                         font.family: Theme.fontFamily
                     }
                     Label {
-                        visible: root.phase === "result" && bridge.lastTranscript.length > 0
+                        visible: bridge.lastTranscript.length > 0
                         text: "Вставить"
                         color: Theme.text
                         font.pixelSize: Theme.fsSmall

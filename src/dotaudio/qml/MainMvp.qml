@@ -378,9 +378,11 @@ ApplicationWindow {
             Qt.callLater(root.refreshIslandMask)
         }
         function onDictationIslandRequested() {
-            // Отдельное Tool-окно: главный HWND не трогаем, фокус остаётся
-            // в целевом поле, повтор hotkey продолжает доходить до Desktop.
             root.showDictationIsland()
+        }
+        function onDictationIslandDismiss() {
+            dictationIsland.visible = false
+            dictationIsland.dragging = false
         }
         function onCaptureStarted(_sid, _when) {
             if (Boolean(bridge.settings.live_auto_window)
@@ -399,25 +401,29 @@ ApplicationWindow {
             if (root.shellMode === "island" && bridge.page === "dictation"
                     && (bridge.recording || bridge.busy))
                 bridge.applyIslandClickThrough(false)
-            // Держим Tool-остров, пока идёт диктовка или виден результат.
-            if (dictationIsland.visible) {
-                if (!bridge.recording && !bridge.busy && bridge.page !== "dictation")
-                    dictationIsland.visible = false
-            }
         }
     }
 
     function showDictationIsland() {
-        if (root.islandCenterX >= 0) {
-            dictationIsland.x = Math.round(root.islandCenterX - root.islandW / 2)
-            dictationIsland.y = Math.round(root.islandTopY)
-        } else {
-            dictationIsland.x = Math.round((Screen.width - root.islandW) / 2)
-            dictationIsland.y = 32
+        if (!dictationIsland.userPlaced) {
+            if (root.islandCenterX >= 0) {
+                dictationIsland.x = Math.round(root.islandCenterX - root.islandW / 2)
+                dictationIsland.y = Math.round(root.islandTopY)
+            } else {
+                dictationIsland.x = Math.round((Screen.width - root.islandW) / 2)
+                dictationIsland.y = 32
+            }
         }
         dictationIsland.visible = true
         dictationIsland.show()
         dictationIsland.raise()
+    }
+
+    function saveDictationIslandPos() {
+        dictationIsland.userPlaced = true
+        root.islandCenterX = dictationIsland.x + dictationIsland.width / 2
+        root.islandTopY = dictationIsland.y
+        bridge.saveIslandPosition(Math.round(dictationIsland.x), Math.round(dictationIsland.y))
     }
 
     // Остров диктовки. Не морфит главное окно - иначе Windows recreate HWND
@@ -430,13 +436,8 @@ ApplicationWindow {
         height: root.islandH
         color: Theme.surface
         flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
-
-        onWidthChanged: {
-            if (!visible)
-                return
-            var cx = root.islandCenterX >= 0 ? root.islandCenterX : Screen.width / 2
-            x = Math.round(cx - width / 2)
-        }
+        property bool userPlaced: false
+        property bool dragging: false
 
         MiniIsland {
             id: dictationChrome
@@ -455,7 +456,34 @@ ApplicationWindow {
             }
             onRequestModePick: { }
             onCloseModes: { }
-            onDragStarted: dictationIsland.startSystemMove()
+            onDragStarted: function (_screenX, _screenY) {
+                // Как у CaptionOverlay: DWM ведёт Tool-окно. Раньше
+                // onWidthChanged сбрасывал X и казалось, что drag «не работает».
+                dictationIsland.dragging = true
+                dictationIsland.userPlaced = true
+                dictationIsland.startSystemMove()
+            }
+        }
+
+        // Конец жеста - по отпусканию ЛКМ (MouseArea уже отдал захват системе).
+        Timer {
+            interval: 16
+            repeat: true
+            running: dictationIsland.dragging
+            onTriggered: {
+                if (bridge.primaryButtonDown())
+                    return
+                dictationIsland.dragging = false
+                root.saveDictationIslandPos()
+            }
+        }
+
+        onWidthChanged: {
+            // Пока пользователь не двигал остров - держим по центру при морфе.
+            if (!visible || dragging || userPlaced)
+                return
+            var cx = root.islandCenterX >= 0 ? root.islandCenterX : Screen.width / 2
+            x = Math.round(cx - width / 2)
         }
     }
 

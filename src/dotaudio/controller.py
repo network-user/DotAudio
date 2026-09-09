@@ -491,6 +491,7 @@ class Controller(QObject):
     islandRequested = Signal()
     # Остров диктовки - отдельное Tool-окно, без recreate главного HWND.
     dictationIslandRequested = Signal()
+    dictationIslandDismiss = Signal()
     segmentArrived = Signal(str, object)
     partialArrived = Signal(str, object)
     # sid, сегменты черновика/финала, подпись статуса прохода
@@ -3353,6 +3354,9 @@ class Controller(QObject):
         )
         if self._settings.get("auto_paste", True) and hotkey:
             QTimer.singleShot(250, self._paste)
+        # Окно диктовки закрываем после вставки (или сразу, если вставки нет).
+        QTimer.singleShot(400 if (self._settings.get("auto_paste", True) and hotkey) else 80,
+                          self.dictationIslandDismiss.emit)
         return False
 
     def _on_finished(self, sid, error, cancelled):
@@ -3370,6 +3374,8 @@ class Controller(QObject):
             empty_dictation = self._deliver_dictation_text(
                 sid, hotkey=bool(job.get("hotkey"))
             )
+            if empty_dictation:
+                QTimer.singleShot(80, self.dictationIslandDismiss.emit)
             self.store.finish_session(sid, "completed")
             if not empty_dictation:
                 self._maybe_autotitle_session(sid)
@@ -3393,6 +3399,10 @@ class Controller(QObject):
             empty_dictation = self._deliver_dictation_text(
                 sid, hotkey=bool(job.get("hotkey"))
             )
+            if empty_dictation:
+                QTimer.singleShot(80, self.dictationIslandDismiss.emit)
+        elif mode in ("dictation", "dictation_refine") and (cancelled or error):
+            QTimer.singleShot(80, self.dictationIslandDismiss.emit)
         self._finish_job_ui(
             job, error=error, cancelled=cancelled, empty_dictation=empty_dictation
         )
