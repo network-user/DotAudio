@@ -939,7 +939,7 @@ ApplicationWindow {
                 }
                 Rectangle {
                     id: gpuHintCard
-                    visible: bridge.showGpuHint && !setup.visible
+                    visible: bridge.showGpuHint && !(setup && setup.visible)
                     Layout.fillWidth: true
                     implicitHeight: gpuHintBody.implicitHeight + 2 * Theme.padCard
                     radius: Theme.radiusMd
@@ -1186,6 +1186,6 @@ ApplicationWindow {
     SetupWizard {
         anchors.fill: parent
         z: 100
-        visible: setup.visible
+        visible: setup !== null && setup !== undefined && setup.visible
     }
 }

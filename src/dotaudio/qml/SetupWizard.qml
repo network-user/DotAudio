@@ -7,18 +7,31 @@ import "Theme.js" as Theme
 Item {
     id: root
 
-    readonly property bool reduceMotion: Boolean(bridge.settings.reduce_motion)
+    // Контекст setup иногда null на кадр (async Loader, recreate HWND, teardown).
+    // Без охраны биндинги сыплют TypeError в консоль во время нормальной работы.
+    readonly property bool setupAlive: setup !== null && setup !== undefined
+    readonly property bool setupVisible: setupAlive && Boolean(setup.visible)
+    readonly property bool setupBusy: setupAlive && Boolean(setup.busy)
+    readonly property string setupPhase: setupAlive ? String(setup.phase || "") : ""
+    readonly property string setupMessage: setupAlive ? String(setup.message || "") : ""
+    readonly property string setupError: setupAlive ? String(setup.error || "") : ""
+    readonly property real setupPercent: setupAlive ? Number(setup.overallPercent || 0) : 0
+    readonly property var setupHw: (setupAlive && setup.hardware) ? setup.hardware : ({})
+    readonly property var setupBrief: (setupAlive && setup.briefing) ? setup.briefing : ({})
+    readonly property var setupSteps: (setupAlive && setup.steps) ? setup.steps : []
+    readonly property bool reduceMotion: (bridge && bridge.settings)
+                                         ? Boolean(bridge.settings.reduce_motion) : false
 
     Rectangle {
         anchors.fill: parent
         color: Theme.scrim
-        opacity: setup.visible ? 1 : 0
+        opacity: root.setupVisible ? 1 : 0
         Behavior on opacity {
             enabled: !root.reduceMotion
             NumberAnimation { duration: Theme.baseMs; easing.type: Easing.Bezier; easing.bezierCurve: Theme.easeOut }
         }
         // Блокируем клики в приложение под мастером.
-        MouseArea { anchors.fill: parent; enabled: setup.visible }
+        MouseArea { anchors.fill: parent; enabled: root.setupVisible }
     }
 
     Rectangle {
@@ -30,8 +43,8 @@ Item {
         color: Theme.surface
         border.width: 1
         border.color: Theme.borderHi
-        opacity: setup.visible ? 1 : 0
-        scale: setup.visible ? 1 : 0.96
+        opacity: root.setupVisible ? 1 : 0
+        scale: root.setupVisible ? 1 : 0.96
         Behavior on opacity {
             enabled: !root.reduceMotion
             NumberAnimation { duration: Theme.slowMs; easing.type: Easing.Bezier; easing.bezierCurve: Theme.easeOut }
@@ -55,10 +68,10 @@ Item {
                     spacing: 2
                     Label {
                         text: {
-                            if (setup.phase === "scan") return "Знакомство с устройством"
-                            if (setup.phase === "brief") return "Краткий план"
-                            if (setup.phase === "run") return "Готовим DotAudio"
-                            if (setup.phase === "done") return "Готово"
+                            if (root.setupPhase === "scan") return "Знакомство с устройством"
+                            if (root.setupPhase === "brief") return "Краткий план"
+                            if (root.setupPhase === "run") return "Готовим DotAudio"
+                            if (root.setupPhase === "done") return "Готово"
                             return "Настройка"
                         }
                         color: Theme.text
@@ -68,14 +81,14 @@ Item {
                     Label {
                         Layout.fillWidth: true
                         text: {
-                            if (setup.phase === "scan")
+                            if (root.setupPhase === "scan")
                                 return "Определяем процессор, память и доступные ускорители"
-                            if (setup.phase === "brief")
+                            if (root.setupPhase === "brief")
                                 return "Можно поправить план, затем всё скачается в фоне"
-                            if (setup.phase === "run")
-                                return setup.message || "Загрузка и подготовка…"
-                            if (setup.phase === "done")
-                                return setup.error ? setup.message : "Можно пользоваться приложением"
+                            if (root.setupPhase === "run")
+                                return root.setupMessage || "Загрузка и подготовка…"
+                            if (root.setupPhase === "done")
+                                return root.setupError ? root.setupMessage : "Можно пользоваться приложением"
                             return ""
                         }
                         color: Theme.muted
@@ -84,7 +97,7 @@ Item {
                     }
                 }
                 Icon {
-                    visible: setup.phase === "scan" || (setup.phase === "run" && setup.busy)
+                    visible: root.setupPhase === "scan" || (root.setupPhase === "run" && root.setupBusy)
                     name: "spinner"
                     width: 22
                     height: 22
@@ -93,7 +106,7 @@ Item {
 
             // ---- SCAN ----
             Item {
-                visible: setup.phase === "scan"
+                visible: root.setupPhase === "scan"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
 
@@ -118,7 +131,7 @@ Item {
                         }
                         // Мягкое дыхание кольца во время опроса.
                         SequentialAnimation on opacity {
-                            running: setup.phase === "scan" && !root.reduceMotion
+                            running: root.setupPhase === "scan" && !root.reduceMotion
                             loops: Animation.Infinite
                             NumberAnimation { from: 0.55; to: 1; duration: 900; easing.type: Easing.InOutSine }
                             NumberAnimation { from: 1; to: 0.55; duration: 900; easing.type: Easing.InOutSine }
@@ -127,7 +140,7 @@ Item {
                     Label {
                         Layout.fillWidth: true
                         horizontalAlignment: Text.AlignHCenter
-                        text: setup.message
+                        text: root.setupMessage
                         color: Theme.text
                         font.pixelSize: Theme.fsTitle
                     }
@@ -145,7 +158,7 @@ Item {
                             radius: 3
                             color: Theme.text
                             SequentialAnimation on x {
-                                running: setup.phase === "scan" && !root.reduceMotion
+                                running: root.setupPhase === "scan" && !root.reduceMotion
                                 loops: Animation.Infinite
                                 NumberAnimation {
                                     from: -scanBar.width
@@ -161,7 +174,7 @@ Item {
 
             // ---- BRIEF ----
             Flickable {
-                visible: setup.phase === "brief"
+                visible: root.setupPhase === "brief"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 contentWidth: width
@@ -193,7 +206,7 @@ Item {
                                 spacing: 1
                                 Label { text: "Процессор"; color: Theme.faint; font.pixelSize: Theme.fsMicro }
                                 Label {
-                                    text: (setup.hardware.threads || 0) + " потоков"
+                                    text: (root.setupHw.threads || 0) + " потоков"
                                     color: Theme.text
                                     font.pixelSize: Theme.fsBody
                                     font.family: Theme.monoFamily
@@ -204,7 +217,7 @@ Item {
                                 spacing: 1
                                 Label { text: "Память"; color: Theme.faint; font.pixelSize: Theme.fsMicro }
                                 Label {
-                                    text: setup.hardware.ram_gb ? (setup.hardware.ram_gb + " ГБ") : "—"
+                                    text: root.setupHw.ram_gb ? (root.setupHw.ram_gb + " ГБ") : "—"
                                     color: Theme.text
                                     font.pixelSize: Theme.fsBody
                                     font.family: Theme.monoFamily
@@ -217,7 +230,7 @@ Item {
                                 Label { text: "Ускорение"; color: Theme.faint; font.pixelSize: Theme.fsMicro }
                                 Label {
                                     Layout.fillWidth: true
-                                    text: setup.briefing.gpuLabel || setup.hardware.compute_label || "CPU"
+                                    text: root.setupBrief.gpuLabel || root.setupHw.compute_label || "CPU"
                                     color: Theme.text
                                     font.pixelSize: Theme.fsBody
                                     font.weight: Font.DemiBold
@@ -236,7 +249,7 @@ Item {
                         Layout.fillWidth: true
                         spacing: Theme.gapSm
                         Repeater {
-                            model: setup.briefing.technologies || []
+                            model: root.setupBrief.technologies || []
                             delegate: Rectangle {
                                 required property var modelData
                                 width: techLabel.implicitWidth + 20
@@ -279,32 +292,32 @@ Item {
                                 Layout.fillWidth: true
                                 spacing: 2
                                 Label {
-                                    text: setup.briefing.whisperLabel || "Whisper"
+                                    text: root.setupBrief.whisperLabel || "Whisper"
                                     color: Theme.text
                                     font.pixelSize: Theme.fsTitle
                                     font.weight: Font.DemiBold
                                 }
                                 Label {
                                     Layout.fillWidth: true
-                                    text: setup.briefing.whisperReady
+                                    text: root.setupBrief.whisperReady
                                           ? "Уже в кеше · прогреем при старте"
-                                          : ("Скачивание · ~" + (setup.briefing.whisperMb || 0) + " МБ · " + (setup.briefing.deviceLabel || ""))
+                                          : ("Скачивание · ~" + (root.setupBrief.whisperMb || 0) + " МБ · " + (root.setupBrief.deviceLabel || ""))
                                     color: Theme.muted
                                     font.pixelSize: Theme.fsSmall
                                     wrapMode: Text.Wrap
                                 }
                             }
                             ToggleSwitch {
-                                checked: Boolean(setup.briefing.downloadWhisper) || Boolean(setup.briefing.whisperReady)
-                                enabled: !Boolean(setup.briefing.whisperReady)
-                                onToggled: setup.updateBriefing({ downloadWhisper: checked })
+                                checked: Boolean(root.setupBrief.downloadWhisper) || Boolean(root.setupBrief.whisperReady)
+                                enabled: !Boolean(root.setupBrief.whisperReady)
+                                onToggled: if (setup) setup.updateBriefing({ downloadWhisper: checked })
                             }
                         }
                     }
 
                     // GPU
                     Rectangle {
-                        visible: Boolean(setup.briefing.useGpu) || String(setup.hardware.computeAdvice) === "needs_runtime" || String(setup.hardware.computeAdvice) === "ready"
+                        visible: Boolean(root.setupBrief.useGpu) || String(root.setupHw.computeAdvice) === "needs_runtime" || String(root.setupHw.computeAdvice) === "ready"
                         Layout.fillWidth: true
                         implicitHeight: gpuRow.implicitHeight + 24
                         radius: Theme.radiusMd
@@ -320,24 +333,24 @@ Item {
                                 Layout.fillWidth: true
                                 spacing: 2
                                 Label {
-                                    text: setup.briefing.cudaNeeded ? "CUDA runtime" : "Видеокарта"
+                                    text: root.setupBrief.cudaNeeded ? "CUDA runtime" : "Видеокарта"
                                     color: Theme.text
                                     font.pixelSize: Theme.fsTitle
                                     font.weight: Font.DemiBold
                                 }
                                 Label {
                                     Layout.fillWidth: true
-                                    text: setup.briefing.cudaNeeded
-                                          ? ("Поставим пакеты NVIDIA · ~" + (setup.briefing.cudaMb || 0) + " МБ")
-                                          : (setup.briefing.computeHint || "Использовать GPU для Whisper")
+                                    text: root.setupBrief.cudaNeeded
+                                          ? ("Поставим пакеты NVIDIA · ~" + (root.setupBrief.cudaMb || 0) + " МБ")
+                                          : (root.setupBrief.computeHint || "Использовать GPU для Whisper")
                                     color: Theme.muted
                                     font.pixelSize: Theme.fsSmall
                                     wrapMode: Text.Wrap
                                 }
                             }
                             ToggleSwitch {
-                                checked: Boolean(setup.briefing.useGpu)
-                                onToggled: setup.updateBriefing({ useGpu: checked })
+                                checked: Boolean(root.setupBrief.useGpu)
+                                onToggled: if (setup) setup.updateBriefing({ useGpu: checked })
                             }
                         }
                     }
@@ -359,25 +372,25 @@ Item {
                                 Layout.fillWidth: true
                                 spacing: 2
                                 Label {
-                                    text: setup.briefing.llmLabel || "Ассистент"
+                                    text: root.setupBrief.llmLabel || "Ассистент"
                                     color: Theme.text
                                     font.pixelSize: Theme.fsTitle
                                     font.weight: Font.DemiBold
                                 }
                                 Label {
                                     Layout.fillWidth: true
-                                    text: setup.briefing.llmReady
+                                    text: root.setupBrief.llmReady
                                           ? "Файл уже на диске"
-                                          : ("Локальная модель · ~" + (setup.briefing.llmMb || 0) + " МБ")
+                                          : ("Локальная модель · ~" + (root.setupBrief.llmMb || 0) + " МБ")
                                     color: Theme.muted
                                     font.pixelSize: Theme.fsSmall
                                     wrapMode: Text.Wrap
                                 }
                             }
                             ToggleSwitch {
-                                checked: Boolean(setup.briefing.downloadLlm) || Boolean(setup.briefing.llmReady)
-                                enabled: !Boolean(setup.briefing.llmReady)
-                                onToggled: setup.updateBriefing({ downloadLlm: checked })
+                                checked: Boolean(root.setupBrief.downloadLlm) || Boolean(root.setupBrief.llmReady)
+                                enabled: !Boolean(root.setupBrief.llmReady)
+                                onToggled: if (setup) setup.updateBriefing({ downloadLlm: checked })
                             }
                         }
                     }
@@ -406,24 +419,24 @@ Item {
                                 }
                                 Label {
                                     Layout.fillWidth: true
-                                    text: setup.briefing.nemoReady
+                                    text: root.setupBrief.nemoReady
                                           ? "Рантайм готов · сверим модель Sortformer"
-                                          : ("Рантайм + Sortformer · ~" + (setup.briefing.nemoMb || 0) + " МБ · для транскрибации")
+                                          : ("Рантайм + Sortformer · ~" + (root.setupBrief.nemoMb || 0) + " МБ · для транскрибации")
                                     color: Theme.muted
                                     font.pixelSize: Theme.fsSmall
                                     wrapMode: Text.Wrap
                                 }
                             }
                             ToggleSwitch {
-                                checked: Boolean(setup.briefing.downloadNemo) || Boolean(setup.briefing.nemoReady)
-                                enabled: !Boolean(setup.briefing.nemoReady)
-                                onToggled: setup.updateBriefing({ downloadNemo: checked })
+                                checked: Boolean(root.setupBrief.downloadNemo) || Boolean(root.setupBrief.nemoReady)
+                                enabled: !Boolean(root.setupBrief.nemoReady)
+                                onToggled: if (setup) setup.updateBriefing({ downloadNemo: checked })
                             }
                         }
                     }
 
                     Label {
-                        visible: !Boolean(setup.briefing.ffmpegReady) && !Boolean(setup.briefing.downloadFfmpeg)
+                        visible: !Boolean(root.setupBrief.ffmpegReady) && !Boolean(root.setupBrief.downloadFfmpeg)
                         Layout.fillWidth: true
                         text: "FFmpeg отключён: караоке-экспорт и разбор эфиров будут недоступны, пока не поставите его."
                         color: Theme.faint
@@ -455,26 +468,26 @@ Item {
                                 }
                                 Label {
                                     Layout.fillWidth: true
-                                    text: setup.briefing.ffmpegReady
+                                    text: root.setupBrief.ffmpegReady
                                           ? "Найден в PATH или в папке tools"
-                                          : ("Портативная сборка · ~" + (setup.briefing.ffmpegMb || 0) + " МБ · караоке и эфиры")
+                                          : ("Портативная сборка · ~" + (root.setupBrief.ffmpegMb || 0) + " МБ · караоке и эфиры")
                                     color: Theme.muted
                                     font.pixelSize: Theme.fsSmall
                                     wrapMode: Text.Wrap
                                 }
                             }
                             ToggleSwitch {
-                                checked: Boolean(setup.briefing.downloadFfmpeg) || Boolean(setup.briefing.ffmpegReady)
-                                enabled: !Boolean(setup.briefing.ffmpegReady)
-                                onToggled: setup.updateBriefing({ downloadFfmpeg: checked })
+                                checked: Boolean(root.setupBrief.downloadFfmpeg) || Boolean(root.setupBrief.ffmpegReady)
+                                enabled: !Boolean(root.setupBrief.ffmpegReady)
+                                onToggled: if (setup) setup.updateBriefing({ downloadFfmpeg: checked })
                             }
                         }
                     }
 
                     Label {
-                        visible: Number(setup.briefing.totalMb) > 0
+                        visible: Number(root.setupBrief.totalMb) > 0
                         Layout.fillWidth: true
-                        text: "Оценка загрузки · ~" + Math.round(Number(setup.briefing.totalMb)) + " МБ"
+                        text: "Оценка загрузки · ~" + Math.round(Number(root.setupBrief.totalMb)) + " МБ"
                         color: Theme.faint
                         font.pixelSize: Theme.fsSmall
                         font.family: Theme.monoFamily
@@ -484,7 +497,7 @@ Item {
 
             // ---- RUN / DONE ----
             ColumnLayout {
-                visible: setup.phase === "run" || setup.phase === "done"
+                visible: root.setupPhase === "run" || root.setupPhase === "done"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 spacing: Theme.gapMd
@@ -496,7 +509,7 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         Label {
-                            text: Math.round(setup.overallPercent) + "%"
+                            text: Math.round(root.setupPercent) + "%"
                             color: Theme.text
                             font.pixelSize: Theme.fsHero
                             font.weight: Font.DemiBold
@@ -504,7 +517,7 @@ Item {
                         }
                         Item { Layout.fillWidth: true }
                         Label {
-                            text: setup.message
+                            text: root.setupMessage
                             color: Theme.muted
                             font.pixelSize: Theme.fsSmall
                             elide: Text.ElideRight
@@ -517,7 +530,7 @@ Item {
                         radius: 4
                         color: Theme.fill
                         Rectangle {
-                            width: parent.width * Math.max(0, Math.min(1, setup.overallPercent / 100))
+                            width: parent.width * Math.max(0, Math.min(1, root.setupPercent / 100))
                             height: parent.height
                             radius: 4
                             color: Theme.text
@@ -534,7 +547,7 @@ Item {
                     Layout.fillHeight: true
                     clip: true
                     spacing: Theme.gapSm
-                    model: setup.steps
+                    model: root.setupSteps
                     delegate: Rectangle {
                         required property var modelData
                         width: ListView.view.width
@@ -605,9 +618,9 @@ Item {
                 }
 
                 Label {
-                    visible: setup.phase === "done" && setup.error.length > 0
+                    visible: root.setupPhase === "done" && root.setupError.length > 0
                     Layout.fillWidth: true
-                    text: setup.error
+                    text: root.setupError
                     color: Theme.muted
                     font.pixelSize: Theme.fsSmall
                     wrapMode: Text.Wrap
@@ -620,27 +633,27 @@ Item {
                 spacing: Theme.gapSm
 
                 PillButton {
-                    visible: setup.phase === "brief"
+                    visible: root.setupPhase === "brief"
                     text: "Позже"
-                    onClicked: setup.skip()
+                    onClicked: if (setup) setup.skip()
                 }
                 PillButton {
-                    visible: setup.phase === "run" && setup.busy
+                    visible: root.setupPhase === "run" && root.setupBusy
                     text: "Отмена"
-                    onClicked: setup.cancel()
+                    onClicked: if (setup) setup.cancel()
                 }
                 Item { Layout.fillWidth: true }
                 PillButton {
-                    visible: setup.phase === "brief"
+                    visible: root.setupPhase === "brief"
                     text: "Настроить автоматически"
                     primary: true
-                    onClicked: setup.confirm()
+                    onClicked: if (setup) setup.confirm()
                 }
                 PillButton {
-                    visible: setup.phase === "done"
+                    visible: root.setupPhase === "done"
                     text: "Начать работу"
                     primary: true
-                    onClicked: setup.finish()
+                    onClicked: if (setup) setup.finish()
                 }
             }
         }
