@@ -17,6 +17,7 @@ Rectangle {
     property bool playing: media.playbackState === MediaPlayer.PlayingState
     property alias position: media.position
     property alias duration: media.duration
+    property bool compact: false
     readonly property real playbackRate: media.playbackRate
     readonly property bool canRepeatPhrase: root._phraseEndSec >= 0
     readonly property bool muted: audio.muted || audio.volume <= 0.001
@@ -160,7 +161,7 @@ Rectangle {
         MediaTimeline {
             id: wave
             Layout.fillWidth: true
-            implicitHeight: 52
+            implicitHeight: root.compact ? 36 : 52
             player: media
             segments: root.segments
             peaks: root.peaks
@@ -252,6 +253,7 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             spacing: Theme.gapSm
+            visible: !root.compact
 
             IconButton {
                 iconName: root.muted ? "mute" : "volume"

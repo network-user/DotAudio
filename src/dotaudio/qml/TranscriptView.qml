@@ -56,11 +56,27 @@ Rectangle {
     readonly property string exportFormatKey: view.exportFormats[Math.max(0, Math.min(view.exportFormatIndex, view.exportFormats.length - 1))].key
     readonly property bool exportTimesForced: view.exportFormatKey === "srt" || view.exportFormatKey === "vtt"
 
-    readonly property var rows: focusKey > 0
-        ? segs.filter(function (row) { return Number(row.role) === view.focusKey })
-        : segs
+    readonly property var rows: {
+        var list = view.segs || []
+        if (view.focusKey <= 0)
+            return list
+        var out = []
+        for (var i = 0; i < list.length; ++i) {
+            if (Number(list[i].role) === view.focusKey)
+                out.push(list[i])
+        }
+        return out
+    }
     readonly property real total: Math.max(0.001, Number(bridge.transcribeState.duration || 0))
     readonly property bool hasMedia: mediaUrl.length > 0 || view.file.length > 0
+    readonly property var activePhrase: {
+        var list = view.segs || []
+        if (view.playIndex >= 0 && view.playIndex < list.length)
+            return list[view.playIndex]
+        if (view.markedIndex >= 0 && view.markedIndex < list.length)
+            return list[view.markedIndex]
+        return null
+    }
 
     Component.onCompleted: bridge.refreshDiarizeStatus()
 
@@ -318,16 +334,29 @@ Rectangle {
         // Панель выбора, запуска и движка голосов.
         Rectangle {
             Layout.fillWidth: true
-            implicitHeight: topRow.implicitHeight + 2 * Theme.padCard
+            Layout.maximumHeight: view.segs.length > 0 ? 280 : 420
+            implicitHeight: Math.min(
+                topFlick.contentHeight + 2 * Theme.padCard,
+                view.segs.length > 0 ? 280 : 420
+            )
             radius: Theme.radiusLg
             color: Theme.surface
             border.width: 1
             border.color: Theme.border
-            ColumnLayout {
-                id: topRow
+            clip: true
+            Flickable {
+                id: topFlick
                 anchors.fill: parent
                 anchors.margins: Theme.padCard
-                spacing: Theme.gapSm
+                contentWidth: width
+                contentHeight: topRow.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: ScrollBar { policy: topFlick.contentHeight > topFlick.height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff }
+                ColumnLayout {
+                    id: topRow
+                    width: topFlick.width
+                    spacing: Theme.gapSm
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: Theme.gapSm
@@ -608,13 +637,15 @@ Rectangle {
                     fileName: view.file
                     message: view.busyMessage()
                 }
-            }
+                } // topRow
+            } // topFlick
         }
 
         // Плеер исходника: доступен сразу после выбора файла, до ASR.
         TranscriptPlayer {
             id: player
             Layout.fillWidth: true
+            compact: view.segs.length > 0
             visible: view.hasMedia
             source: view.mediaUrl
             segments: view.segs
@@ -625,6 +656,61 @@ Rectangle {
             onDurationChanged: view.applyPendingSeek()
         }
 
+        // Текущая фраза синхронно со звуком - всегда над списком.
+        Rectangle {
+            Layout.fillWidth: true
+            visible: view.segs.length > 0 && view.activePhrase !== null
+            implicitHeight: nowPlayingCol.implicitHeight + 2 * Theme.padCard
+            radius: Theme.radiusLg
+            color: Theme.surface3
+            border.width: 1
+            border.color: Theme.borderHi
+            ColumnLayout {
+                id: nowPlayingCol
+                anchors.fill: parent
+                anchors.margins: Theme.padCard
+                spacing: 4
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.gapSm
+                    Label {
+                        text: player.playing ? "Сейчас звучит" : "Фраза"
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsMicro
+                        font.weight: Font.DemiBold
+                    }
+                    Label {
+                        visible: view.activePhrase && String(view.activePhrase.speaker || "").length > 0
+                        text: view.activePhrase ? String(view.activePhrase.speaker) : ""
+                        color: Theme.speakerInk(view.activePhrase ? view.activePhrase.role : 0)
+                        font.pixelSize: Theme.fsSmall
+                        font.weight: Font.DemiBold
+                    }
+                    Item { Layout.fillWidth: true }
+                    Label {
+                        visible: view.activePhrase !== null
+                        text: view.activePhrase
+                              ? (view.timecode(view.activePhrase.start) + " - "
+                                 + view.timecode(view.activePhrase.end))
+                              : ""
+                        color: Theme.faint
+                        font.family: Theme.monoFamily
+                        font.pixelSize: Theme.fsMicro
+                    }
+                }
+                Label {
+                    Layout.fillWidth: true
+                    text: view.activePhrase ? String(view.activePhrase.text || "") : ""
+                    color: Theme.text
+                    font.pixelSize: Theme.fsLead
+                    font.weight: Font.DemiBold
+                    wrapMode: Text.Wrap
+                    maximumLineCount: 4
+                    elide: Text.ElideRight
+                }
+            }
+        }
+
         Connections {
             target: bridge
             function onChanged() { view.applyPendingSeek() }
@@ -633,7 +719,8 @@ Rectangle {
         // Как включить выбранный движок, если его нет на машине.
         Rectangle {
             Layout.fillWidth: true
-            visible: view.voices.ready !== true && view.voices.checking !== true
+            visible: view.segs.length === 0
+                     && view.voices.ready !== true && view.voices.checking !== true
                      && String(view.voices.hint || "").length > 0
             implicitHeight: setupBox.implicitHeight + 2 * Theme.padCard
             radius: Theme.radiusLg
@@ -698,15 +785,19 @@ Rectangle {
         // Легенда говорящих: цвет, имя (правится), доля речи, фильтр.
         Rectangle {
             Layout.fillWidth: true
+            Layout.maximumHeight: 140
             visible: view.speakers.length > 0
-            implicitHeight: speakerBox.implicitHeight + 2 * Theme.padCard
+            implicitHeight: Math.min(140, speakerBox.implicitHeight + 2 * Theme.padCard)
             radius: Theme.radiusLg
             color: Theme.surface
             border.width: 1
             border.color: Theme.border
+            clip: true
             ColumnLayout {
                 id: speakerBox
-                anchors.fill: parent
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
                 anchors.margins: Theme.padCard
                 spacing: Theme.gapSm
 
@@ -891,10 +982,12 @@ Rectangle {
             wrapMode: Text.Wrap
         }
 
-        // Список фраз с говорящим и таймкодом.
+        // Список фраз с говорящим и таймкодом - всегда занимает оставшееся место.
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.minimumHeight: 220
+            Layout.preferredHeight: 320
             clip: true
             ColumnLayout {
                 anchors.centerIn: parent
@@ -946,7 +1039,22 @@ Rectangle {
                 spacing: Theme.gapSm
                 clip: true
                 visible: view.segs.length > 0
-                ScrollBar.vertical: ScrollBar {}
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                header: Item {
+                    width: segList.width
+                    height: phraseHead.implicitHeight + Theme.gapSm
+                    Label {
+                        id: phraseHead
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        text: "Фразы · " + view.phrases(view.rows.length)
+                              + (player.playing ? " · идут синхронно со звуком" : "")
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsLabel
+                        font.weight: Font.DemiBold
+                    }
+                }
                 delegate: Rectangle {
                     id: segCard
                     required property var modelData
