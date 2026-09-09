@@ -138,6 +138,43 @@ def test_saved_model_wins_over_the_recommendation(tmp_path: Path) -> None:
     assert assistant._active_model_id() == "qwen3-8b"
 
 
+def test_attachment_is_stored_in_message_meta(tmp_path: Path) -> None:
+    assistant = _controller(tmp_path)
+    note = tmp_path / "brief.txt"
+    note.write_text("Смета и сроки", encoding="utf-8")
+
+    assistant._load_attachment(note)
+
+    assert assistant.attachment["name"] == "brief.txt"
+    assert assistant.attachment["chars"] == len("Смета и сроки")
+    assert "text" not in assistant.attachment
+
+    meta = assistant._take_attachment_meta()
+    assistant._append("user", "О чём файл?", meta=meta)
+
+    stored = assistant.store.list_chat_messages(GENERAL_CHAT_ID)
+    assert stored[0]["content"] == "О чём файл?"
+    assert stored[0]["meta"]["attachment"]["text"] == "Смета и сроки"
+    assert assistant.attachment == {}
+
+
+def test_rename_record_updates_title_and_list(tmp_path: Path) -> None:
+    assistant = _controller(tmp_path)
+    session_id = assistant.store.create_session("Старое", "live", "mic", "small")
+    assistant.store.append_segments(
+        session_id, [{"start": 0.0, "end": 1.0, "text": "привет"}]
+    )
+    assistant._record_id = session_id
+    assistant._record = {"id": session_id, "title": "Старое"}
+    assistant._records = [{"id": session_id, "title": "Старое"}]
+
+    assistant.renameRecord("  Новое имя ")
+
+    assert assistant.recordTitle == "Новое имя"
+    assert assistant._records[0]["title"] == "Новое имя"
+    assert assistant.store.get_session(session_id)["title"] == "Новое имя"
+
+
 def test_answer_is_assembled_from_tokens_and_saved_once(tmp_path: Path) -> None:
     assistant = _controller(tmp_path)
     assistant._messages = [{"role": "user", "content": "Вопрос", "meta": {}, "pending": False}]

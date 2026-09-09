@@ -383,6 +383,12 @@ SYSTEM_CHAT = (
     "без вступлений и без списков там, где хватает двух фраз. Не выдумывай факты."
 )
 
+SYSTEM_MATERIAL = (
+    "Ты помощник в программе для расшифровки речи. Ниже приложен текстовый файл. "
+    "Отвечай по-русски, коротко и только по этому тексту. Не выдумывай факты, "
+    "которых в файле нет."
+)
+
 SYSTEM_RECORD = (
     "Ты помощник по расшифровкам записей. Отвечай по-русски своими словами и только "
     "по тем выдержкам, которые тебе дали. Не цитируй выдержки построчно и не "
@@ -819,27 +825,70 @@ class TranscriptAssistant:
 
     # -- свободный чат -----------------------------------------------------
 
-    def chat(self, question: str, history: Sequence[dict] = (), on_token=None) -> Answer:
-        """Разговор без записи: обычный чат-бот на той же модели."""
+    def chat(
+        self,
+        question: str,
+        history: Sequence[dict] = (),
+        on_token=None,
+        material: str = "",
+        material_name: str = "",
+    ) -> Answer:
+        """Разговор без записи: обычный чат-бот на той же модели.
 
-        messages: list[dict] = [{"role": "system", "content": SYSTEM_CHAT}]
-        messages.extend(_history_messages(history))
-        messages.append({"role": "user", "content": question})
+        ``material`` - текст прикреплённого файла: он идёт отдельным
+        пользовательским сообщением перед вопросом, чтобы модель видела файл
+        целиком, а не смешанный с перепиской блок.
+        """
+
+        body = (material or "").strip()
+        name = (material_name or "файл").strip() or "файл"
+        if body:
+            messages: list[dict] = [{"role": "system", "content": SYSTEM_MATERIAL}]
+            messages.extend(_history_messages(history))
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Прикреплённый файл «{name}»:\n\n{body}",
+                }
+            )
+            messages.append({"role": "user", "content": question})
+        else:
+            messages = [{"role": "system", "content": SYSTEM_CHAT}]
+            messages.extend(_history_messages(history))
+            messages.append({"role": "user", "content": question})
         options = GenerationOptions(temperature=0.5, max_tokens=900)
         text = self.respond(messages, options, on_token)
         return Answer(text=text.strip(), mode="chat")
 
 
 def _history_messages(history: Sequence[dict], limit: int = 8) -> list[dict]:
-    """Последние реплики в виде сообщений для модели."""
+    """Последние реплики в виде сообщений для модели.
+
+    Текст вложения хранится в ``meta.attachment`` и подмешивается здесь, чтобы
+    в пузыре на экране оставался только вопрос пользователя.
+    """
 
     out: list[dict] = []
     for item in list(history)[-limit:]:
         role = str(item.get("role") or "")
-        content = str(item.get("content") or "").strip()
+        content = _message_content_for_model(item)
         if role in ("user", "assistant") and content:
             out.append({"role": role, "content": content})
     return out
+
+
+def _message_content_for_model(item: dict) -> str:
+    content = str(item.get("content") or "").strip()
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    attachment = meta.get("attachment") if isinstance(meta, dict) else None
+    if not isinstance(attachment, dict):
+        return content
+    body = str(attachment.get("text") or "").strip()
+    if not body:
+        return content
+    name = str(attachment.get("name") or "файл").strip() or "файл"
+    prefix = f"Прикреплённый файл «{name}»:\n\n{body}"
+    return f"{prefix}\n\n{content}" if content else prefix
 
 
 def _recent_history(history: Sequence[dict], limit: int = 4, chars: int = 700) -> str:
@@ -852,7 +901,7 @@ def _recent_history(history: Sequence[dict], limit: int = 4, chars: int = 700) -
     rows: list[str] = []
     for item in list(history)[-limit:]:
         role = "Вы" if item.get("role") == "user" else "Помощник"
-        content = str(item.get("content") or "").strip()
+        content = _message_content_for_model(item).strip()
         if content:
             rows.append(f"{role}: {content[:chars]}")
     return "\n".join(rows)

@@ -449,6 +449,19 @@ class Store:
                 (status, _utc_now(), session_id),
             )
 
+    def rename_session(self, session_id: str, title: str) -> str:
+        """Переименовать сессию. Возвращает нормализованный заголовок."""
+
+        cleaned = " ".join(str(title or "").strip().split())
+        if not cleaned:
+            raise ValueError("title must be non-empty")
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE sessions SET title = ? WHERE id = ?",
+                (cleaned, session_id),
+            )
+        return cleaned
+
     def append_chat_message(
         self,
         session_id: str,

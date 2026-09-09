@@ -21,6 +21,7 @@ from dotaudio.capture import (
     next_live_source,
     open_live_capture,
     play_output_tone,
+    play_pcm,
     playback_device_for_loopback,
     source_for_mode,
 )
@@ -113,6 +114,8 @@ DEFAULTS = {
     "dictionary": [], "snippets": [],
     # Баннер про GPU: скрывается по кнопке или после успешной настройки.
     "gpu_hint_dismissed": False,
+    # Мастер первого запуска: опрос железа, брифинг и фоновая подготовка.
+    "setup_completed": False,
 }
 
 # Подписи движков голосов для интерфейса и журнала.
@@ -159,7 +162,12 @@ HOTKEY_OPTIONS = {
     "Ctrl+Shift+O": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, 0x4F),
     "Ctrl+Win+O": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_WIN, 0x4F),
     "Shift+Alt+Z": Hotkey(MOD_NOREPEAT | MOD_SHIFT | MOD_ALT, 0x5A),
+    "Ctrl+Alt+V": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x56),
+    "Ctrl+Shift+V": Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, 0x56),
 }
+
+# Discord-style mic check: listen a few seconds, then play the sample back.
+MIC_CHECK_SECONDS = 2.5
 
 # Переназначаемые комбинации аварийного выхода. Не пересекаются с действиями
 # из HOTKEY_OPTIONS, чтобы merge в Desktop не ругался на дубликаты.
@@ -367,6 +375,8 @@ class Controller(QObject):
     shutdownReady = Signal()
     transcribeChanged = Signal()
     transcribeStatus = Signal(str)
+    # Успешная транскрибация записана в историю: GUI обновляет списки.
+    transcriptPersisted = Signal(str)
     diarizeProbed = Signal("QVariantMap")
     gpuSetupProgress = Signal("QVariantMap")
     gpuSetupFinished = Signal("QVariantMap")
@@ -429,7 +439,7 @@ class Controller(QObject):
             "phase": "idle", "stage": "", "file": "", "path": "",
             "error": "", "speakers": [], "diarization": False,
             "engine": "", "engineNote": "", "duration": 0.0,
-            "segments": [],
+            "segments": [], "sessionId": "",
         }
         self._trans_cancel = threading.Event()
         # Опрос рантайма NeMo - запуск процесса, поэтому он делается один раз
@@ -507,6 +517,7 @@ class Controller(QObject):
         self.segmentArrived.connect(self._on_segment)
         self.partialArrived.connect(self._on_partial)
         self.jobFinished.connect(self._on_finished)
+        self.transcriptPersisted.connect(self._on_transcript_persisted)
         self.statusArrived.connect(self._set_status)
         self.levelArrived.connect(self._set_level)
         self.captureStarted.connect(self._on_capture_started)
@@ -1120,7 +1131,7 @@ class Controller(QObject):
             "caption_overlay", "auto_paste", "dictate_hold", "island_click_through",
             "island_snap", "caption_autohide", "caption_locked", "reduce_motion",
             "live_auto_window", "live_show_times", "live_locked",
-            "live_greedy_finals", "gpu_hint_dismissed",
+            "live_greedy_finals", "gpu_hint_dismissed", "setup_completed",
         ):
             value = bool(value)
         if name in ("caption_x", "caption_y", "caption_screen"):
@@ -1261,30 +1272,45 @@ class Controller(QObject):
             return live_engine_label("vosk", "", str(self._settings.get("vosk_size") or "small"))
         return live_engine_label("whisper", str(self._settings.get("model") or ""))
 
-    @Slot(str, str)
-    def setHotkeys(self, dictate, island):
-        if self._jobs:
-            return
-        paste_last = HOTKEY_OPTIONS.get(str(self._settings.get("paste_last_hotkey") or "Shift+Alt+Z"))
+    def _apply_hotkey_bindings(self, dictate: str, island: str, paste_last: str) -> bool:
         bindings = {
             "dictate": HOTKEY_OPTIONS.get(str(dictate)),
             "island": HOTKEY_OPTIONS.get(str(island)),
-            "paste_last": paste_last,
+            "paste_last": HOTKEY_OPTIONS.get(str(paste_last)),
         }
         if None in bindings.values() or len({(item.modifiers, item.key) for item in bindings.values()}) != 3:
-            self._notice = "Выберите две разные поддерживаемые комбинации."
+            self._notice = "Выберите разные поддерживаемые комбинации для диктовки, острова и вставки."
             self.changed.emit()
-            return
+            return False
         if not self.desktop.set_hotkeys(bindings):
             self._notice = "Комбинация занята другой программой. Прежние hotkey сохранены."
             self.changed.emit()
-            return
+            return False
         self._settings["dictate_hotkey"] = str(dictate)
         self._settings["island_hotkey"] = str(island)
+        self._settings["paste_last_hotkey"] = str(paste_last)
         self.store.save_settings(self._settings)
         self._notice = "Горячие клавиши обновлены."
         self._record_log("success", "Горячие клавиши переназначены.")
         self.changed.emit()
+        return True
+
+    @Slot(str, str)
+    def setHotkeys(self, dictate, island):
+        if self._jobs:
+            return
+        paste_last = str(self._settings.get("paste_last_hotkey") or "Shift+Alt+Z")
+        self._apply_hotkey_bindings(str(dictate), str(island), paste_last)
+
+    @Slot(str)
+    def setPasteHotkey(self, paste_last):
+        if self._jobs:
+            return
+        self._apply_hotkey_bindings(
+            str(self._settings.get("dictate_hotkey") or "Ctrl+Alt+Space"),
+            str(self._settings.get("island_hotkey") or "Ctrl+Alt+O"),
+            str(paste_last),
+        )
 
     def _save_local_rules(self, key, entries):
         self._settings[key] = entries
@@ -1531,6 +1557,18 @@ class Controller(QObject):
     def set_window(self, window):
         self._window = window
 
+    @Slot()
+    def refreshWindowChrome(self):
+        """Re-apply dark native title bar after the HWND is recreated."""
+        if self._window is None:
+            return
+        try:
+            from dotaudio.branding import apply_dark_titlebar
+
+            apply_dark_titlebar(int(self._window.winId()))
+        except (RuntimeError, TypeError, ValueError):
+            return
+
     def _apply_click_through(self, enabled):
         if self._window is None:
             return
@@ -1573,6 +1611,8 @@ class Controller(QObject):
     def _on_device_test_level(self, level):
         if not self._testing_device:
             return
+        if self._device_test.get("phase") == "playing":
+            return
         self._device_test = {
             "phase": "listening",
             "message": "Получаем уровень с микрофона. Запись не сохраняется.",
@@ -1581,14 +1621,102 @@ class Controller(QObject):
         self.changed.emit()
 
     def _on_device_test_finished(self, phase, message):
-        self._testing_device = False
+        # «playing» - промежуточный этап Discord-проверки микрофона:
+        # запись уже есть, идёт прослушивание, новый тест ещё нельзя.
+        self._testing_device = phase == "playing"
         self._device_test = {"phase": phase, "message": message, "level": 0.0}
-        self._record_log("success" if phase == "ready" else "error", message)
+        if phase != "playing":
+            self._record_log("success" if phase == "ready" else "error", message)
         self.changed.emit()
 
     @Slot()
     def testMicrophone(self):
-        self._test_capture("microphone")
+        """Discord-style mic check: meter while speaking, then hear yourself."""
+
+        if self._jobs or self._testing_device:
+            return
+        self._testing_device = True
+        self._device_test = {
+            "phase": "starting",
+            "message": "Говорите в микрофон несколько секунд…",
+            "level": 0.0,
+        }
+        self._record_log("info", "Запущена проверка микрофона с прослушиванием.")
+        self.changed.emit()
+
+        settings = dict(self._settings)
+
+        def test():
+            errors: list[str] = []
+            levels: list[float] = []
+            chunks: list = []
+
+            def on_level(level: float) -> None:
+                levels.append(float(level))
+                self.deviceTestLevelArrived.emit(level)
+
+            def on_audio(audio) -> None:
+                chunks.append(audio.copy())
+
+            capture = open_live_capture(
+                "microphone",
+                settings,
+                on_audio=on_audio,
+                on_level=on_level,
+                on_error=errors.append,
+            )
+            try:
+                capture.start()
+                started = capture.running
+                deadline = time.monotonic() + MIC_CHECK_SECONDS
+                while capture.running and time.monotonic() < deadline:
+                    time.sleep(0.05)
+            except Exception as exc:
+                errors.append(str(exc))
+                started = False
+            finally:
+                capture.stop()
+
+            if errors:
+                self.deviceTestFinished.emit("error", errors[-1])
+                return
+            if not started:
+                self.deviceTestFinished.emit("error", "Микрофон остановился до завершения проверки.")
+                return
+            peak = max(levels, default=0.0)
+            if peak < 0.001 or not chunks:
+                self.deviceTestFinished.emit(
+                    "silent",
+                    "Микрофон открыт, но сигнал нулевой. Выберите другое устройство "
+                    "или разрешите доступ в Параметры Windows → Конфиденциальность → Микрофон.",
+                )
+                return
+
+            import numpy as np
+
+            sample = np.concatenate(chunks).astype(np.float32, copy=False)
+            raw_out = str(settings.get("output_device") or "")
+            out_device = int(raw_out) if raw_out.isdigit() else None
+            self.deviceTestLevelArrived.emit(0.0)
+            try:
+                # Сообщение до play: иначе UI не успеет сменить подпись.
+                self.deviceTestFinished.emit(
+                    "playing",
+                    f"Воспроизводим сказанное (пик {peak:.3f})…",
+                )
+                play_pcm(sample, device=out_device, samplerate=SAMPLE_RATE)
+            except Exception as exc:
+                self.deviceTestFinished.emit(
+                    "ready",
+                    f"Микрофон отвечает (пик {peak:.3f}), но прослушать не удалось: {exc}",
+                )
+                return
+            self.deviceTestFinished.emit(
+                "ready",
+                f"Микрофон работает. Пик {peak:.3f}. Если голос слышен криво - выберите другое устройство.",
+            )
+
+        threading.Thread(target=test, name="dotaudio-mic-check", daemon=True).start()
 
     @Slot()
     def testLiveSource(self):
@@ -2564,6 +2692,11 @@ class Controller(QObject):
         self._history = self.store.list_sessions(query)
         self.changed.emit()
 
+    def _on_transcript_persisted(self, _session_id: str) -> None:
+        """Обновить список истории после сохранения страницы «Транскрибация»."""
+
+        self.refreshHistory(self._query)
+
     @Slot(str)
     def openSession(self, sid):
         if self._jobs:
@@ -2580,15 +2713,102 @@ class Controller(QObject):
             self._session_mode = session["mode"]
             self._session_title = session["title"]
             source = session["source"]
-            is_media = session["mode"] == "media"
+            is_media = session["mode"] in ("media", "transcript")
             self._media_url = QUrl.fromLocalFile(source).toString() if is_media and Path(source).is_file() else ""
             if is_media and source and not self._media_url:
                 self._notice = "Исходный медиафайл не найден. Расшифровку всё ещё можно редактировать и экспортировать."
-            self._page = session["mode"] if session["mode"] in (
-                "dictation", "live", "media", "monitor"
-            ) else "history"
+            if session["mode"] == "transcript":
+                self._open_transcript_session(session)
+            else:
+                self._page = session["mode"] if session["mode"] in (
+                    "dictation", "live", "media", "monitor"
+                ) else "history"
             self._status = session["title"]
             self.changed.emit()
+
+    def _open_transcript_session(self, session: dict) -> None:
+        """Восстановить страницу «Транскрибация» из сохранённой сессии."""
+
+        source = str(session.get("source") or "")
+        rows = []
+        for segment in session.get("segments") or []:
+            text = str(segment.get("text") or "").strip()
+            speaker = ""
+            if text.startswith("[") and "]" in text:
+                label, rest = text[1:].split("]", 1)
+                if label.strip():
+                    speaker = label.strip()
+                    text = rest.strip()
+            rows.append(
+                {
+                    "id": segment.get("id"),
+                    "start": float(segment.get("start", 0.0)),
+                    "end": float(segment.get("end", 0.0)),
+                    "text": text,
+                    "speaker": speaker,
+                    "role": None,
+                    "words": segment.get("words") or [],
+                }
+            )
+        self._trans_state.update(
+            {
+                "phase": "done",
+                "stage": "",
+                "path": source if Path(source).is_file() else "",
+                "file": session.get("title") or Path(source).name,
+                "error": "",
+                "speakers": [],
+                "segments": rows,
+                "diarization": any(row.get("speaker") for row in rows),
+                "engine": "",
+                "engineNote": "Открыто из истории",
+                "duration": max((float(row.get("end", 0.0)) for row in rows), default=0.0),
+                "sessionId": session.get("id") or "",
+            }
+        )
+        # Легенда говорящих из подписей в тексте, без ролей движка.
+        legend: dict[str, dict] = {}
+        for row in rows:
+            label = str(row.get("speaker") or "").strip()
+            if not label:
+                continue
+            entry = legend.setdefault(
+                label,
+                {"key": len(legend) + 1, "label": label, "count": 0, "seconds": 0.0},
+            )
+            entry["count"] += 1
+            entry["seconds"] += max(
+                0.0, float(row.get("end", 0.0)) - float(row.get("start", 0.0))
+            )
+            row["role"] = entry["key"]
+        self._trans_state["speakers"] = [
+            {**item, "seconds": round(item["seconds"], 1)}
+            for item in sorted(legend.values(), key=lambda item: item["key"])
+        ]
+        self._page = "transcript"
+        self.transcribeChanged.emit()
+
+    @Slot(str, str)
+    def renameSession(self, sid, title):
+        """Переименовать сессию в истории и на активной странице."""
+
+        session_id = str(sid or "")
+        if not session_id:
+            return
+        try:
+            cleaned = self.store.rename_session(session_id, title)
+        except ValueError:
+            self._notice = "Заголовок не может быть пустым."
+            self.changed.emit()
+            return
+        if self._session_id == session_id:
+            self._session_title = cleaned
+            self._status = cleaned
+        if self._trans_state.get("sessionId") == session_id:
+            self._trans_state["file"] = cleaned
+            self.transcribeChanged.emit()
+        self.refreshHistory(self._query)
+        self.changed.emit()
 
     @Slot(int, str)
     def editSegment(self, segment_id, text):
@@ -2998,7 +3218,8 @@ class Controller(QObject):
         self.transcribeStatus.emit("Файл выбран. Нажмите «Транскрибировать».")
         self._trans_state.update({"phase": "idle", "stage": "", "path": path,
                                   "file": str(Path(path).name), "error": "", "speakers": [],
-                                  "segments": [], "engine": "", "engineNote": "", "duration": 0.0})
+                                  "segments": [], "engine": "", "engineNote": "", "duration": 0.0,
+                                  "sessionId": ""})
         self.transcribeChanged.emit()
 
     @Slot(str)
@@ -3015,7 +3236,8 @@ class Controller(QObject):
             return
         self._trans_state.update({"phase": "idle", "stage": "", "path": str(media),
                                   "file": media.name, "error": "", "speakers": [],
-                                  "segments": [], "engine": "", "engineNote": "", "duration": 0.0})
+                                  "segments": [], "engine": "", "engineNote": "", "duration": 0.0,
+                                  "sessionId": ""})
         self.transcribeChanged.emit()
 
     @Slot()
@@ -3031,7 +3253,8 @@ class Controller(QObject):
         self._trans_cancel.clear()
         state = self._trans_state
         state.update({"phase": "working", "stage": "asr", "error": "", "segments": [],
-                      "speakers": [], "diarization": False, "engine": "", "engineNote": ""})
+                      "speakers": [], "diarization": False, "engine": "", "engineNote": "",
+                      "sessionId": ""})
         self._record_log("info", f"Транскрибация (локально): {Path(path).name}")
         self.transcribeChanged.emit()
 
@@ -3048,6 +3271,8 @@ class Controller(QObject):
             else:
                 state["error"] = text if text.startswith("Ошибка") else ""
                 state["phase"] = "idle" if state["error"] else "done"
+                if not state["error"] and state.get("sessionId"):
+                    self.transcriptPersisted.emit(str(state["sessionId"]))
             self.transcribeChanged.emit()
 
         threading.Thread(target=process, name="dotaudio-transcribe", daemon=True).start()
@@ -3086,7 +3311,45 @@ class Controller(QObject):
         state["engine"] = engine
         state["engineNote"] = note
         state["duration"] = max((float(row.get("end", 0.0)) for row in rows), default=0.0)
+        session_id = self._persist_transcript(path, rows)
+        state["sessionId"] = session_id
         return ""
+
+    def _persist_transcript(self, path: str, rows: list[dict]) -> str:
+        """Записать результат страницы «Транскрибация» в историю.
+
+        Без этого расшифровка жила только в оперативной памяти и пропадала
+        после смены файла или перезапуска. Говорящий сохраняется в тексте
+        сегмента: схема segments не знает отдельного поля speaker.
+        """
+
+        media = Path(path)
+        payload: list[dict] = []
+        for row in rows:
+            text = str(row.get("text") or "").strip()
+            if not text:
+                continue
+            speaker = str(row.get("speaker") or "").strip()
+            payload.append(
+                {
+                    "start": float(row.get("start", 0.0)),
+                    "end": float(row.get("end", 0.0)),
+                    "text": f"[{speaker}] {text}" if speaker else text,
+                    "words": row.get("words") or [],
+                }
+            )
+        if not payload:
+            return ""
+        session_id = self.store.create_session(
+            media.name,
+            "transcript",
+            str(media),
+            str(self._settings.get("model") or "small"),
+        )
+        self.store.append_segments(session_id, payload)
+        self.store.finish_session(session_id, "completed")
+        self.transcribeStatus.emit(f"Готово. Сохранено в историю: {media.name}")
+        return session_id
 
     def _identify_voices(self, path: str, segments: list[dict]) -> tuple[list[dict], str, str]:
         """Определить говорящих выбранным движком.
@@ -3193,7 +3456,7 @@ class Controller(QObject):
         self._trans_state.update({"phase": "idle", "stage": "", "file": "", "path": "",
                                   "error": "", "speakers": [], "segments": [],
                                   "diarization": False, "engine": "", "engineNote": "",
-                                  "duration": 0.0})
+                                  "duration": 0.0, "sessionId": ""})
         self.transcribeChanged.emit()
 
     @Slot(int, str)

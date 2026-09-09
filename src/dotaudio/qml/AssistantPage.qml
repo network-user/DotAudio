@@ -321,6 +321,7 @@ Item {
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 1
+                    visible: !titleEditor.visible
                     Label {
                         text: assistant.recordTitle
                         color: Theme.text
@@ -334,6 +335,43 @@ Item {
                         color: Theme.muted
                         font.pixelSize: Theme.fsSmall
                     }
+                }
+                TextField {
+                    id: titleEditor
+                    Layout.fillWidth: true
+                    visible: false
+                    text: assistant.recordTitle
+                    color: Theme.text
+                    font.pixelSize: Theme.fsBody
+                    selectByMouse: true
+                    selectionColor: Theme.fillPress
+                    selectedTextColor: Theme.text
+                    Keys.onReturnPressed: root.saveRecordTitle()
+                    Keys.onEnterPressed: root.saveRecordTitle()
+                    Keys.onEscapePressed: visible = false
+                    background: Rectangle {
+                        radius: Theme.radiusSm
+                        color: Theme.fill
+                        border.width: 1
+                        border.color: Theme.borderHi
+                    }
+                }
+                IconButton {
+                    visible: assistant.recordId !== ""
+                    iconName: titleEditor.visible ? "check" : "edit"
+                    enabled: !assistant.busy
+                    onClicked: {
+                        if (titleEditor.visible)
+                            root.saveRecordTitle()
+                        else {
+                            titleEditor.text = assistant.recordTitle
+                            titleEditor.visible = true
+                            titleEditor.forceActiveFocus()
+                            titleEditor.selectAll()
+                        }
+                    }
+                    ToolTip.visible: hovered
+                    ToolTip.text: titleEditor.visible ? "Сохранить название" : "Переименовать запись"
                 }
                 PillButton {
                     compact: true
@@ -456,56 +494,89 @@ Item {
                         function onMessagesChanged() { chat.positionViewAtEnd() }
                     }
                     delegate: Item {
+                        id: bubbleRow
                         required property var modelData
                         required property int index
                         readonly property bool mine: modelData.role === "user"
+                        readonly property var fileMeta: (modelData.meta && modelData.meta.attachment)
+                                                       ? modelData.meta.attachment : null
                         width: chat.width
                         implicitHeight: bubble.implicitHeight
 
                         Rectangle {
                             id: bubble
-                            width: Math.min(parent.width * 0.86, Math.max(120, body.implicitWidth + 28))
-                            implicitHeight: body.implicitHeight + 22
-                            anchors.right: parent.mine ? parent.right : undefined
-                            anchors.left: parent.mine ? undefined : parent.left
+                            width: Math.min(parent.width * 0.86, Math.max(120, bodyCol.implicitWidth + 28))
+                            implicitHeight: bodyCol.implicitHeight + 22
+                            anchors.right: bubbleRow.mine ? parent.right : undefined
+                            anchors.left: bubbleRow.mine ? undefined : parent.left
                             radius: Theme.radiusMd
-                            color: parent.mine ? Theme.fillHi : Theme.surface2
+                            color: bubbleRow.mine ? Theme.fillHi : Theme.surface2
                             border.width: 1
-                            border.color: parent.mine ? Theme.border : Theme.hairline
+                            border.color: bubbleRow.mine ? Theme.border : Theme.hairline
 
-                            TextEdit {
-                                id: body
+                            ColumnLayout {
+                                id: bodyCol
                                 anchors.left: parent.left
                                 anchors.right: parent.right
                                 anchors.top: parent.top
                                 anchors.margins: 11
-                                readOnly: true
-                                selectByMouse: true
-                                selectionColor: Theme.fillPress
-                                selectedTextColor: Theme.text
-                                wrapMode: TextEdit.Wrap
-                                // Недопечатанный ответ берётся из pendingReply:
-                                // список сообщений при потоке токенов не
-                                // пересобирается.
-                                text: {
-                                    if (modelData.pending)
-                                        return assistant.pendingReply.length
-                                               ? assistant.pendingReply
-                                               : (assistant.stage.length ? assistant.status : "…")
-                                    if (modelData.content && modelData.content.length)
-                                        return modelData.content
-                                    return assistant.stage.length ? assistant.status : "…"
+                                spacing: Theme.gapXs
+
+                                Rectangle {
+                                    visible: bubbleRow.fileMeta !== null
+                                    Layout.fillWidth: true
+                                    implicitHeight: attachLabel.implicitHeight + 12
+                                    radius: Theme.radiusSm
+                                    color: Theme.fill
+                                    border.width: 1
+                                    border.color: Theme.hairline
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.margins: 6
+                                        spacing: 6
+                                        Icon { name: "attach"; width: 12; height: 12; ink: Theme.muted }
+                                        Label {
+                                            id: attachLabel
+                                            Layout.fillWidth: true
+                                            text: bubbleRow.fileMeta
+                                                  ? (bubbleRow.fileMeta.name + " · "
+                                                     + bubbleRow.fileMeta.chars + " симв.")
+                                                  : ""
+                                            color: Theme.muted
+                                            font.pixelSize: Theme.fsMicro
+                                            elide: Text.ElideMiddle
+                                        }
+                                    }
                                 }
-                                color: (modelData.pending
-                                        ? assistant.pendingReply.length
-                                        : (modelData.content && modelData.content.length))
-                                       ? Theme.text : Theme.muted
-                                font.family: Theme.fontFamily
-                                font.pixelSize: Theme.fsBody
+
+                                TextEdit {
+                                    id: body
+                                    Layout.fillWidth: true
+                                    readOnly: true
+                                    selectByMouse: true
+                                    selectionColor: Theme.fillPress
+                                    selectedTextColor: Theme.text
+                                    wrapMode: TextEdit.Wrap
+                                    text: {
+                                        if (modelData.pending)
+                                            return assistant.pendingReply.length
+                                                   ? assistant.pendingReply
+                                                   : (assistant.stage.length ? assistant.status : "…")
+                                        if (modelData.content && modelData.content.length)
+                                            return modelData.content
+                                        return assistant.stage.length ? assistant.status : "…"
+                                    }
+                                    color: (modelData.pending
+                                            ? assistant.pendingReply.length
+                                            : (modelData.content && modelData.content.length))
+                                           ? Theme.text : Theme.muted
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fsBody
+                                }
                             }
                         }
                         IconButton {
-                            visible: !parent.mine && !assistant.busy
+                            visible: !bubbleRow.mine && !assistant.busy
                                      && modelData.content && modelData.content.length > 0
                             anchors.left: bubble.right
                             anchors.leftMargin: 4
@@ -523,62 +594,124 @@ Item {
             // записи бывает длиннее одной строки.
             Card {
                 Layout.fillWidth: true
-                Layout.preferredHeight: Math.min(140, Math.max(56, input.implicitHeight + 24))
-                RowLayout {
+                Layout.preferredHeight: inputColumn.implicitHeight + 20
+                ColumnLayout {
+                    id: inputColumn
                     anchors.fill: parent
                     anchors.margins: 10
-                    spacing: Theme.gapSm
-                    ScrollView {
+                    spacing: Theme.gapXs
+
+                    Rectangle {
+                        visible: assistant.attachment.name !== undefined
+                                 && String(assistant.attachment.name || "").length > 0
                         Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        TextArea {
-                            id: input
-                            objectName: "assistantInput"
-                            placeholderText: assistant.recordId === ""
-                                             ? "Спросите что угодно"
-                                             : "Спросите о записи: о чём говорили, что решили, когда прозвучало…"
-                            placeholderTextColor: Theme.faint
-                            color: Theme.text
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.fsBody
-                            wrapMode: TextEdit.Wrap
-                            selectByMouse: true
-                            selectionColor: Theme.fillPress
-                            selectedTextColor: Theme.text
-                            background: null
-                            enabled: !assistant.busy
-                            Keys.onReturnPressed: function (event) {
-                                if (event.modifiers & Qt.ShiftModifier) {
-                                    event.accepted = false
-                                    return
-                                }
-                                event.accepted = true
-                                root.send()
+                        implicitHeight: pendingAttach.implicitHeight + 10
+                        radius: Theme.radiusSm
+                        color: Theme.fill
+                        border.width: 1
+                        border.color: Theme.hairline
+                        RowLayout {
+                            id: pendingAttach
+                            anchors.fill: parent
+                            anchors.leftMargin: 8
+                            anchors.rightMargin: 4
+                            spacing: 6
+                            Icon { name: "attach"; width: 13; height: 13; ink: Theme.muted }
+                            Label {
+                                Layout.fillWidth: true
+                                text: (assistant.attachment.name || "")
+                                      + " · " + (assistant.attachment.chars || 0) + " симв."
+                                      + (assistant.attachment.truncated ? " (обрезан)" : "")
+                                color: Theme.muted
+                                font.pixelSize: Theme.fsMicro
+                                elide: Text.ElideMiddle
+                            }
+                            IconButton {
+                                iconName: "close"
+                                onClicked: assistant.clearAttachment()
+                                ToolTip.visible: hovered
+                                ToolTip.text: "Убрать файл"
                             }
                         }
                     }
-                    PillButton {
-                        Layout.alignment: Qt.AlignBottom
-                        visible: !assistant.busy
-                        primary: true
-                        text: "Спросить"
-                        enabled: assistant.modelReady && input.text.trim().length > 0
-                        onClicked: root.send()
-                    }
-                    PillButton {
-                        Layout.alignment: Qt.AlignBottom
-                        visible: assistant.busy
-                        text: "Стоп"
-                        onClicked: assistant.stop()
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.gapSm
+                        IconButton {
+                            Layout.alignment: Qt.AlignBottom
+                            iconName: "attach"
+                            enabled: !assistant.busy
+                            onClicked: assistant.attachTextFile()
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Прикрепить .txt"
+                        }
+                        ScrollView {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Math.min(100, Math.max(36, input.implicitHeight))
+                            TextArea {
+                                id: input
+                                objectName: "assistantInput"
+                                placeholderText: assistant.recordId === ""
+                                                 ? "Спросите что угодно или прикрепите .txt"
+                                                 : "Спросите о записи: о чём говорили, что решили, когда прозвучало…"
+                                placeholderTextColor: Theme.faint
+                                color: Theme.text
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.fsBody
+                                wrapMode: TextEdit.Wrap
+                                selectByMouse: true
+                                selectionColor: Theme.fillPress
+                                selectedTextColor: Theme.text
+                                background: null
+                                enabled: !assistant.busy
+                                Keys.onReturnPressed: function (event) {
+                                    if (event.modifiers & Qt.ShiftModifier) {
+                                        event.accepted = false
+                                        return
+                                    }
+                                    event.accepted = true
+                                    root.send()
+                                }
+                            }
+                        }
+                        PillButton {
+                            Layout.alignment: Qt.AlignBottom
+                            visible: !assistant.busy
+                            primary: true
+                            text: "Спросить"
+                            enabled: assistant.modelReady && (
+                                input.text.trim().length > 0
+                                || (assistant.attachment.name
+                                    && String(assistant.attachment.name).length > 0)
+                            )
+                            onClicked: root.send()
+                        }
+                        PillButton {
+                            Layout.alignment: Qt.AlignBottom
+                            visible: assistant.busy
+                            text: "Стоп"
+                            onClicked: assistant.stop()
+                        }
                     }
                 }
             }
         }
     }
 
+    function saveRecordTitle() {
+        var value = titleEditor.text.trim()
+        titleEditor.visible = false
+        if (!value.length || value === assistant.recordTitle)
+            return
+        assistant.renameRecord(value)
+    }
+
     function send() {
         var text = input.text.trim()
-        if (!text.length)
+        var hasFile = assistant.attachment.name
+                      && String(assistant.attachment.name).length > 0
+        if (!text.length && !hasFile)
             return
         assistant.ask(text)
         input.clear()

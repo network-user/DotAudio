@@ -214,6 +214,18 @@ def test_chat_rejects_an_unknown_role(tmp_path: Path) -> None:
         store.append_chat_message("rec", "robot", "текст")
 
 
+def test_rename_session_updates_title(tmp_path: Path) -> None:
+    store = Store(tmp_path / "dotaudio.sqlite3")
+    session_id = store.create_session("Старое имя", "transcript", "file.wav", "small")
+
+    cleaned = store.rename_session(session_id, "  Новое   имя  ")
+
+    assert cleaned == "Новое имя"
+    assert store.get_session(session_id)["title"] == "Новое имя"
+    with pytest.raises(ValueError):
+        store.rename_session(session_id, "   ")
+
+
 def test_digests_are_replaced_per_part_and_keep_the_text_hash(tmp_path: Path) -> None:
     store = Store(tmp_path / "dotaudio.sqlite3")
 

@@ -106,3 +106,50 @@ def test_cancel_during_diarization_is_not_reported_as_a_failure():
     assert engine == ""
     assert note == ""
     assert stub.logs == []
+
+
+def test_persist_transcript_writes_history_session(tmp_path):
+    """Страница транскрибации должна сохранять результат в history.db."""
+
+    from pathlib import Path
+
+    from dotaudio.controller import Controller
+    from dotaudio.storage import Store
+
+    class _PersistStub:
+        _persist_transcript = Controller._persist_transcript
+
+        def __init__(self):
+            self.store = Store(tmp_path / "history.db")
+            self._settings = {"model": "small"}
+            self.statuses = []
+            self.transcribeStatus = _Signal()
+
+        def _emit_status(self, text):
+            self.statuses.append(text)
+
+    stub = _PersistStub()
+    # _persist_transcript вызывает self.transcribeStatus.emit(...)
+    original_emit = stub.transcribeStatus.emit
+
+    def capture(text):
+        stub.statuses.append(text)
+        original_emit(text)
+
+    stub.transcribeStatus.emit = capture
+    path = Path(tmp_path) / "meeting.wav"
+    path.write_bytes(b"")
+    rows = [
+        {"start": 0.0, "end": 1.5, "text": "привет", "speaker": "Человек 1", "words": []},
+        {"start": 1.5, "end": 3.0, "text": "мир", "speaker": "", "words": []},
+    ]
+
+    session_id = stub._persist_transcript(str(path), rows)
+
+    session = stub.store.get_session(session_id)
+    assert session is not None
+    assert session["mode"] == "transcript"
+    assert session["title"] == "meeting.wav"
+    assert session["segments"][0]["text"] == "[Человек 1] привет"
+    assert session["segments"][1]["text"] == "мир"
+    assert any("истори" in text.casefold() for text in stub.statuses)

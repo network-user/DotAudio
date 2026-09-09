@@ -413,6 +413,44 @@ def test_free_chat_does_not_mention_a_record() -> None:
     assert "Выдержки" not in model.prompts[-1]
 
 
+def test_free_chat_includes_attached_text_file() -> None:
+    seen = []
+
+    def respond(messages, options, on_token=None):
+        seen.append(messages)
+        return "В файле смета"
+
+    helper = TranscriptAssistant(respond=respond, context_tokens=8192)
+    answer = helper.chat(
+        "О чём файл?",
+        material="Смета выросла до 3 млн.",
+        material_name="notes.txt",
+    )
+
+    assert answer.mode == "chat"
+    assert answer.text == "В файле смета"
+    assert "notes.txt" in seen[0][-2]["content"]
+    assert "Смета выросла" in seen[0][-2]["content"]
+    assert seen[0][-1]["content"] == "О чём файл?"
+
+
+def test_history_keeps_attachment_text_for_the_model() -> None:
+    rows = core._history_messages(
+        [
+            {
+                "role": "user",
+                "content": "Суммируй",
+                "meta": {
+                    "attachment": {"name": "a.txt", "text": "Текст файла", "chars": 11}
+                },
+            }
+        ]
+    )
+
+    assert "Текст файла" in rows[0]["content"]
+    assert "Суммируй" in rows[0]["content"]
+
+
 def test_cancel_stops_building_the_map() -> None:
     chunks = build_chunks(_segments(8, step=60.0), target_seconds=120.0)
     cancel = threading.Event()

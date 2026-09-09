@@ -17,7 +17,7 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import Property, QObject, QTimer, Signal, Slot
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 from dotaudio import assistant as core
 from dotaudio import hardware, llm, modelhub
@@ -31,6 +31,8 @@ MODEL_IDLE_RELEASE_MS = 10 * 60 * 1000
 # Поток токенов и прогресс загрузки иначе дёргают весь лист на каждый кусок.
 TOKEN_UI_MS = 48
 DOWNLOAD_UI_MS = 120
+# TXT в чат: больше этого режется с предупреждением, чтобы не раздувать контекст.
+ATTACHMENT_MAX_CHARS = 120_000
 
 ACTION_LABELS = {
     "summary": "Краткое изложение",
@@ -101,6 +103,7 @@ class AssistantController(QObject):
     noticeChanged = Signal()
     modelChanged = Signal()
     recordChanged = Signal()
+    attachmentChanged = Signal()
 
     # Сигналы из воркеров в GUI-поток.
     tokenArrived = Signal(str)
@@ -151,6 +154,7 @@ class AssistantController(QObject):
         self._worker: threading.Thread | None = None
         self._download_pending: dict | None = None
         self._record_request = 0
+        self._attachment: dict = {}
 
         self.tokenArrived.connect(self._on_token)
         self.replyFinished.connect(self._on_reply_finished)
@@ -182,6 +186,11 @@ class AssistantController(QObject):
         self._messages = self.store.list_chat_messages(GENERAL_CHAT_ID)
         self.refreshHardware()
         self.refreshRecords("")
+        # Новые расшифровки и сессии сразу попадают в список слева.
+        if hasattr(controller, "transcriptPersisted"):
+            controller.transcriptPersisted.connect(lambda *_: self.refreshRecords(""))
+        if hasattr(controller, "jobFinished"):
+            controller.jobFinished.connect(lambda *_: self.refreshRecords(""))
 
     # -- свойства ----------------------------------------------------------
 
@@ -312,6 +321,18 @@ class AssistantController(QObject):
     @Property("QVariant", notify=recordChanged)
     def actions(self):
         return [{"id": key, "label": label} for key, label in ACTION_LABELS.items()]
+
+    @Property("QVariantMap", notify=attachmentChanged)
+    def attachment(self):
+        """Ожидающее вложение: имя и размер; текст в свойстве не отдаём."""
+
+        if not self._attachment:
+            return {}
+        return {
+            "name": str(self._attachment.get("name") or ""),
+            "chars": int(self._attachment.get("chars") or 0),
+            "truncated": bool(self._attachment.get("truncated")),
+        }
 
     # -- железо, каталог, записи -------------------------------------------
 
@@ -711,13 +732,107 @@ class AssistantController(QObject):
             return False
         return True
 
+    @Slot()
+    def attachTextFile(self):
+        """Прикрепить TXT к следующему вопросу."""
+
+        if self._busy:
+            self._set_notice("Дождитесь ответа, прежде чем менять вложение.")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            None,
+            "Прикрепить текстовый файл",
+            "",
+            "Текст (*.txt);;Все файлы (*.*)",
+        )
+        if not path:
+            return
+        self._load_attachment(Path(path))
+
+    @Slot(str)
+    def attachTextPath(self, path):
+        """Путь из drag-and-drop или поля: только локальный .txt."""
+
+        if self._busy:
+            self._set_notice("Дождитесь ответа, прежде чем менять вложение.")
+            return
+        raw = str(path or "")
+        if raw.startswith("file:"):
+            from PySide6.QtCore import QUrl
+
+            raw = QUrl(raw).toLocalFile()
+        media = Path(raw)
+        if not media.is_file() or media.suffix.lower() != ".txt":
+            self._set_notice("Прикрепите текстовый файл с расширением .txt.")
+            return
+        self._load_attachment(media)
+
+    def _load_attachment(self, media: Path) -> None:
+        try:
+            raw = media.read_bytes()
+        except OSError as exc:
+            self._set_notice(f"Не удалось прочитать файл: {exc}")
+            return
+        text = _decode_text_bytes(raw)
+        truncated = False
+        if len(text) > ATTACHMENT_MAX_CHARS:
+            text = text[:ATTACHMENT_MAX_CHARS]
+            truncated = True
+        text = text.strip()
+        if not text:
+            self._set_notice("Файл пустой.")
+            return
+        self._attachment = {
+            "name": media.name,
+            "text": text,
+            "chars": len(text),
+            "truncated": truncated,
+        }
+        self.attachmentChanged.emit()
+        if truncated:
+            self._set_notice(
+                f"Файл большой: взяты первые {ATTACHMENT_MAX_CHARS} символов из «{media.name}»."
+            )
+        else:
+            self._set_notice(f"Прикреплён файл «{media.name}».")
+
+    @Slot()
+    def clearAttachment(self):
+        if not self._attachment:
+            return
+        self._attachment = {}
+        self.attachmentChanged.emit()
+
+    def _take_attachment_meta(self) -> dict | None:
+        """Забрать вложение в meta сообщения и очистить слот."""
+
+        if not self._attachment:
+            return None
+        payload = {
+            "attachment": {
+                "name": str(self._attachment.get("name") or "file.txt"),
+                "chars": int(self._attachment.get("chars") or 0),
+                "text": str(self._attachment.get("text") or ""),
+                "truncated": bool(self._attachment.get("truncated")),
+            }
+        }
+        self._attachment = {}
+        self.attachmentChanged.emit()
+        return payload
+
     @Slot(str)
     def ask(self, text):
         question = str(text or "").strip()
-        if not question or not self._guard():
+        has_file = bool(self._attachment)
+        if not question and not has_file:
             return
-        self._append("user", question)
-        self._start(question, "")
+        if not question and has_file:
+            question = "Кратко изложи содержание прикреплённого файла."
+        if not self._guard():
+            return
+        meta = self._take_attachment_meta()
+        self._append("user", question, meta=meta)
+        self._start(question, "", meta)
 
     @Slot(str)
     def runAction(self, kind):
@@ -732,7 +847,36 @@ class AssistantController(QObject):
         self._append("user", ACTION_LABELS[action])
         self._start("", action)
 
-    def _start(self, question: str, action: str) -> None:
+    @Slot(str)
+    def renameRecord(self, title):
+        """Переименовать выбранную запись (и строку в истории)."""
+
+        if not self._record_id:
+            self._set_notice("Свободный разговор нельзя переименовать.")
+            return
+        cleaned = " ".join(str(title or "").strip().split())
+        if not cleaned:
+            self._set_notice("Заголовок не может быть пустым.")
+            return
+        rename = getattr(self.controller, "renameSession", None)
+        if callable(rename):
+            rename(self._record_id, cleaned)
+        else:
+            try:
+                cleaned = self.store.rename_session(self._record_id, cleaned)
+            except ValueError:
+                self._set_notice("Заголовок не может быть пустым.")
+                return
+        self._record = {**self._record, "title": cleaned}
+        for index, row in enumerate(self._records):
+            if row.get("id") == self._record_id:
+                self._records[index] = {**row, "title": cleaned}
+                break
+        self.recordChanged.emit()
+        self.recordsChanged.emit()
+        self._set_notice(f"Запись переименована: {cleaned}")
+
+    def _start(self, question: str, action: str, meta: dict | None = None) -> None:
         self._idle.stop()
         self._cancel = threading.Event()
         self._busy = True
@@ -748,16 +892,23 @@ class AssistantController(QObject):
         model = self._current_model()
         record_id = self._record_id
         history = [
-            {"role": item["role"], "content": item["content"]}
+            {
+                "role": item["role"],
+                "content": item["content"],
+                "meta": item.get("meta") or {},
+            }
             for item in self._messages[:-2]
-            if item.get("content")
+            if item.get("content") or (item.get("meta") or {}).get("attachment")
         ]
+        attachment = (meta or {}).get("attachment") if meta else None
         cancel = self._cancel
 
         def work():
             error = ""
             try:
-                self._run_task(model, record_id, question, action, history, cancel)
+                self._run_task(
+                    model, record_id, question, action, history, cancel, attachment
+                )
             except llm.GenerationCancelled:
                 error = "cancelled"
             except llm.RuntimeUnavailable as failure:
@@ -769,7 +920,9 @@ class AssistantController(QObject):
         self._worker = threading.Thread(target=work, name="dotaudio-llm-answer", daemon=True)
         self._worker.start()
 
-    def _run_task(self, model, record_id, question, action, history, cancel) -> None:
+    def _run_task(
+        self, model, record_id, question, action, history, cancel, attachment=None
+    ) -> None:
         """Тело воркера: ни одного обращения к QML, только сигналы."""
 
         digests = StoreDigests(self.store, model.id)
@@ -795,12 +948,31 @@ class AssistantController(QObject):
             on_stage=lambda name, payload: self.stageArrived.emit(name, dict(payload)),
             cancel=cancel,
         )
+        material = ""
+        material_name = ""
+        if isinstance(attachment, dict):
+            material = str(attachment.get("text") or "")
+            material_name = str(attachment.get("name") or "")
         if action:
             helper.summarize(record_id, chunks, action, on_token=emit_token)
         elif record_id and chunks:
-            helper.answer(question, record_id, chunks, history, on_token=emit_token)
+            # Вложение к вопросу по записи добавляется в сам вопрос: карта
+            # записи и выдержки остаются главным источником.
+            prompt = question
+            if material.strip():
+                prompt = (
+                    f"Дополнительно прикреплён файл «{material_name or 'файл'}»:\n"
+                    f"{material.strip()}\n\nВопрос: {question}"
+                )
+            helper.answer(prompt, record_id, chunks, history, on_token=emit_token)
         else:
-            helper.chat(question, history, on_token=emit_token)
+            helper.chat(
+                question,
+                history,
+                on_token=emit_token,
+                material=material,
+                material_name=material_name,
+            )
 
     def _on_token(self, piece):
         if not self._messages:
@@ -930,3 +1102,14 @@ class AssistantController(QObject):
         self._cancel.set()
         self._download_cancel.set()
         self._release_async()
+
+
+def _decode_text_bytes(raw: bytes) -> str:
+    """Прочитать TXT с типичными кодировками Windows/UTF."""
+
+    for encoding in ("utf-8-sig", "utf-8", "cp1251", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")

@@ -211,6 +211,33 @@ Item {
                     ctx.fill()
                 }
                 break
+            case "attach":
+                // Скрепка: прикрепить файл к сообщению.
+                ctx.beginPath()
+                ctx.moveTo(12.5, 5.5)
+                ctx.lineTo(8.2, 9.8)
+                ctx.quadraticCurveTo(6.4, 11.6, 8.2, 13.4)
+                ctx.quadraticCurveTo(10, 15.2, 11.8, 13.4)
+                ctx.lineTo(14.6, 10.6)
+                ctx.stroke()
+                ctx.beginPath()
+                ctx.moveTo(7.2, 10.8)
+                ctx.quadraticCurveTo(5.2, 8.8, 7.2, 6.8)
+                ctx.quadraticCurveTo(9.2, 4.8, 11.2, 6.8)
+                ctx.lineTo(13.4, 9)
+                ctx.stroke()
+                break
+            case "edit":
+                line(ctx, 4.5, 14.5, 15.5, 14.5)
+                ctx.beginPath()
+                ctx.moveTo(12.8, 4.2)
+                ctx.lineTo(15.2, 6.6)
+                ctx.lineTo(8.2, 13.6)
+                ctx.lineTo(5.5, 14.2)
+                ctx.lineTo(6.2, 11.4)
+                ctx.closePath()
+                ctx.stroke()
+                break
             case "sizer":
                 ctx.strokeStyle = root.ink; ctx.fillStyle = root.ink
                 line(ctx, 16, 12, 16, 16); line(ctx, 16, 16, 12, 16)
