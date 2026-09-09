@@ -201,6 +201,8 @@ class AssistantController(QObject):
             controller.transcriptPersisted.connect(lambda *_: self.refreshRecords(""))
         if hasattr(controller, "jobFinished"):
             controller.jobFinished.connect(lambda *_: self.refreshRecords(""))
+        if hasattr(controller, "openAssistantWithRecord"):
+            controller.openAssistantWithRecord.connect(self.openRecord)
 
     # -- свойства ----------------------------------------------------------
 
@@ -597,15 +599,50 @@ class AssistantController(QObject):
         self.streamChanged.emit()
         self.recordChanged.emit()
 
+    @Slot(str)
+    def openRecord(self, session_id):
+        """Открыть запись в ассистенте (например, сразу после транскрибации)."""
+
+        sid = str(session_id or "")
+        if not sid:
+            return
+        self.setListMode("records")
+        self.selectRecord(sid)
+        self.refreshRecords("")
+
     @Slot()
     def clearChat(self):
-        """Стереть переписку по текущей записи. Расшифровку не трогает."""
+        """Удалить переписку по текущему чату. Расшифровку не трогает."""
 
-        if self._busy:
+        self.deleteChat()
+
+    @Slot()
+    def deleteChat(self):
+        """Удалить текущий открытый чат."""
+
+        self._delete_chat(self._record_id or GENERAL_CHAT_ID)
+
+    @Slot(str)
+    def deleteChatId(self, session_id):
+        """Удалить чат по id записи (или пустой id - свободный разговор)."""
+
+        self._delete_chat(str(session_id or GENERAL_CHAT_ID))
+
+    def _delete_chat(self, chat_id: str) -> None:
+        if self._busy or self._naming:
+            self._set_notice("Дождитесь ответа или остановите его.")
             return
-        self.store.clear_chat_messages(self._record_id or GENERAL_CHAT_ID)
-        self._messages = []
-        self.messagesChanged.emit()
+        key = chat_id or GENERAL_CHAT_ID
+        self.store.clear_chat_messages(key)
+        if (self._record_id or GENERAL_CHAT_ID) == key:
+            self._messages = []
+            self.messagesChanged.emit()
+        self.refreshRecords("")
+        self._set_notice(
+            "Свободный разговор очищен."
+            if key == GENERAL_CHAT_ID
+            else "Чат удалён. Расшифровка на месте."
+        )
 
     @Slot()
     def rebuildIndex(self):

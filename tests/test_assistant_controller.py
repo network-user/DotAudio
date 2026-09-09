@@ -181,6 +181,43 @@ def test_rename_record_updates_title_and_list(tmp_path: Path) -> None:
     assert assistant.store.get_session(session_id)["title"] == "Новое имя"
 
 
+def test_delete_chat_clears_messages_but_keeps_the_record(tmp_path: Path) -> None:
+    assistant = _controller(tmp_path)
+    session_id = assistant.store.create_session("Планёрка", "live", "mic", "small")
+    assistant.store.append_segments(
+        session_id, [{"start": 0.0, "end": 1.0, "text": "привет"}]
+    )
+    assistant.store.append_chat_message(session_id, "user", "вопрос")
+    assistant.store.append_chat_message(session_id, "assistant", "ответ")
+    assistant._record_id = session_id
+    assistant._messages = [
+        {"role": "user", "content": "вопрос"},
+        {"role": "assistant", "content": "ответ"},
+    ]
+
+    assistant.deleteChat()
+
+    assert assistant.messages == []
+    assert assistant.store.list_chat_messages(session_id) == []
+    assert assistant.store.get_session(session_id) is not None
+
+
+def test_open_record_switches_to_records_list(tmp_path: Path) -> None:
+    assistant = _controller(tmp_path)
+    assistant._list_mode = "chats"
+    session_id = assistant.store.create_session("Файл", "transcript", "a.wav", "small")
+    assistant.store.append_segments(
+        session_id, [{"start": 0.0, "end": 1.0, "text": "текст"}]
+    )
+
+    assistant.openRecord(session_id)
+
+    assert assistant.listMode == "records"
+    # selectRecord грузит карточку в фоне; id выставляется по приходу сигнала.
+    assistant._on_record(assistant._record_request, session_id, {"id": session_id, "title": "Файл"}, [], "ok")
+    assert assistant.recordId == session_id
+
+
 def test_answer_is_assembled_from_tokens_and_saved_once(tmp_path: Path) -> None:
     assistant = _controller(tmp_path)
     assistant._messages = [{"role": "user", "content": "Вопрос", "meta": {}, "pending": False}]

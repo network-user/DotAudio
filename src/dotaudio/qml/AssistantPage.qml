@@ -194,6 +194,10 @@ Item {
                                     anchors.right: parent.right
                                     anchors.top: parent.top
                                     anchors.margins: 10
+                                    anchors.rightMargin: (
+                                        assistant.listMode === "chats"
+                                        && Number(modelData.chatCount || 0) > 0
+                                    ) ? 36 : 10
                                     spacing: 3
 
                                     Row {
@@ -235,6 +239,18 @@ Item {
                                         font.pixelSize: Theme.fsMicro
                                         elide: Text.ElideRight
                                     }
+                                }
+
+                                    IconButton {
+                                    visible: assistant.listMode === "chats"
+                                             && Number(modelData.chatCount || 0) > 0
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 4
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    iconName: "trash"
+                                    onClicked: assistant.deleteChatId(String(modelData.id || ""))
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: "Удалить этот чат"
                                 }
                             }
                         }
@@ -430,9 +446,9 @@ Item {
                 }
                 PillButton {
                     compact: true
-                    text: "Очистить"
+                    text: "Удалить чат"
                     enabled: !assistant.busy && assistant.messages.length > 0
-                    onClicked: assistant.clearChat()
+                    onClicked: assistant.deleteChat()
                     ToolTip.visible: hovered
                     ToolTip.text: "Стереть переписку. Расшифровка останется"
                 }

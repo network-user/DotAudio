@@ -309,35 +309,20 @@ def model_fit(model: str, hardware: dict) -> dict:
         if threads and threads < 8:
             return {"state": "slow", "note": "На этом CPU Live будет отставать"}
         return {"state": "slow", "note": "Потянет, но Live на CPU заметно медленнее"}
+    # Surface-класс: 4 потока целиком под small уже тесны для Live.
+    if threads and threads <= 4 and cuda == 0 and spec["load"] >= 3:
+        return {"state": "slow", "note": "Мало потоков CPU: берите «Быстро» (base)"}
     if threads and threads < 4 and spec["load"] >= 3:
         return {"state": "slow", "note": "Мало потоков CPU: берите «Быстро»"}
     return {"state": "ok", "note": "Подходит этому устройству"}
 
 
 def recommended_model(hardware: dict) -> str:
-    """Модель по умолчанию под это устройство, из факта CPU/GPU.
+    """Модель по умолчанию под это устройство (см. ``adapt.plan_whisper``)."""
 
-    «small» на этом языке держит ритм Live начиная примерно с 4 потоков
-    CPU (замер итерации скорости Live); слабее - «base». GPU снимает
-    вопрос для типичных карточек; при ≥6 ГБ VRAM предлагаем medium.
-    """
+    from dotaudio.adapt import recommended_whisper
 
-    if int(hardware.get("cuda_devices") or 0) > 0:
-        vram = hardware.get("gpuVramGb")
-        if vram is None:
-            vram = hardware.get("vram_gb")
-        try:
-            if vram is not None and float(vram) >= 6.0:
-                return "medium"
-        except (TypeError, ValueError):
-            pass
-        return "small"
-    threads = int(hardware.get("threads") or 0)
-    if threads >= 4:
-        return "small"
-    if threads >= 2:
-        return "base"
-    return "tiny"
+    return recommended_whisper(hardware)
 
 
 class Controller(QObject):
@@ -377,6 +362,8 @@ class Controller(QObject):
     transcribeStatus = Signal(str)
     # Успешная транскрибация записана в историю: GUI обновляет списки.
     transcriptPersisted = Signal(str)
+    # Открыть ассистента с уже сохранённой записью транскрибации.
+    openAssistantWithRecord = Signal(str)
     diarizeProbed = Signal("QVariantMap")
     gpuSetupProgress = Signal("QVariantMap")
     gpuSetupFinished = Signal("QVariantMap")
@@ -1149,11 +1136,14 @@ class Controller(QObject):
         elif name == "source":
             self._settings["live_source"] = value
         if name == "profile":
-            # Measured on this CPU with the live window: base decodes a four
-            # second phrase in about 130 ms and small in about 360 ms, so the
-            # everyday profile can afford the model that actually writes
-            # Russian.  On tiny "русской речи" comes back as "меру с каиричев".
-            self._settings["model"] = MODEL_BY_PROFILE[value]
+            # Не затирать medium (и другие модели того же профиля): мастер
+            # выставляет profile=balanced + model=medium, а UI «Баланс» раньше
+            # всегда писал small.
+            from dotaudio.adapt import PROFILE_FOR_MODEL
+
+            current = str(self._settings.get("model") or "")
+            if PROFILE_FOR_MODEL.get(current) != value:
+                self._settings["model"] = MODEL_BY_PROFILE[value]
         if source_changed:
             # Проверка относится ровно к тому устройству, которое было открыто.
             # После смены входа старый «готово» нельзя оставлять рядом с кнопкой
@@ -1599,6 +1589,28 @@ class Controller(QObject):
             self._window.setMask(QRegion())
         except (RuntimeError, AttributeError):
             return
+
+    @Slot(result=bool)
+    def primaryButtonDown(self) -> bool:
+        return bool(self.desktop.primary_button_down())
+
+    @Slot(result=bool)
+    def beginWindowDrag(self) -> bool:
+        """Native drag for the main shell window. Returns after mouse release."""
+        if self._window is None:
+            return False
+        try:
+            return bool(self.desktop.begin_window_drag(int(self._window.winId())))
+        except (RuntimeError, TypeError, ValueError):
+            return False
+
+    @Slot("QVariant", result=bool)
+    def beginWindowDragId(self, window_id) -> bool:
+        """Native drag for a secondary window (caption overlay)."""
+        try:
+            return bool(self.desktop.begin_window_drag(int(window_id)))
+        except (RuntimeError, TypeError, ValueError):
+            return False
 
     def _apply_click_through(self, enabled):
         if self._window is None:
@@ -3237,6 +3249,22 @@ class Controller(QObject):
         self._diarize_probe = {}
         self.refreshDiarizeStatus()
         self.transcribeChanged.emit()
+
+    @Slot()
+    def openTranscriptInAssistant(self):
+        """После транскрибации сразу открыть ассистента с этой записью."""
+
+        session_id = str(self._trans_state.get("sessionId") or "")
+        if not session_id:
+            self.transcribeStatus.emit(
+                "Сначала выполните транскрибацию - запись появится в истории."
+            )
+            return
+        if self.store.get_session(session_id) is None:
+            self.transcribeStatus.emit("Сохранённая запись не найдена.")
+            return
+        self.selectPage("assistant")
+        self.openAssistantWithRecord.emit(session_id)
 
     @Slot()
     def pickTranscriptFile(self):

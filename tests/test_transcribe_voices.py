@@ -118,18 +118,17 @@ def test_persist_transcript_writes_history_session(tmp_path):
 
     class _PersistStub:
         _persist_transcript = Controller._persist_transcript
+        _maybe_autotitle_session = Controller._maybe_autotitle_session
 
         def __init__(self):
             self.store = Store(tmp_path / "history.db")
             self._settings = {"model": "small"}
             self.statuses = []
             self.transcribeStatus = _Signal()
-
-        def _emit_status(self, text):
-            self.statuses.append(text)
+            self._session_id = ""
+            self._trans_state = {}
 
     stub = _PersistStub()
-    # _persist_transcript вызывает self.transcribeStatus.emit(...)
     original_emit = stub.transcribeStatus.emit
 
     def capture(text):
@@ -153,3 +152,40 @@ def test_persist_transcript_writes_history_session(tmp_path):
     assert session["segments"][0]["text"] == "[Человек 1] привет"
     assert session["segments"][1]["text"] == "мир"
     assert any("истори" in text.casefold() for text in stub.statuses)
+
+
+def test_open_transcript_in_assistant_emits_session(tmp_path):
+    from dotaudio.controller import Controller
+    from dotaudio.storage import Store
+
+    class _Bridge:
+        selectPage = Controller.selectPage
+        openTranscriptInAssistant = Controller.openTranscriptInAssistant
+
+        def __init__(self):
+            self.store = Store(tmp_path / "history.db")
+            self._page = "transcript"
+            self._trans_state = {"sessionId": ""}
+            self.statuses = []
+            self.opened = []
+            self.transcribeStatus = _Signal()
+            self.openAssistantWithRecord = _Signal()
+            self.changed = _Signal()
+            self.logs = []
+
+        def _record_log(self, tone, message):
+            self.logs.append((tone, message))
+
+    bridge = _Bridge()
+    bridge.openTranscriptInAssistant()
+    assert bridge.openAssistantWithRecord.sent == []
+    assert bridge.statuses or bridge.transcribeStatus.sent
+
+    sid = bridge.store.create_session("a.wav", "transcript", "a.wav", "small")
+    bridge.store.append_segments(sid, [{"start": 0.0, "end": 1.0, "text": "hi"}])
+    bridge._trans_state["sessionId"] = sid
+    bridge.transcribeStatus.sent.clear()
+    bridge.openTranscriptInAssistant()
+
+    assert bridge._page == "assistant"
+    assert bridge.openAssistantWithRecord.sent == [sid]

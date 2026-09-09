@@ -238,6 +238,14 @@ Item {
                 ctx.closePath()
                 ctx.stroke()
                 break
+            case "trash":
+                rounded(ctx, 6, 7.5, 8, 9, 1.2)
+                ctx.stroke()
+                line(ctx, 5, 7.5, 15, 7.5)
+                line(ctx, 8, 5.5, 12, 5.5)
+                line(ctx, 8.5, 10, 8.5, 14)
+                line(ctx, 11.5, 10, 11.5, 14)
+                break
             case "sizer":
                 ctx.strokeStyle = root.ink; ctx.fillStyle = root.ink
                 line(ctx, 16, 12, 16, 16); line(ctx, 16, 16, 12, 16)

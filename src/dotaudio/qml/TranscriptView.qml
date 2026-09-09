@@ -130,6 +130,16 @@ Rectangle {
                     PillButton { text: view.busyPhase ? "Стоп" : "Транскрибировать"; primary: !view.busyPhase; enabled: view.file.length > 0; onClicked: view.busyPhase ? bridge.stopTranscript() : bridge.runTranscript() }
                     PillButton { text: "Очистить"; enabled: (view.file.length > 0 || view.segs.length > 0) && !view.busyPhase; onClicked: bridge.clearTranscript() }
                     PillButton { text: "Сохранить…"; enabled: view.segs.length > 0 && !view.busyPhase; onClicked: bridge.transcriptExport() }
+                    PillButton {
+                        text: "В ассистент"
+                        primary: true
+                        visible: view.phase === "done" && view.segs.length > 0
+                                 && String(bridge.transcribeState.sessionId || "").length > 0
+                        enabled: !view.busyPhase
+                        onClicked: bridge.openTranscriptInAssistant()
+                        ToolTip.visible: hovered
+                        ToolTip.text: "Открыть эту расшифровку в чате ассистента"
+                    }
                 }
 
                 Rectangle {
