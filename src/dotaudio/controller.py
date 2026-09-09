@@ -3643,7 +3643,35 @@ class Controller(QObject):
                 continue
             if int(seg["role"]) == int(key):
                 seg["speaker"] = label
+        # История хранит говорящего в тексте «[Имя] фраза» - без записи
+        # переименование пропадало бы после повторного открытия сессии.
+        self._persist_transcript_speaker_labels()
         self.transcribeChanged.emit()
+
+    def _persist_transcript_speaker_labels(self) -> None:
+        """Переписать подписи говорящих в уже сохранённой transcript-сессии."""
+
+        session_id = str(self._trans_state.get("sessionId") or "")
+        if not session_id:
+            return
+        session = self.store.get_session(session_id)
+        if session is None or session.get("mode") != "transcript":
+            return
+        by_span: dict[tuple[float, float], str] = {}
+        for row in self._trans_state.get("segments") or []:
+            span = (
+                round(float(row.get("start", 0.0)), 3),
+                round(float(row.get("end", 0.0)), 3),
+            )
+            body = str(row.get("text") or "").strip()
+            speaker = str(row.get("speaker") or "").strip()
+            by_span[span] = f"[{speaker}] {body}" if speaker else body
+        for item in session.get("segments") or []:
+            span = (round(float(item["start"]), 3), round(float(item["end"]), 3))
+            new_text = by_span.get(span)
+            if new_text is None or new_text == item.get("text"):
+                continue
+            self.store.update_segment(session_id, int(item["id"]), new_text)
 
     @Slot()
     def transcriptExport(self):

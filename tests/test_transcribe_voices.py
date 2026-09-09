@@ -165,17 +165,20 @@ def test_persist_transcript_writes_history_session(tmp_path):
 def test_rename_transcript_speaker_updates_segments_and_legend():
     class _Rename:
         renameTranscriptSpeaker = Controller.renameTranscriptSpeaker
+        _persist_transcript_speaker_labels = Controller._persist_transcript_speaker_labels
 
         def __init__(self):
+            self.store = None
             self._trans_state = {
+                "sessionId": "",
                 "speakers": [
                     {"key": 1, "label": "Голос 1", "count": 1, "seconds": 1.0},
                     {"key": 2, "label": "Голос 2", "count": 1, "seconds": 1.0},
                 ],
                 "segments": [
-                    {"role": 1, "speaker": "Голос 1", "text": "раз"},
-                    {"role": 2, "speaker": "Голос 2", "text": "два"},
-                    {"role": None, "speaker": "", "text": "три"},
+                    {"role": 1, "speaker": "Голос 1", "text": "раз", "start": 0.0, "end": 1.0},
+                    {"role": 2, "speaker": "Голос 2", "text": "два", "start": 1.0, "end": 2.0},
+                    {"role": None, "speaker": "", "text": "три", "start": 2.0, "end": 3.0},
                 ],
             }
             self.transcribeChanged = _Signal()
@@ -187,6 +190,51 @@ def test_rename_transcript_speaker_updates_segments_and_legend():
     assert stub._trans_state["segments"][1]["speaker"] == "Голос 2"
     assert stub._trans_state["segments"][2]["speaker"] == ""
     assert stub.transcribeChanged.sent
+
+
+def test_rename_transcript_speaker_rewrites_history(tmp_path):
+    """Новое имя должно попасть в SQLite, иначе история откроет старое."""
+
+    from pathlib import Path
+
+    from dotaudio.storage import Store
+
+    class _RenamePersist:
+        renameTranscriptSpeaker = Controller.renameTranscriptSpeaker
+        _persist_transcript_speaker_labels = Controller._persist_transcript_speaker_labels
+        _persist_transcript = Controller._persist_transcript
+        _maybe_autotitle_session = Controller._maybe_autotitle_session
+
+        def __init__(self):
+            self.store = Store(tmp_path / "history.db")
+            self._settings = {"model": "small"}
+            self.transcribeStatus = _Signal()
+            self._session_id = ""
+            self._trans_state = {"speakers": [], "segments": [], "sessionId": ""}
+            self.transcribeChanged = _Signal()
+
+    stub = _RenamePersist()
+    path = Path(tmp_path) / "call.wav"
+    path.write_bytes(b"")
+    rows = [
+        {"start": 0.0, "end": 1.0, "text": "раз", "speaker": "Голос 1", "role": 1, "words": []},
+        {"start": 1.0, "end": 2.0, "text": "два", "speaker": "Голос 2", "role": 2, "words": []},
+    ]
+    session_id = stub._persist_transcript(str(path), rows)
+    stub._trans_state.update({
+        "sessionId": session_id,
+        "speakers": [
+            {"key": 1, "label": "Голос 1", "count": 1, "seconds": 1.0},
+            {"key": 2, "label": "Голос 2", "count": 1, "seconds": 1.0},
+        ],
+        "segments": rows,
+    })
+
+    stub.renameTranscriptSpeaker(1, "Анна")
+
+    session = stub.store.get_session(session_id)
+    assert session["segments"][0]["text"] == "[Анна] раз"
+    assert session["segments"][1]["text"] == "[Голос 2] два"
 
 
 def test_transcribe_media_url_from_path():
