@@ -202,26 +202,6 @@ Rectangle {
         anchors.margins: Theme.padCard
         spacing: Theme.gapSm
 
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: Theme.gapSm
-            Label {
-                text: "Прослушать запись"
-                color: Theme.text
-                font.pixelSize: Theme.fsLabel
-                font.weight: Font.DemiBold
-            }
-            Label {
-                Layout.fillWidth: true
-                text: root.playing
-                      ? (root._phraseEndMs >= 0 ? "фраза" : "весь файл")
-                      : "Пробел - старт или пауза"
-                color: Theme.faint
-                font.pixelSize: Theme.fsMicro
-                elide: Text.ElideRight
-            }
-        }
-
         MediaTimeline {
             id: wave
             Layout.fillWidth: true
@@ -250,55 +230,7 @@ Rectangle {
                 implicitHeight: 36
                 onClicked: root.toggle()
                 ToolTip.visible: hovered
-                ToolTip.text: root.playing ? "Пауза" : "Слушать весь файл"
-            }
-
-            IconButton {
-                iconName: "redo"
-                enabled: root.canRepeatPhrase
-                onClicked: root.repeatPhrase()
-                ToolTip.visible: hovered
-                ToolTip.text: "Повторить последнюю фразу"
-            }
-
-            PillButton {
-                text: "I"
-                compact: true
-                onClicked: root.markIn()
-                ToolTip.visible: hovered
-                ToolTip.text: "In-точка (I)"
-            }
-            PillButton {
-                text: "O"
-                compact: true
-                onClicked: root.markOut()
-                ToolTip.visible: hovered
-                ToolTip.text: "Out-точка (O)"
-            }
-            PillButton {
-                text: root.loopRegion ? "Loop●" : "Loop"
-                compact: true
-                enabled: root.inPointSec >= 0 && root.outPointSec > root.inPointSec
-                onClicked: {
-                    if (root.loopRegion) {
-                        root.loopRegion = false
-                        root.clearPhraseRange()
-                    } else {
-                        root.playAbRegion()
-                    }
-                }
-                ToolTip.visible: hovered
-                ToolTip.text: "Цикл In–Out"
-            }
-            PillButton {
-                text: "−1с"
-                compact: true
-                onClicked: root.skipBy(-1)
-            }
-            PillButton {
-                text: "+1с"
-                compact: true
-                onClicked: root.skipBy(1)
+                ToolTip.text: root.playing ? "Пауза" : "Слушать"
             }
 
             PillButton {
@@ -441,6 +373,13 @@ Rectangle {
                 color: Theme.faint
                 font.family: Theme.monoFamily
                 font.pixelSize: Theme.fsSmall
+            }
+
+            IconButton {
+                iconName: root.muted ? "mute" : "volume"
+                onClicked: root.toggleMute()
+                ToolTip.visible: hovered
+                ToolTip.text: root.muted ? "Включить звук" : "Без звука"
             }
         }
 
