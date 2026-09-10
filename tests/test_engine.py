@@ -126,6 +126,109 @@ def test_auto_device_retries_cuda_runtime_error_on_cpu(monkeypatch) -> None:
     assert attempts == [("cuda", "float16"), ("cpu", "int8")]
 
 
+def test_cuda_float16_falls_back_to_int8_on_same_gpu(monkeypatch) -> None:
+    attempts: list[tuple[str, str]] = []
+
+    class FakeModel:
+        def transcribe(self, _source, **_kwargs):
+            return iter([_Segment(0, 1, "ready")]), object()
+
+    def model(_name: str, *, device: str, compute_type: str, cpu_threads: int):
+        del cpu_threads
+        attempts.append((device, compute_type))
+        if device == "cuda" and compute_type == "float16":
+            raise ValueError(
+                "requested float16 compute type, but the target device "
+                "or backend do not support efficient float16 computation"
+            )
+        return FakeModel()
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=model))
+    engine = Engine()
+    result = engine.transcribe(np.zeros(1600), RecognitionConfig(device="cuda"))
+    assert result[0]["text"] == "ready"
+    assert attempts[0] == ("cuda", "float16")
+    assert attempts[1] == ("cuda", "int8")
+    assert all(device == "cuda" for device, _kind in attempts)
+
+
+def test_auto_device_retries_cpu_when_cuda_compute_types_exhausted(monkeypatch) -> None:
+    attempts: list[tuple[str, str]] = []
+
+    class FakeModel:
+        def transcribe(self, _source, **_kwargs):
+            return iter([_Segment(0, 1, "ready")]), object()
+
+    def model(_name: str, *, device: str, compute_type: str, cpu_threads: int):
+        del cpu_threads
+        attempts.append((device, compute_type))
+        if device == "cuda":
+            raise ValueError(
+                "requested float16 compute type, but the target device "
+                "or backend do not support efficient float16 computation"
+            )
+        return FakeModel()
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=model))
+    result = Engine().transcribe(np.zeros(1600), RecognitionConfig(device="auto"))
+    assert result[0]["text"] == "ready"
+    assert ("cpu", "int8") in attempts
+    assert attempts[0][0] == "cuda"
+
+
+def test_cuda_device_falls_back_to_cpu_when_compute_types_exhausted(monkeypatch) -> None:
+    attempts: list[tuple[str, str]] = []
+
+    class FakeModel:
+        def transcribe(self, _source, **_kwargs):
+            return iter([_Segment(0, 1, "ready")]), object()
+
+    def model(_name: str, *, device: str, compute_type: str, cpu_threads: int):
+        del cpu_threads
+        attempts.append((device, compute_type))
+        if device == "cuda":
+            raise ValueError(
+                "requested float16 compute type, but the target device "
+                "or backend do not support efficient float16 computation"
+            )
+        return FakeModel()
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=model))
+    result = Engine().transcribe(np.zeros(1600), RecognitionConfig(device="cuda"))
+    assert result[0]["text"] == "ready"
+    assert ("cpu", "int8") in attempts
+    assert attempts[0] == ("cuda", "float16")
+
+
+def test_cuda_remembers_working_compute_type(monkeypatch) -> None:
+    attempts: list[tuple[str, str]] = []
+
+    class FakeModel:
+        def transcribe(self, _source, **_kwargs):
+            return iter([_Segment(0, 1, "ready")]), object()
+
+    def model(_name: str, *, device: str, compute_type: str, cpu_threads: int):
+        del cpu_threads
+        attempts.append((device, compute_type))
+        if device == "cuda" and compute_type == "float16":
+            raise ValueError(
+                "requested float16 compute type, but the target device "
+                "or backend do not support efficient float16 computation"
+            )
+        return FakeModel()
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=model))
+    engine = Engine()
+    config = RecognitionConfig(device="cuda")
+    engine.transcribe(np.zeros(1600), config)
+    first = len(attempts)
+    engine._drop_model(config.model, "cuda")
+    engine.transcribe(np.zeros(1600), config)
+    second = attempts[first:]
+    assert second[0] == ("cuda", "int8")
+    assert engine.last_device(config.model) == "cuda"
+
+
 def test_auto_device_reuses_cpu_after_cuda_runtime_failure(monkeypatch) -> None:
     created: list[str] = []
 

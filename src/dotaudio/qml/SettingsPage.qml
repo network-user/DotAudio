@@ -64,6 +64,41 @@ Item {
             }
             Rectangle {
                 Layout.fillWidth: true
+                implicitHeight: doctorBox.implicitHeight + 2 * Theme.padCard
+                radius: Theme.radiusLg
+                color: Theme.surface
+                border.width: 1
+                border.color: Theme.border
+                ColumnLayout {
+                    id: doctorBox
+                    anchors.fill: parent
+                    anchors.margins: Theme.padCard
+                    spacing: Theme.gapSm
+                    Label {
+                        text: "Анализ и ошибки"
+                        color: Theme.text
+                        font.pixelSize: Theme.fsTitle
+                        font.weight: Font.DemiBold
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "Тестовые проверки Whisper, кеша модели, CUDA/float16, чтения файлов. Если расшифровка молчит - сначала эта кнопка. Отчёт можно скопировать и прислать."
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsLabel
+                        wrapMode: Text.Wrap
+                    }
+                    DoctorPanel {
+                        Layout.fillWidth: true
+                        doctor: bridge.transcriptDoctor || ({})
+                        running: String((bridge.transcriptDoctor || {}).phase || "") === "running"
+                                 || Boolean(bridge && bridge.busy)
+                        showTitle: false
+                        setup: setup
+                    }
+                }
+            }
+            Rectangle {
+                Layout.fillWidth: true
                 implicitHeight: updateBox.implicitHeight + 2 * Theme.padCard
                 radius: Theme.radiusLg
                 color: Theme.surface

@@ -116,6 +116,37 @@ def test_prepare_live_falls_back_to_cpu_when_cuda_warmup_fails(monkeypatch) -> N
     ]
 
 
+def test_prepare_cuda_falls_back_to_cpu_when_warmup_fails(monkeypatch) -> None:
+    created: list[str] = []
+
+    class FakeModel:
+        def __init__(self, device: str) -> None:
+            self.device = device
+
+        def transcribe(self, _source, **_kwargs):
+            if self.device == "cuda":
+                raise RuntimeError("cublas runtime failure")
+            return iter(()), object()
+
+    def model(_name, *, device, compute_type, cpu_threads):
+        del compute_type, cpu_threads
+        created.append(device)
+        return FakeModel(device)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=model),
+    )
+    events: list[str] = []
+    device = Engine().prepare(
+        RecognitionConfig(device="cuda", live_stream=True), events.append
+    )
+    assert device == "cpu"
+    assert created == ["cuda", "cpu"]
+    assert "gpu_unavailable_falling_back_cpu" in events
+
+
 def test_download_tracker_reports_real_bytes_and_speed(monkeypatch) -> None:
     from dotaudio.engine import DownloadTracker
 

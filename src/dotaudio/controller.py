@@ -3,8 +3,10 @@ from __future__ import annotations
 import inspect
 import os
 import re
+import sys
 import threading
 import time
+import traceback
 import wave
 from copy import deepcopy
 from dataclasses import replace
@@ -31,6 +33,25 @@ from dotaudio.capture import (
     system_audio_supported,
 )
 from dotaudio.desktop import MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, Hotkey
+from dotaudio.diag import (
+    TRACE_LIMIT,
+    FileLog,
+    busy_job_reason,
+    check_ctranslate2,
+    check_ffmpeg,
+    check_hardware,
+    check_media_file,
+    check_pyav,
+    check_python,
+    check_whisper_disk,
+    empty_transcript_reason,
+    explain_transcribe_error,
+    format_doctor_report,
+    humanize_status,
+    summarize_doctor,
+    transcript_start_note,
+    whisper_runtime_check,
+)
 from dotaudio.engine import DownloadCancelled, Engine, RecognitionConfig
 from dotaudio.karaoke import export_ass, render_video
 from dotaudio.karaoke_align import align_words, compute_peaks, decode_file
@@ -587,6 +608,9 @@ class Controller(QObject):
     transcribeStatus = Signal(str)
     # Тик прогресса ASR/диаризации: только GUI-поток обновляет _trans_state.
     transcribeTick = Signal(object)
+    doctorChanged = Signal()
+    doctorTick = Signal(object)
+    doctorFinished = Signal(object)
     # Успешная транскрибация записана в историю: GUI обновляет списки.
     transcriptPersisted = Signal(str)
     # Открыть ассистента с уже сохранённой записью транскрибации.
@@ -601,6 +625,8 @@ class Controller(QObject):
     def __init__(self, data_dir: Path, desktop):
         super().__init__()
         data_dir.mkdir(parents=True, exist_ok=True)
+        self._file_log = FileLog(data_dir / "dotaudio.log")
+        self._file_log.write("info", "Запуск DotAudio")
         self.store = Store(data_dir / "history.db")
         self.desktop = desktop
         self.engine = Engine()
@@ -674,11 +700,21 @@ class Controller(QObject):
         # поэтому во время работы держим -1 и не выдумываем цифры.
         self._trans_state = {
             "phase": "idle", "stage": "", "file": "", "path": "",
-            "error": "", "speakers": [], "diarization": False,
+            "error": "", "status": "", "speakers": [], "diarization": False,
             "engine": "", "engineNote": "", "duration": 0.0,
             "segments": [], "sessionId": "", "progress": 0.0,
-            "origin": "",
+            "origin": "", "trace": [],
         }
+        self._doctor = {
+            "phase": "idle",
+            "message": "",
+            "checks": [],
+            "canFix": False,
+            "fixLabel": "",
+            "fixes": [],
+            "ok": False,
+        }
+        self._doctor_fix_pending = False
         self._trans_cancel = threading.Event()
         # sessionId с воркера до доставки QueuedConnection от transcribeTick.
         self._trans_result_session_id = ""
@@ -791,6 +827,9 @@ class Controller(QObject):
         self.jobFinished.connect(self._on_finished)
         self.transcriptPersisted.connect(self._on_transcript_persisted)
         self.transcribeTick.connect(self._on_transcribe_tick)
+        self.transcribeStatus.connect(self._on_transcribe_status)
+        self.doctorTick.connect(self._on_doctor_tick)
+        self.doctorFinished.connect(self._on_doctor_finished)
         self.statusArrived.connect(self._set_status)
         self.levelArrived.connect(self._set_level)
         self.captureStarted.connect(self._on_capture_started)
@@ -1080,6 +1119,7 @@ class Controller(QObject):
                         "message": str(result.get("message") or "CUDA готова"),
                         "restartRequired": False,
                         "prepareModel": True,
+                        "device": "cuda",
                     }
                 )
             except Exception as exc:
@@ -1115,6 +1155,18 @@ class Controller(QObject):
             "restartRequired": restart,
         }
         if ok:
+            runtime = str(payload.get("device") or "")
+            if runtime == "cpu":
+                self._settings["device"] = "cpu"
+                self._settings["gpu_hint_dismissed"] = True
+                self.store.save_settings(self._settings)
+                self._record_log(
+                    "warning",
+                    "Откат: Whisper на этой карте не поднялся, включён процессор.",
+                )
+                self._notice = "Видеокарта не подошла для Whisper. Включён процессор."
+                self.changed.emit()
+                return
             self._settings["device"] = "cuda"
             self._settings["gpu_hint_dismissed"] = True
             # На GPU с запасом VRAM предлагаем более точную модель, но не
@@ -1210,6 +1262,29 @@ class Controller(QObject):
                     )
                     return
             except Exception as exc:
+                fallback_device = ""
+                try:
+                    if Engine._should_fallback_cpu("cuda", exc):
+                        self.statusArrived.emit("gpu_unavailable_falling_back_cpu")
+                        fallback_device = self.engine.prepare(
+                            replace(config, device="cpu"),
+                            lambda status: self.statusArrived.emit(status),
+                            progress,
+                        )
+                except Exception:  # noqa: BLE001
+                    fallback_device = ""
+                if fallback_device:
+                    self.modelFinished.emit(model, fallback_device, "")
+                    self.gpuSetupFinished.emit(
+                        {
+                            "ok": True,
+                            "message": f"Модель {model} готова на {fallback_device}",
+                            "restartRequired": False,
+                            "prepareModel": False,
+                            "device": fallback_device,
+                        }
+                    )
+                    return
                 self.modelFinished.emit(model, "", str(exc))
                 self.gpuSetupFinished.emit(
                     {
@@ -1227,6 +1302,7 @@ class Controller(QObject):
                         "message": f"Модель {model} готова на {device}",
                         "restartRequired": False,
                         "prepareModel": False,
+                        "device": str(device or ""),
                     }
                 )
 
@@ -2292,6 +2368,53 @@ class Controller(QObject):
         }
         self._logs.insert(0, entry)
         self._logs = self._logs[:120]
+        log = getattr(self, "_file_log", None)
+        if log is not None:
+            try:
+                log.write(str(tone), str(message))
+            except OSError:
+                pass
+        self.logsChanged.emit()
+
+    def _append_trans_trace(self, tone, message):
+        entry = {"time": datetime.now().strftime("%H:%M:%S"), "tone": str(tone), "message": str(message)}
+        trace = list(self._trans_state.get("trace") or [])
+        trace.append(entry)
+        self._trans_state["trace"] = trace[-TRACE_LIMIT:]
+
+    @Slot(str)
+    def _on_transcribe_status(self, raw: str) -> None:
+        label = humanize_status(raw, STATUS_LABELS)
+        if not label:
+            return
+        cf = label.casefold()
+        is_error = (
+            cf.startswith(("ошибка", "сейчас идёт", "сначала откройте", "выберите поддерживаемый"))
+            or "ошибка" in cf
+        )
+        tone = "error" if is_error else "info"
+        self._trans_state["status"] = label
+        if is_error:
+            self._trans_state["error"] = label
+        self._append_trans_trace(tone, label)
+        self._record_log(tone, label)
+        self.transcribeChanged.emit()
+
+    @Slot(object)
+    def _on_doctor_tick(self, payload) -> None:
+        if isinstance(payload, dict):
+            self._doctor.update(payload)
+            self.doctorChanged.emit()
+
+    @Slot(object)
+    def _on_doctor_finished(self, payload) -> None:
+        if isinstance(payload, dict):
+            self._doctor.update(payload)
+            self.doctorChanged.emit()
+            msg = str(payload.get("message") or "")
+            ok = bool(payload.get("ok"))
+            if msg:
+                self._record_log("info" if ok else "error", msg)
 
     def _on_log(self, tone, message):
         self._record_log(tone, message)
@@ -2328,8 +2451,32 @@ class Controller(QObject):
             message = f"Модель {model} готова {placement}."
             self._model_state = {"phase": "ready", "model": model, "message": message}
             self._record_log("success", message)
+            self._adopt_runtime_device(device)
             self._arm_idle_model_release()
         self.changed.emit()
+        if getattr(self, "_doctor_fix_pending", False):
+            self._doctor_fix_pending = False
+            QTimer.singleShot(0, self.runTranscriptDoctor)
+
+    def _adopt_runtime_device(self, device) -> None:
+        """Если Whisper ушёл на CPU, не оставлять в настройках сломанный cuda."""
+
+        actual = str(device or "")
+        if actual != "cpu":
+            return
+        current = str(self._settings.get("device") or "auto")
+        if current != "cuda":
+            return
+        self._settings["device"] = "cpu"
+        try:
+            self.store.save_settings(self._settings)
+        except Exception:  # noqa: BLE001
+            pass
+        self._record_log(
+            "warning",
+            "Откат: видеокарта не приняла Whisper, включён процессор.",
+        )
+        self._notice = "Видеокарта не подошла для Whisper. Включён процессор."
 
     def _set_level(self, value):
         self._level = max(0.0, min(1.0, value)) if self.recording else 0.0
@@ -4700,6 +4847,14 @@ class Controller(QObject):
     @Property("QVariantMap", notify=transcribeChanged)
     def transcribeState(self): return self._trans_state
 
+    @Property("QVariantMap", notify=doctorChanged)
+    def transcriptDoctor(self): return self._doctor
+
+    @Property(str, notify=doctorChanged)
+    def logFilePath(self):
+        log = getattr(self, "_file_log", None)
+        return str(log.path) if log is not None else ""
+
     @Property(str, notify=transcribeChanged)
     def transcribeMediaUrl(self) -> str:
         """file:// URL выбранного медиа для QML MediaPlayer.
@@ -4839,9 +4994,10 @@ class Controller(QObject):
             "Медиа (*.mp3 *.wav *.m4a *.flac *.ogg *.opus *.mp4 *.mkv *.webm *.mov *.aac)")
         if not path:
             return
-        self.transcribeStatus.emit("Файл выбран. Нажмите «Транскрибировать».")
+        self.transcribeStatus.emit("Файл выбран. Нажмите «Расшифровать».")
         self._trans_state.update({"phase": "idle", "stage": "", "path": path,
-                                  "file": str(Path(path).name), "error": "", "speakers": [],
+                                  "file": str(Path(path).name), "error": "", "status": "",
+                                  "trace": [], "speakers": [],
                                   "segments": [], "engine": "", "engineNote": "", "duration": 0.0,
                                   "sessionId": "", "progress": 0.0,
                                   "diarization": False, "origin": ""})
@@ -4861,7 +5017,8 @@ class Controller(QObject):
             self.transcribeChanged.emit()
             return
         self._trans_state.update({"phase": "idle", "stage": "", "path": str(media),
-                                  "file": media.name, "error": "", "speakers": [],
+                                  "file": media.name, "error": "", "status": "",
+                                  "trace": [], "speakers": [],
                                   "segments": [], "engine": "", "engineNote": "", "duration": 0.0,
                                   "sessionId": "", "progress": 0.0,
                                   "diarization": False, "origin": ""})
@@ -4871,7 +5028,13 @@ class Controller(QObject):
     @Slot()
     def runTranscript(self):
         """Распознайте выбранный файл локально (+ определите голоса)."""
-        if self._jobs or self._trans_state["phase"] == "working":
+        if self._jobs:
+            reason = busy_job_reason(self._jobs)
+            self._trans_state["error"] = reason
+            self.transcribeStatus.emit(reason)
+            self.transcribeChanged.emit()
+            return
+        if self._trans_state["phase"] == "working":
             return
         path = self._trans_state.get("path", "")
         if not path or not Path(path).is_file():
@@ -4879,20 +5042,44 @@ class Controller(QObject):
             self.transcribeChanged.emit()
             return
         self._trans_cancel.clear()
+        model = str(self._settings.get("model") or "small")
+        device = str(self._settings.get("device") or "auto")
         state = self._trans_state
-        state.update({"phase": "working", "stage": "asr", "error": "", "segments": [],
+        state.update({"phase": "working", "stage": "asr", "error": "", "status": "",
+                      "trace": [], "segments": [],
                       "speakers": [], "diarization": False, "engine": "", "engineNote": "",
                       "sessionId": "", "progress": -1.0})
         self._trans_result_session_id = ""
         self._record_log("info", f"Транскрибация (локально): {Path(path).name}")
         self.transcribeChanged.emit()
 
+        disk_info = Engine.disk_status(model)
+        start_note = transcript_start_note(
+            Path(path),
+            model=model,
+            device=device,
+            disk_ready=bool(disk_info.get("ready")),
+            download_mb=MODEL_CATALOG.get(model, {}).get("download_mb"),
+        )
+        self.transcribeStatus.emit(start_note)
+        if not disk_info.get("ready"):
+            mb = MODEL_CATALOG.get(model, {}).get("download_mb")
+            extra = f" ~{mb} МБ, нужен интернет" if mb else ""
+            self.transcribeStatus.emit(
+                f"Модель «{model}» не скачана ({extra}). Нажмите «Диагностика» → «Починить»."
+            )
+
         def process():
             try:
                 text = self._transcribe_local(path)
             except Exception as exc:  # noqa: BLE001
-                text = f"Ошибка: {exc}"
-                self._record_log("error", str(exc))
+                text = f"Ошибка: {explain_transcribe_error(exc)}"
+                self._record_log("error", text)
+                try:
+                    if self._file_log is not None:
+                        self._file_log.write("error", traceback.format_exc())
+                except OSError:
+                    pass
             session_id = self._trans_result_session_id
             if self._trans_cancel.is_set():
                 self.transcribeTick.emit({"phase": "idle", "progress": 0.0, "stage": ""})
@@ -4909,13 +5096,15 @@ class Controller(QObject):
                     self.transcriptPersisted.emit(str(session_id))
 
         threading.Thread(target=process, name="dotaudio-transcribe", daemon=True).start()
-        self.transcribeStatus.emit("Распознаём файл на этом устройстве…")
 
     def _on_transcribe_tick(self, payload) -> None:
         """Применить снимок прогресса в GUI-потоке и уведомить QML."""
 
         if isinstance(payload, dict):
             self._trans_state.update(payload)
+            if payload.get("phase") == "done":
+                model = str(self._settings.get("model") or "small")
+                self._adopt_runtime_device(self.engine.last_device(model))
         self.transcribeChanged.emit()
 
     def _trans_stage(self, stage: str) -> None:
@@ -5017,7 +5206,7 @@ class Controller(QObject):
             config,
             self._trans_cancel,
             on_segment,
-            lambda s: self.transcribeStatus.emit(s.upper()),
+            lambda s: self.transcribeStatus.emit(s),
         )
         if needs_post_translate(self._settings.get("speech_mode")):
             results = [self._translate_segment(item) for item in results]
@@ -5045,6 +5234,10 @@ class Controller(QObject):
         rows, engine, note = self._recognize_file(path)
         if self._trans_cancel.is_set():
             return ""
+        if not rows:
+            model = str(self._settings.get("model") or "small")
+            disk_ready = bool(Engine.disk_status(model).get("ready"))
+            return "Ошибка: " + empty_transcript_reason(model, disk_ready)
         legend = self._speaker_legend(rows)
         duration_final = max(
             self._probe_wav_duration(path),
@@ -5264,12 +5457,133 @@ class Controller(QObject):
         if self._jobs or self._trans_state["phase"] == "working":
             return
         self._trans_state.update({"phase": "idle", "stage": "", "file": "", "path": "",
-                                  "error": "", "speakers": [], "segments": [],
+                                  "error": "", "status": "", "trace": [],
+                                  "speakers": [], "segments": [],
                                   "diarization": False, "engine": "", "engineNote": "",
                                   "duration": 0.0, "sessionId": "", "progress": 0.0,
                                   "origin": ""})
         self._clear_media_peaks()
         self.transcribeChanged.emit()
+
+    @Slot()
+    def runTranscriptDoctor(self):
+        if self._doctor.get("phase") == "running":
+            return
+        if self._jobs or self._trans_state["phase"] == "working" or self._model_preparing:
+            message = busy_job_reason(self._jobs) or "Дождитесь окончания распознавания или загрузки модели."
+            self._doctor.update({"phase": "fail", "message": message, "checks": [],
+                                 "canFix": False, "fixLabel": "", "fixes": [], "ok": False})
+            self.doctorChanged.emit()
+            self._record_log("warning", message)
+            return
+        self._doctor.update({"phase": "running", "message": "Проверяем Whisper и устройство…",
+                             "checks": [], "canFix": False, "fixLabel": "", "fixes": [], "ok": False})
+        self.doctorChanged.emit()
+        threading.Thread(target=self._run_doctor_worker, name="dotaudio-doctor", daemon=True).start()
+
+    def _run_doctor_worker(self):
+        model = str(self._settings.get("model") or "small")
+        device = str(self._settings.get("device") or "auto")
+        checks = []
+
+        def push(item):
+            if not item:
+                return
+            checks.append(item)
+            self.doctorTick.emit({"checks": list(checks), "message": item.get("label") or "", "phase": "running"})
+
+        hw = dict(self._hardware or {})
+        push(check_python())
+        push(check_hardware(hw))
+        push(check_ctranslate2())
+        push({"id": "device", "ok": True, "label": "Устройство ASR",
+              "detail": f"настройка {device} · {hw.get('compute_label') or hw.get('computeHint') or 'нет сводки'}",
+              "fix": ""})
+        push(check_pyav())
+        push(check_ffmpeg(self._data_dir))
+        push(check_whisper_disk(model, catalog=MODEL_CATALOG))
+        media = check_media_file(str(self._trans_state.get("path") or ""))
+        if media:
+            push(media)
+        try:
+            from dotaudio.engine import RecognitionConfig
+            config = RecognitionConfig(model=model, device=device, language="ru",
+                                       task="transcribe", backend="local")
+            probe = self.engine.probe_runtime(config, on_status=lambda s: self.transcribeStatus.emit(s))
+            push(whisper_runtime_check(probe, model))
+        except Exception as exc:  # noqa: BLE001
+            push({"id": "whisper_runtime", "ok": False, "label": "Whisper отвечает",
+                  "detail": explain_transcribe_error(exc), "fix": "cpu"})
+        summary = summarize_doctor(checks)
+        phase = "ok" if summary["ok"] else "fail"
+        extra = {
+            "model": model,
+            "device": device,
+            "python": sys.version.split()[0],
+        }
+        self.doctorFinished.emit({
+            "phase": phase,
+            "message": summary["message"],
+            "checks": checks,
+            "canFix": summary["canFix"],
+            "fixLabel": summary["fixLabel"],
+            "fixes": summary["fixes"],
+            "ok": summary["ok"],
+            "report": format_doctor_report(checks, summary["message"], extra=extra),
+        })
+
+    @Slot()
+    def fixTranscriptDoctor(self):
+        fixes = list(self._doctor.get("fixes") or [])
+        if "cpu" in fixes and str(self._settings.get("device") or "") != "cpu":
+            self.setSetting("device", "cpu")
+            self._record_log("info", "Откат: устройство распознавания → процессор")
+        if "prepare_model" in fixes:
+            self._doctor_fix_pending = True
+            self.prepareSelectedModel()
+            self._doctor["message"] = "Скачиваем и загружаем модель Whisper…"
+            self._doctor["phase"] = "running"
+            self.doctorChanged.emit()
+            return
+        if "setup" in fixes:
+            self._doctor["message"] = "Откройте автонастройку (кнопка в карточке анализа)."
+            self.doctorChanged.emit()
+            return
+        self._record_log("info", "Откат применён.")
+        self.runTranscriptDoctor()
+
+    @Slot()
+    def copyDoctorReport(self):
+        text = str(self._doctor.get("report") or format_doctor_report(
+            self._doctor.get("checks") or [], self._doctor.get("message") or ""))
+        QApplication.clipboard().setText(text)
+        self._notice = "Отчёт анализа скопирован."
+        self.changed.emit()
+        self._record_log("info", "Отчёт анализа скопирован")
+
+    @Slot()
+    def copyTranscriptError(self):
+        err = str(self._trans_state.get("error") or self._trans_state.get("status") or "")
+        QApplication.clipboard().setText(err)
+        self._notice = "Текст ошибки скопирован." if err else "Сейчас нет текста ошибки."
+        self.changed.emit()
+
+    @Slot()
+    def copyRecentLogs(self):
+        lines = [f"{e.get('time')} [{e.get('tone')}] {e.get('message')}" for e in self._logs[:80]]
+        QApplication.clipboard().setText("\n".join(lines))
+        self._notice = "Журнал скопирован."
+        self.changed.emit()
+
+    @Slot()
+    def openLogFile(self):
+        from PySide6.QtGui import QDesktopServices
+        log = getattr(self, "_file_log", None)
+        if log is None:
+            self._notice = "Файл журнала ещё не создан."
+            self.changed.emit()
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(log.path)))
 
     @Slot(int, str)
     def editTranscriptSegment(self, index: int, text: str) -> None:

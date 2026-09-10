@@ -85,6 +85,7 @@ class SetupController(QObject):
         self._cancel = threading.Event()
         self._worker: threading.Thread | None = None
         self._progress_pending: tuple[str, float, str] | None = None
+        self._whisper_device = ""
 
         self.scanFinished.connect(self._on_scan_finished)
         self.stepProgress.connect(self._on_step_progress)
@@ -364,6 +365,9 @@ class SetupController(QObject):
         self.stepProgress.emit("cuda", 100.0, str(result.get("message") or "CUDA готова"))
 
     def _run_whisper(self, briefing: dict, cancel: threading.Event) -> None:
+        from dataclasses import replace
+
+        from dotaudio.diag import explain_transcribe_error
         from dotaudio.engine import RecognitionConfig
 
         model = str(briefing.get("whisperModel") or "small")
@@ -395,9 +399,25 @@ class SetupController(QObject):
 
         if cancel.is_set():
             raise RuntimeError("Подготовка Whisper отменена")
-        device_used = self.controller.engine.prepare(config, None, progress)
+        try:
+            device_used = self.controller.engine.prepare(config, None, progress)
+        except Exception as exc:  # noqa: BLE001
+            if device != "cuda":
+                raise RuntimeError(explain_transcribe_error(exc)) from exc
+            self.stepProgress.emit(
+                "whisper",
+                0.0,
+                "Видеокарта не приняла модель, пробуем процессор…",
+            )
+            try:
+                device_used = self.controller.engine.prepare(
+                    replace(config, device="cpu"), None, progress
+                )
+            except Exception as cpu_exc:  # noqa: BLE001
+                raise RuntimeError(explain_transcribe_error(cpu_exc)) from cpu_exc
         if cancel.is_set():
             raise RuntimeError("Подготовка Whisper отменена")
+        self._whisper_device = str(device_used or "")
         self.stepProgress.emit("whisper", 100.0, f"Готово · {device_used}")
 
     def _run_nemo(self, briefing: dict, cancel: threading.Event) -> None:
@@ -548,7 +568,16 @@ class SetupController(QObject):
         self._busy = False
         self._overall = 100.0 if ok else self._compute_overall()
         # После успешной CUDA - включить GPU из GUI-потока.
-        if any(step.get("id") == "cuda" and step.get("status") == "done" for step in self._steps):
+        # Если Whisper на этой карте так и не поднялся и ушёл на CPU - не
+        # оставляем device=cuda, иначе следующий запуск снова упрётся в float16.
+        whisper_device = str(getattr(self, "_whisper_device", "") or "")
+        cuda_ok = any(
+            step.get("id") == "cuda" and step.get("status") == "done"
+            for step in self._steps
+        )
+        if whisper_device == "cpu":
+            self.controller.setSetting("device", "cpu")
+        elif cuda_ok or whisper_device == "cuda":
             self.controller.setSetting("device", "cuda")
         if ok:
             self._phase = "done"

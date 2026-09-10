@@ -1289,7 +1289,7 @@ ApplicationWindow {
                     Item { Layout.fillWidth: true }
                     IconButton { iconName: "close"; onClicked: root.logsOpen = false }
                 }
-                Label { text: "События приложения и распознавания"; color: Theme.muted; font.pixelSize: Theme.fsSmall }
+                Label { text: "События приложения · dotaudio.log"; color: Theme.muted; font.pixelSize: Theme.fsSmall }
                 ListView {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
@@ -1307,11 +1307,26 @@ ApplicationWindow {
                             anchors.fill: parent
                             anchors.margins: 10
                             text: modelData.time + "  " + modelData.message
-                            color: Theme.text
+                            color: String(modelData.tone || "") === "error" ? Theme.rec : Theme.text
                             font.pixelSize: Theme.fsSmall
                             wrapMode: Text.Wrap
                         }
                     }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.gapSm
+                    PillButton {
+                        text: "Копировать журнал"
+                        compact: true
+                        onClicked: bridge.copyRecentLogs()
+                    }
+                    PillButton {
+                        text: "Открыть файл"
+                        compact: true
+                        onClicked: bridge.openLogFile()
+                    }
+                    Item { Layout.fillWidth: true }
                 }
             }
         }

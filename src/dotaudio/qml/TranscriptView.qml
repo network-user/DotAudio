@@ -43,6 +43,10 @@ Rectangle {
     property var mutedKeys: ({})
     property var soloKeys: ({})
 
+    readonly property string runStatus: String(bridge.transcribeState.status || "")
+    readonly property string runError: String(bridge.transcribeState.error || "")
+    readonly property var doctor: bridge.transcriptDoctor || ({})
+
     readonly property var rows: {
         var list = view.segs || []
         var out = []
@@ -723,13 +727,100 @@ Rectangle {
                             }
                         }
 
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.gapSm
+                            PillButton {
+                                text: "Анализ"
+                                compact: true
+                                enabled: !view.busyPhase && String(view.doctor.phase || "") !== "running"
+                                onClicked: bridge.runTranscriptDoctor()
+                            }
+                            PillButton {
+                                text: String(view.doctor.fixLabel || "Починить")
+                                compact: true
+                                visible: Boolean(view.doctor.canFix)
+                                onClicked: {
+                                    var fixes = view.doctor.fixes || []
+                                    if (fixes.indexOf("setup") >= 0 && typeof setup !== "undefined" && setup)
+                                        setup.beginForced()
+                                    bridge.fixTranscriptDoctor()
+                                }
+                            }
+                            PillButton {
+                                text: "Копировать ошибку"
+                                compact: true
+                                visible: view.runError.length > 0
+                                onClicked: bridge.copyTranscriptError()
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
                         TranscriptBusy {
                             Layout.fillWidth: true
                             active: view.busyPhase
                             stage: view.stage
                             progress: view.progress
                             fileName: view.file
-                            message: view.busyMessage()
+                            message: view.runStatus || view.busyMessage()
+                        }
+                        Rectangle {
+                            Layout.fillWidth: true
+                            visible: view.runError.length > 0 && !view.busyPhase
+                            implicitHeight: errBannerCol.implicitHeight + 2 * Theme.padCard
+                            radius: Theme.radiusMd
+                            color: Theme.recSoft
+                            border.width: 1
+                            border.color: Theme.rec
+                            ColumnLayout {
+                                id: errBannerCol
+                                anchors.fill: parent
+                                anchors.margins: Theme.padCard
+                                spacing: Theme.gapSm
+                                Label {
+                                    text: "Ошибка расшифровки"
+                                    color: Theme.rec
+                                    font.pixelSize: Theme.fsLabel
+                                    font.weight: Font.DemiBold
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: view.runError
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fsSmall
+                                    wrapMode: Text.Wrap
+                                }
+                                Repeater {
+                                    model: {
+                                        var trace = bridge.transcribeState.trace || []
+                                        return trace.slice(Math.max(0, trace.length - 5))
+                                    }
+                                    delegate: Label {
+                                        required property var modelData
+                                        Layout.fillWidth: true
+                                        text: String(modelData.time || "") + "  " + String(modelData.message || "")
+                                        color: Theme.faint
+                                        font.pixelSize: Theme.fsMicro
+                                        font.family: Theme.monoFamily
+                                        wrapMode: Text.Wrap
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: Theme.gapSm
+                                    PillButton {
+                                        text: "Копировать"
+                                        compact: true
+                                        onClicked: bridge.copyTranscriptError()
+                                    }
+                                    PillButton {
+                                        text: "Анализ"
+                                        compact: true
+                                        onClicked: bridge.runTranscriptDoctor()
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                }
+                            }
                         }
                     }
                 }
@@ -1098,7 +1189,7 @@ Rectangle {
             }
             ColumnLayout {
                 anchors.centerIn: parent
-                visible: view.segs.length === 0 && view.file.length && !view.busyPhase
+                visible: view.segs.length === 0 && view.file.length && !view.busyPhase && !view.runError.length
                 width: Math.min(parent.width - 80, 360)
                 spacing: Theme.gapSm
                 Label {
@@ -1115,6 +1206,39 @@ Rectangle {
                     color: Theme.muted
                     font.pixelSize: Theme.fsBody
                     text: "Слушайте весь файл кнопкой ▶ в плеере выше. После расшифровки нажмите на фразу, чтобы услышать её отдельно."
+                }
+            }
+            ColumnLayout {
+                anchors.centerIn: parent
+                visible: view.segs.length === 0 && view.file.length && !view.busyPhase && view.runError.length > 0
+                width: Math.min(parent.width - 80, 400)
+                spacing: Theme.gapSm
+                Label {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: "Расшифровка не получилась"
+                    color: Theme.text
+                    font.pixelSize: Theme.fsLead
+                    font.weight: Font.DemiBold
+                }
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    color: Theme.rec
+                    font.pixelSize: Theme.fsBody
+                    text: view.runError
+                }
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter
+                    spacing: Theme.gapSm
+                    PillButton {
+                        text: "Анализ"
+                        onClicked: bridge.runTranscriptDoctor()
+                    }
+                    PillButton {
+                        text: "Копировать ошибку"
+                        onClicked: bridge.copyTranscriptError()
+                    }
                 }
             }
             ListView {

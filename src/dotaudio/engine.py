@@ -13,7 +13,7 @@ import os
 import time
 import wave
 from collections import OrderedDict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 from pathlib import Path
 from threading import Event, Lock
@@ -67,6 +67,13 @@ LIVE_MIN_LOGPROB = -1.0
 # only trusted above this probability.
 LIVE_DETECT_MIN_SECONDS = 1.5
 LIVE_LANGUAGE_CONFIDENCE = 0.7
+
+# На CUDA float16 требует «эффективный» FP16 (обычно Turing/Ampere и новее).
+# Pascal, часть GTX/MX и встроенные сценарии отвечают ошибкой compute type.
+# Тогда тот же GPU берём int8, а не валим всю автонастройку.
+CUDA_COMPUTE_TYPES = ("float16", "int8", "int8_float16", "float32")
+CPU_COMPUTE_TYPES = ("int8", "int8_float32", "float32")
+_MODEL_LOAD_ERRORS = (RuntimeError, OSError, ValueError)
 
 # Файлы модели, нужные faster-whisper: тот же набор, что качает его
 # download_model. Прогресс считается по фактическим байтам этих файлов.
@@ -280,6 +287,9 @@ class Engine:
         self._models: OrderedDict[tuple[str, str], Any] = OrderedDict()
         self._tokenizers: dict[tuple[str, str, str, str], Any] = {}
         self._detected_languages: dict[tuple[str, str], str] = {}
+        # Последний compute_type, с которым модель реально поднялась.
+        # Pascal/MX часто отказывают float16: следующий заход сразу берёт int8.
+        self._compute_ok: dict[tuple[str, str], str] = {}
         self._live_window = True
         self._model_lock = Lock()
         self._inference_lock = Lock()
@@ -374,9 +384,8 @@ class Engine:
             warm_error = self._warm_live_decoder(model, config, device)
             if warm_error is not None:
                 if (
-                    config.device == "auto"
+                    self._should_fallback_cpu(config.device, warm_error)
                     and device == "cuda"
-                    and self._is_cuda_error(warm_error)
                 ):
                     self._status(on_status, "gpu_unavailable_falling_back_cpu")
                     self._drop_model(config.model, "cuda")
@@ -389,10 +398,85 @@ class Engine:
         self._status(on_status, "model_ready")
         return device
 
+    def probe_runtime(
+        self,
+        config: RecognitionConfig,
+        cancel: Event | None = None,
+        on_status: StatusCallback | None = None,
+    ) -> dict[str, Any]:
+        """Проверить, что выбранная модель грузится и отвечает. Без скачивания.
+
+        Короткий живой декод тишины, не полный transcribe на 30 с. Пустой
+        текст на тишине - успех: важно, что рантайм не упал.
+        """
+
+        from dotaudio.diag import explain_transcribe_error
+
+        self._validate_config(config)
+        disk = self.disk_status(config.model)
+        payload = {
+            "ok": False,
+            "code": "missing",
+            "device": "",
+            "bytes": int(disk.get("bytes") or 0),
+            "detail": str(disk.get("message") or "Модель ещё не скачана."),
+        }
+        if not disk.get("ready"):
+            return payload
+        if self._cancelled(cancel):
+            payload.update(code="cancelled", detail="Проверка отменена.")
+            return payload
+        live_config = replace(
+            config, live_stream=True, media_mode=False, backend="local"
+        )
+        self._status(on_status, "loading_model")
+        try:
+            model, device = self._model_for(live_config.model, live_config.device)
+            if self._cancelled(cancel):
+                payload.update(
+                    code="cancelled", device=device, detail="Проверка отменена."
+                )
+                return payload
+            warm = self._warm_live_decoder(model, live_config, device)
+            if (
+                warm is not None
+                and device == "cuda"
+                and self._should_fallback_cpu(live_config.device, warm)
+            ):
+                self._status(on_status, "gpu_unavailable_falling_back_cpu")
+                self._drop_model(config.model, "cuda")
+                model, device = self._model_for(config.model, "cpu")
+                warm = self._warm_live_decoder(model, live_config, device)
+            if warm is not None:
+                raise warm
+        except Exception as exc:  # noqa: BLE001
+            payload.update(
+                code="error",
+                detail=explain_transcribe_error(exc),
+            )
+            return payload
+        self._status(on_status, "model_ready")
+        payload.update(
+            ok=True,
+            code="ok",
+            device=device,
+            detail=f"Модель {config.model} отвечает на {device}.",
+        )
+        return payload
+
     def has_cached_model(self, model_name: str, requested_device: str) -> bool:
         """True, когда выбранная модель уже лежит в памяти процесса."""
 
         return self._has_cached_model(model_name, requested_device)
+
+    def last_device(self, model_name: str) -> str:
+        """Устройство, на котором сейчас лежит эта модель, или пустая строка."""
+
+        with self._model_lock:
+            for name, device in reversed(self._models):
+                if name == model_name:
+                    return device
+        return ""
 
     @staticmethod
     def _validate_config(config: RecognitionConfig) -> None:
@@ -448,8 +532,8 @@ class Engine:
             return self._run_local(
                 source, config, config.device, cancel, on_segment, on_status
             )
-        except (RuntimeError, OSError) as exc:
-            if config.device != "auto" or not self._is_cuda_error(exc):
+        except _MODEL_LOAD_ERRORS as exc:
+            if not self._should_fallback_cpu(config.device, exc):
                 raise
             self._status(on_status, "gpu_unavailable_falling_back_cpu")
             self._drop_model(config.model, "cuda")
@@ -467,6 +551,8 @@ class Engine:
         on_status: StatusCallback | None,
     ) -> list[Segment]:
         model, actual_device = self._model_for(config.model, requested_device)
+        if requested_device == "cuda" and actual_device == "cpu":
+            self._status(on_status, "gpu_unavailable_falling_back_cpu")
         if self._cancelled(cancel):
             self._status(on_status, "cancelled")
             return []
@@ -864,15 +950,24 @@ class Engine:
                 if cached_key is not None:
                     self._models.move_to_end(cached_key)
                     return self._models[cached_key], cached_key[1]
-        candidates = ("cuda", "cpu") if requested_device == "auto" else (requested_device,)
+        # Явный cuda тоже откатывается на CPU: мастер часто пишет device=cuda
+        # после установки рантайма, хотя карта не тянет float16/int8.
+        candidates = (
+            ("cuda", "cpu")
+            if requested_device in {"auto", "cuda"}
+            else (requested_device,)
+        )
         last_error: BaseException | None = None
         for device in candidates:
             try:
                 return self._get_or_load_model(model_name, device), device
-            except (RuntimeError, OSError) as exc:
+            except _MODEL_LOAD_ERRORS as exc:
                 last_error = exc
-                if requested_device != "auto" or not self._is_cuda_error(exc):
-                    raise
+                if device == "cuda" and self._should_fallback_cpu(
+                    requested_device, exc
+                ):
+                    continue
+                raise
         assert last_error is not None
         raise last_error
 
@@ -1002,17 +1097,34 @@ class Engine:
             # local ASR stack at startup.
             from faster_whisper import WhisperModel
 
-            compute_type = "float16" if device == "cuda" else "int8"
-            loaded = WhisperModel(
-                model_name,
-                device=device,
-                compute_type=compute_type,
-                cpu_threads=live_cpu_threads(),
-            )
+            last_error: BaseException | None = None
+            loaded = None
+            used_type = ""
+            for compute_type in self._compute_types_for(model_name, device):
+                try:
+                    loaded = WhisperModel(
+                        model_name,
+                        device=device,
+                        compute_type=compute_type,
+                        cpu_threads=live_cpu_threads(),
+                    )
+                    used_type = compute_type
+                    last_error = None
+                    break
+                except _MODEL_LOAD_ERRORS as exc:
+                    last_error = exc
+                    if not self._is_compute_type_error(exc):
+                        raise
+            if loaded is None:
+                assert last_error is not None
+                self._compute_ok.pop(key, None)
+                raise last_error
             self._models.clear()
             self._tokenizers.clear()
             self._detected_languages.clear()
             self._models[key] = loaded
+            if used_type:
+                self._compute_ok[key] = used_type
             return loaded
 
     def _drop_model(self, model_name: str, device: str) -> None:
@@ -1022,13 +1134,37 @@ class Engine:
                 self._tokenizers.pop(key, None)
             self._detected_languages.pop((model_name, device), None)
 
+    def _compute_types_for(self, model_name: str, device: str) -> tuple[str, ...]:
+        base = CUDA_COMPUTE_TYPES if device == "cuda" else CPU_COMPUTE_TYPES
+        last = self._compute_ok.get((model_name, device))
+        if last and last in base:
+            return (last,) + tuple(kind for kind in base if kind != last)
+        return base
+
+    @staticmethod
+    def _is_compute_type_error(error: BaseException) -> bool:
+        text = f"{type(error).__name__}: {error}".lower()
+        return "compute type" in text or (
+            "float16" in text and "support" in text
+        )
+
     @staticmethod
     def _is_cuda_error(error: BaseException) -> bool:
         text = f"{type(error).__name__}: {error}".lower()
+        if Engine._is_compute_type_error(error):
+            return True
         return any(
             marker in text
             for marker in ("cuda", "cublas", "cudnn", "cudart", "nvrtc")
         )
+
+    @staticmethod
+    def _should_fallback_cpu(requested_device: str, error: BaseException) -> bool:
+        """CUDA отказала: пробуем процессор и при явном device=cuda."""
+
+        if requested_device not in {"auto", "cuda"}:
+            return False
+        return Engine._is_cuda_error(error)
 
     def _transcribe_remote(
         self,
@@ -1191,4 +1327,4 @@ class Engine:
         }
 
 
-__all__ = ["Engine", "RecognitionConfig", "Segment"]
+__all__ = ["DownloadCancelled", "Engine", "RecognitionConfig", "Segment"]

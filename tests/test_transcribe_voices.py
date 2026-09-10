@@ -576,6 +576,56 @@ def test_clear_transcript_resets_path_and_progress():
     assert stub.transcribeChanged.sent
 
 
+def test_run_transcript_busy_job_sets_error():
+    class _Busy:
+        runTranscript = Controller.runTranscript
+
+        def __init__(self):
+            self._jobs = {"live": {"mode": "live", "name": "Live"}}
+            self._trans_state = {"phase": "idle", "error": "", "path": "a.wav"}
+            self.transcribeStatus = _Signal()
+            self.transcribeChanged = _Signal()
+
+    stub = _Busy()
+    stub.runTranscript()
+    assert "Live" in stub._trans_state["error"]
+    assert stub.transcribeStatus.sent
+    assert stub.transcribeChanged.sent
+
+
+def test_adopt_runtime_device_rolls_back_cuda_to_cpu():
+    class _Store:
+        def __init__(self):
+            self.saved = None
+
+        def save_settings(self, settings):
+            self.saved = dict(settings)
+
+    class _Stub:
+        _adopt_runtime_device = Controller._adopt_runtime_device
+
+        def __init__(self):
+            self._settings = {"device": "cuda"}
+            self.store = _Store()
+            self._notice = ""
+            self.logs = []
+
+        def _record_log(self, tone, message):
+            self.logs.append((tone, message))
+
+    stub = _Stub()
+    stub._adopt_runtime_device("cpu")
+    assert stub._settings["device"] == "cpu"
+    assert stub.store.saved["device"] == "cpu"
+    assert any("Откат" in message for _tone, message in stub.logs)
+
+    keep = _Stub()
+    keep._settings["device"] = "auto"
+    keep._adopt_runtime_device("cpu")
+    assert keep._settings["device"] == "auto"
+    assert keep.store.saved is None
+
+
 def test_open_transcript_in_assistant_emits_session(tmp_path):
     from dotaudio.storage import Store
 
