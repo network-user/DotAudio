@@ -1,20 +1,21 @@
 @echo off
 chcp 65001 >nul
-title DotAudio - установка
+title DotAudio - install
 cd /d "%~dp0"
 
 echo.
-echo   DotAudio - установка
-echo   Окно можно не закрывать: будет виден прогресс.
+echo   DotAudio - install
+echo   Keep this window open to see progress.
 echo.
 
-REM Process-only Bypass: не меняет политику системы, достаточно для двойного клика.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0deploy\install.ps1" -Launch
+REM Process-only Bypass: does not change machine policy; enough for double-click.
+REM install.ps1 must be UTF-8 with BOM so Windows PowerShell 5.1 parses Cyrillic.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0deploy\install.ps1" -Launch
 set ERR=%ERRORLEVEL%
 
 if not "%ERR%"=="0" (
   echo.
-  echo   Установка завершилась с ошибкой. Код: %ERR%
+  echo   Install failed. Exit code: %ERR%
   echo.
   pause
   exit /b %ERR%

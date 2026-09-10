@@ -1,0 +1,5 @@
+# Keep PowerShell scripts as CRLF. UTF-8 BOM is stored in the blob so
+# Windows PowerShell 5.1 can parse Cyrillic string literals.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf

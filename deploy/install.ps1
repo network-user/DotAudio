@@ -1,4 +1,4 @@
-# DotAudio installer for Windows.
+﻿# DotAudio installer for Windows.
 # Prefer launching via Install.bat (double-click) so progress stays visible.
 # Requires: Git and Python 3.12 or 3.13.
 
@@ -238,12 +238,12 @@ catch {
     Write-Host ("  " + $_.Exception.Message) -ForegroundColor Red
     Write-Host ""
     if (-not $NoPause) {
-        Read-Host "Нажмите Enter, чтобы закрыть"
+        Read-Host "Press Enter to close"
     }
     exit 1
 }
 
 if (-not $NoPause) {
-    Read-Host "Нажмите Enter, чтобы закрыть"
+    Read-Host "Press Enter to close"
 }
 exit 0

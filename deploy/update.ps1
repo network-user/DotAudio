@@ -1,4 +1,4 @@
-# Sync DotAudio checkout to origin/main and reinstall the editable package.
+﻿# Sync DotAudio checkout to origin/main and reinstall the editable package.
 # Safe for user data: only touches the git tree and .venv.
 
 [CmdletBinding()]
