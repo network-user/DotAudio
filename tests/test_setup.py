@@ -46,10 +46,38 @@ def test_build_briefing_includes_ffmpeg_download_when_missing():
         llm_ready=True,
         nemo_ready=True,
         ffmpeg_ready=False,
+        system_audio_ready=True,
     )
     assert briefing["downloadFfmpeg"] is True
     assert briefing["ffmpegMb"] > 0
     assert "ffmpeg" in [step["id"] for step in build_steps(briefing)]
+
+
+def test_build_briefing_exposes_macos_system_audio_hint(monkeypatch):
+    monkeypatch.setattr("dotaudio.capture.system_audio_supported", lambda: False)
+    monkeypatch.setattr(
+        "dotaudio.capture.system_audio_hint",
+        lambda: "BlackHole",
+    )
+    hardware = {
+        "threads": 8,
+        "ram_gb": 16,
+        "cuda_devices": 0,
+        "computeAdvice": "cpu_only",
+        "gpus": [],
+        "platform": "darwin",
+        "notes": [],
+    }
+    briefing = build_briefing(
+        hardware,
+        whisper_ready=True,
+        llm_ready=True,
+        nemo_ready=True,
+        ffmpeg_ready=True,
+        system_audio_ready=False,
+    )
+    assert briefing["systemAudioReady"] is False
+    assert "BlackHole" in briefing["systemAudioHint"]
 
 
 def test_can_skip_setup_when_everything_ready():

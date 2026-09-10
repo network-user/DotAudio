@@ -16,9 +16,9 @@
   `git reset --hard origin/main` (UI, `deploy/update.ps1`, `deploy/update.sh`).
   Setup.exe / PyInstaller ещё не собран.
 - Платформы: Windows (полный UX: WASAPI loopback, глобальные хоткеи, автовставка);
-  Ubuntu/Linux и macOS - ядро (микрофон, Live при наличии monitor/BlackHole,
-  медиа, история, мастер загрузок, авто-FFmpeg). End-to-end на Unix ещё не
-  прогнан на целевых машинах - не заявлять паритет без ручной проверки.
+  Ubuntu/Linux и macOS - ядро плюс pynput-хоткеи, авто-FFmpeg/NeMo, Live при
+  наличии monitor/BlackHole. End-to-end на Unix ещё не прогнан на целевых
+  машинах - не заявлять паритет без ручной проверки.
 - Runtime: Python >=3.12,<3.14, Qt Quick через PySide6.
 - `pyproject.toml` - источник правды по зависимостям и entrypoints.
 - Git-репозиторий и remote на момент создания не инициализированы.

@@ -35,7 +35,7 @@ def test_local_engine_caches_model_and_normalises_segments(monkeypatch) -> None:
     engine = Engine()
     config = RecognitionConfig(device="cpu")
     assert engine.transcribe(np.zeros(1600, dtype=np.float32), config) == [
-        {"start": 0.0, "end": 0.5, "text": "first"}
+        {"start": 0.0, "end": 0.5, "text": "first", "confidence": 1.0}
     ]
     engine.transcribe(np.zeros(1600, dtype=np.float32), config)
     assert created == [("base", "cpu", "int8")]
@@ -101,7 +101,7 @@ def test_local_engine_cancellation_stops_between_segments(monkeypatch) -> None:
         cancel.set()
 
     result = Engine().transcribe(np.zeros(1600), RecognitionConfig(device="cpu"), cancel, receive)
-    assert result == [{"start": 0.0, "end": 1.0, "text": "one"}]
+    assert result == [{"start": 0.0, "end": 1.0, "text": "one", "confidence": 1.0}]
     assert seen == result
 
 
@@ -121,7 +121,7 @@ def test_auto_device_retries_cuda_runtime_error_on_cpu(monkeypatch) -> None:
 
     monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=model))
     assert Engine().transcribe(np.zeros(1600), RecognitionConfig()) == [
-        {"start": 0.0, "end": 1.0, "text": "ready"}
+        {"start": 0.0, "end": 1.0, "text": "ready", "confidence": 1.0}
     ]
     assert attempts == [("cuda", "float16"), ("cpu", "int8")]
 
@@ -209,7 +209,13 @@ def test_media_recipe_keeps_sung_words_and_word_timings(monkeypatch) -> None:
 
     monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=lambda *_args, **_kwargs: FakeModel()))
     assert Engine().transcribe(np.zeros(1600), RecognitionConfig(device="cpu", media_mode=True)) == [
-        {"start": 0.0, "end": 1.0, "text": "привет", "words": [{"text": "привет", "start": 0.1, "end": 0.5}]}
+        {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "привет",
+            "confidence": 1.0,
+            "words": [{"text": "привет", "start": 0.1, "end": 0.5}],
+        }
     ]
 
 

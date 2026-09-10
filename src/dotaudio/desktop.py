@@ -102,6 +102,145 @@ def combo_is_held(key_down, hotkey: Hotkey) -> bool:
     return bool(key_down(hotkey.key))
 
 
+def hotkey_tokens(hotkey: Hotkey) -> frozenset[str]:
+    """Normalized token set for cross-platform matching (ctrl/alt/shift/cmd + key)."""
+
+    parts: set[str] = set()
+    if hotkey.modifiers & MOD_CONTROL:
+        parts.add("ctrl")
+    if hotkey.modifiers & MOD_ALT:
+        parts.add("alt")
+    if hotkey.modifiers & MOD_SHIFT:
+        parts.add("shift")
+    if hotkey.modifiers & MOD_WIN:
+        parts.add("cmd")
+    key = int(hotkey.key)
+    if key == 0x20:
+        parts.add("space")
+    elif key == VK_ESCAPE:
+        parts.add("esc")
+    elif 0x30 <= key <= 0x39:
+        parts.add(chr(key))
+    elif 0x41 <= key <= 0x5A:
+        parts.add(chr(key).lower())
+    else:
+        parts.add(f"vk:{key:02x}")
+    return frozenset(parts)
+
+
+def _pynput_key_token(key: object) -> str | None:
+    """Map a pynput key object to the same token vocabulary as ``hotkey_tokens``."""
+
+    try:
+        from pynput.keyboard import Key, KeyCode
+    except ImportError:
+        return None
+    mapping = {
+        Key.ctrl: "ctrl",
+        Key.ctrl_l: "ctrl",
+        Key.ctrl_r: "ctrl",
+        Key.alt: "alt",
+        Key.alt_l: "alt",
+        Key.alt_r: "alt",
+        Key.alt_gr: "alt",
+        Key.shift: "shift",
+        Key.shift_l: "shift",
+        Key.shift_r: "shift",
+        Key.cmd: "cmd",
+        Key.cmd_l: "cmd",
+        Key.cmd_r: "cmd",
+        Key.space: "space",
+        Key.esc: "esc",
+    }
+    token = mapping.get(key)  # type: ignore[arg-type]
+    if token:
+        return token
+    if isinstance(key, KeyCode) and key.char and len(key.char) == 1:
+        ch = key.char.lower()
+        if ch.isalnum():
+            return ch
+    return None
+
+
+class _UnixHotkeyListener:
+    """Global hotkeys via pynput for Linux/macOS (Wayland may require permissions)."""
+
+    def __init__(self, emit) -> None:
+        self._emit = emit
+        self._bindings: dict[str, frozenset[str]] = {}
+        self._pressed: set[str] = set()
+        self._fired: set[str] = set()
+        self._listener = None
+
+    @property
+    def active(self) -> bool:
+        return self._listener is not None
+
+    def set_bindings(self, bindings: Mapping[str, Hotkey]) -> bool:
+        self.stop()
+        self._bindings = {action: hotkey_tokens(hotkey) for action, hotkey in bindings.items()}
+        self._pressed.clear()
+        self._fired.clear()
+        try:
+            from pynput import keyboard
+        except ImportError:
+            return False
+        try:
+            self._listener = keyboard.Listener(
+                on_press=self._on_press,
+                on_release=self._on_release,
+            )
+            self._listener.daemon = True
+            self._listener.start()
+        except Exception:
+            self._listener = None
+            return False
+        return True
+
+    def stop(self) -> None:
+        listener = self._listener
+        self._listener = None
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                pass
+        self._pressed.clear()
+        self._fired.clear()
+
+    def combo_held(self, action: str) -> bool:
+        needed = self._bindings.get(action)
+        return bool(needed and needed <= self._pressed)
+
+    def _on_press(self, key: object) -> None:
+        token = _pynput_key_token(key)
+        if not token:
+            return
+        self._pressed.add(token)
+        for action, needed in self._bindings.items():
+            if action in self._fired:
+                continue
+            if needed <= self._pressed:
+                self._fired.add(action)
+                try:
+                    self._emit(action)
+                except Exception:
+                    pass
+
+    def _on_release(self, key: object) -> None:
+        token = _pynput_key_token(key)
+        if not token:
+            return
+        self._pressed.discard(token)
+        done: list[str] = []
+        for action in self._fired:
+            needed = self._bindings.get(action) or frozenset()
+            if token in needed or not (needed <= self._pressed):
+                done.append(action)
+        for action in done:
+            self._fired.discard(action)
+
+
 def _token_integrity_level(process_handle) -> int | None:
     """Mandatory integrity level of a process, or None when the query fails."""
 
@@ -212,6 +351,7 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         self.available = False
         self.target = 0
         self.user32 = None
+        self._unix = None
         self._registered_hotkeys: dict[str, Hotkey] = {}
         # Ctrl+Alt+X - мгновенный выход без подтверждения. Хранится отдельно,
         # потому что пользователь переопределяет только dictate/island/пасту
@@ -220,19 +360,33 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         self._cancel_hotkey = Hotkey(MOD_NOREPEAT, VK_ESCAPE)
         # Why the last paste() returned False: "" | "no_target" | "focus" | "elevated" | "sendinput".
         self.last_paste_block = ""
+        defaults = {
+            "dictate": Hotkey(MOD_NOREPEAT | MOD_ALT | MOD_CONTROL, 0x20),
+            "island": Hotkey(MOD_NOREPEAT | MOD_ALT | MOD_CONTROL, 0x4F),
+            "paste_last": Hotkey(MOD_NOREPEAT | MOD_SHIFT | MOD_ALT, 0x5A),
+            "quit": self._quit_hotkey,
+            "cancel": self._cancel_hotkey,
+        }
         if sys.platform == "win32":
             self.user32 = ctypes.WinDLL("user32", use_last_error=True)
             self._configure_win32_functions()
             app.installNativeEventFilter(self)
-            self.available = self.set_hotkeys(
-                {
-                    "dictate": Hotkey(MOD_NOREPEAT | MOD_ALT | MOD_CONTROL, 0x20),
-                    "island": Hotkey(MOD_NOREPEAT | MOD_ALT | MOD_CONTROL, 0x4F),
-                    "paste_last": Hotkey(MOD_NOREPEAT | MOD_SHIFT | MOD_ALT, 0x5A),
-                    "quit": self._quit_hotkey,
-                    "cancel": self._cancel_hotkey,
-                }
-            )
+            self.available = self.set_hotkeys(defaults)
+        else:
+            self._unix = _UnixHotkeyListener(self._emit_hotkey_action)
+            self.available = self.set_hotkeys(defaults)
+
+    def _emit_hotkey_action(self, action: str) -> None:
+        if action == "dictate":
+            self.dictate.emit()
+        elif action == "island":
+            self.island.emit()
+        elif action == "paste_last":
+            self.paste_last.emit()
+        elif action == "quit":
+            self.quit_requested.emit()
+        elif action == "cancel":
+            self.cancel_requested.emit()
 
     def _configure_win32_functions(self) -> None:
         """Declare every Win32 call used here to avoid pointer-size truncation."""
@@ -297,6 +451,18 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         bindings = merged
         if len({(hotkey.modifiers, hotkey.key) for hotkey in bindings.values()}) != len(bindings):
             raise ValueError("DotAudio actions cannot use the same hotkey")
+        if self._unix is not None:
+            previous = self._registered_hotkeys.copy()
+            ok = self._unix.set_bindings(bindings)
+            if not ok:
+                if previous:
+                    self._unix.set_bindings(previous)
+                    self._registered_hotkeys = previous
+                self.available = bool(previous) and self._unix.active
+                return False
+            self._registered_hotkeys = dict(bindings)
+            self.available = True
+            return True
         if not self.user32:
             return False
 
@@ -358,12 +524,20 @@ class Desktop(QObject, QAbstractNativeEventFilter):
             window = self.user32.GetForegroundWindow()
             if window and not self._is_current_process(window):
                 self.target = window
+            return
+        # Non-Windows: mark that a best-effort paste into the focused app is OK.
+        if self._unix is not None:
+            self.target = 1
 
     def combo_held(self, action: str = "dictate") -> bool:
         """True while the registered combination for ``action`` is still down."""
 
         hotkey = self._registered_hotkeys.get(action)
-        if not self.user32 or hotkey is None:
+        if hotkey is None:
+            return False
+        if self._unix is not None:
+            return self._unix.combo_held(action)
+        if not self.user32:
             return False
         return combo_is_held(
             lambda vk: bool(self.user32.GetAsyncKeyState(vk) & _ASYNC_DOWN),
@@ -379,6 +553,17 @@ class Desktop(QObject, QAbstractNativeEventFilter):
 
     def paste(self):
         self.last_paste_block = ""
+        if self.user32:
+            return self._paste_win32()
+        if not self.target:
+            self.last_paste_block = "no_target"
+            return False
+        if self._paste_unix():
+            return True
+        self.last_paste_block = "sendinput"
+        return False
+
+    def _paste_win32(self) -> bool:
         if not self.user32 or not self.target or not self.user32.IsWindow(self.target):
             self.last_paste_block = "no_target"
             return False
@@ -419,6 +604,38 @@ class Desktop(QObject, QAbstractNativeEventFilter):
             )
             self.user32.SendInput(len(release), release, ctypes.sizeof(_INPUT))
         self.last_paste_block = "sendinput"
+        return False
+
+    def _paste_unix(self) -> bool:
+        """Best-effort Cmd/Ctrl+V. Clipboard is already filled by the controller."""
+
+        import shutil
+        import subprocess
+
+        try:
+            if sys.platform == "darwin":
+                proc = subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        'tell application "System Events" to keystroke "v" using command down',
+                    ],
+                    capture_output=True,
+                    timeout=5.0,
+                    check=False,
+                )
+                return proc.returncode == 0
+            if sys.platform.startswith("linux"):
+                if shutil.which("xdotool"):
+                    proc = subprocess.run(
+                        ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
+                        capture_output=True,
+                        timeout=5.0,
+                        check=False,
+                    )
+                    return proc.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
         return False
 
     @staticmethod
@@ -476,6 +693,8 @@ class Desktop(QObject, QAbstractNativeEventFilter):
         return True
 
     def close(self):
+        if self._unix is not None:
+            self._unix.stop()
         if self.user32:
             self._unregister_hotkeys()
             self.app.removeNativeEventFilter(self)

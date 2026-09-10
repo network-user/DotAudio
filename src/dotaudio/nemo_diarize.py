@@ -115,6 +115,17 @@ def _candidate_paths() -> list[Path]:
     else:
         paths.append(Path.home() / ".local" / "bin" / CLI_NAME)
         paths.append(Path("/usr/local/bin") / CLI_NAME)
+        if sys.platform == "darwin":
+            paths.append(
+                Path.home()
+                / "Library"
+                / "Application Support"
+                / "NeMoSpeech"
+                / "bin"
+                / CLI_NAME
+            )
+        paths.append(Path.home() / ".local" / "share" / "nemo-speech" / "bin" / CLI_NAME)
+        paths.append(Path.home() / ".local" / "nemo-speech" / "bin" / CLI_NAME)
     return paths
 
 
@@ -265,7 +276,9 @@ def install_prefix() -> Path:
     if sys.platform == "win32":
         local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
         return Path(local) / "Programs" / "NeMoSpeech"
-    return Path.home() / ".local" / "nemo-speech"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "NeMoSpeech"
+    return Path.home() / ".local" / "share" / "nemo-speech"
 
 
 def download_cache_dir() -> Path:
@@ -310,11 +323,53 @@ def _host_arch() -> str:
 
 
 def preferred_backend(*, prefer_cuda: bool = False) -> str:
-    """Бэкенд архива: cuda при NVIDIA, иначе cpu. Vulkan не трогаем."""
+    """Бэкенд архива: cuda/metal при наличии ускорителя, иначе cpu."""
 
-    if prefer_cuda and sys.platform == "win32":
+    if prefer_cuda and (sys.platform == "win32" or sys.platform.startswith("linux")):
         return "cuda"
+    if sys.platform == "darwin" and _host_arch() == "aarch64":
+        return "metal"
     return "cpu"
+
+
+def _os_tag() -> str:
+    if sys.platform == "win32":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    raise RuntimeError(f"ОС {sys.platform} не поддержана установщиком NeMo")
+
+
+def _cli_basename() -> str:
+    return "nemo-speech.exe" if sys.platform == "win32" else CLI_NAME
+
+
+def _archive_name(version: str, backend: str) -> str:
+    release_version = version.lstrip("v")
+    ext = "zip" if sys.platform == "win32" else "tar.gz"
+    return f"nemo-speech-{release_version}-{_os_tag()}-{_host_arch()}-{backend}.{ext}"
+
+
+def _link_user_bin(binary: Path) -> None:
+    """Положить `nemo-speech` в ~/.local/bin, как официальный install.sh."""
+
+    if sys.platform == "win32":
+        return
+    bindir = Path.home() / ".local" / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    link = bindir / CLI_NAME
+    try:
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(binary)
+    except OSError:
+        try:
+            shutil.copy2(binary, link)
+            link.chmod(link.stat().st_mode | 0o111)
+        except OSError:
+            return
 
 
 def _download_file(
@@ -408,19 +463,13 @@ def install_runtime(
 ) -> dict[str, Any]:
     """Скачать готовый архив NeMo-Speech.cpp и поставить в prefix.
 
-    Без PowerShell и без сборки из исходников: только опубликованный zip
-    с GitHub Releases. На Windows путь совпадает с официальным установщиком.
+    Без PowerShell/shell и без сборки из исходников: только опубликованный
+    zip/tar.gz с GitHub Releases. Пути совпадают с официальным установщиком.
     """
 
     def progress(phase: str, percent: float, message: str) -> None:
         if on_progress is not None:
             on_progress({"phase": phase, "percent": percent, "message": message})
-
-    if sys.platform != "win32":
-        raise RuntimeError(
-            "Автоустановка NeMo сейчас есть только для Windows. "
-            f"Вручную: {INSTALL_COMMAND_UNIX}"
-        )
 
     existing = executable()
     if existing:
@@ -432,17 +481,19 @@ def install_runtime(
     progress("resolve", 2.0, "Определяем версию NeMo…")
     version = resolve_release_version(cancel)
     if not version:
-        raise RuntimeError("не удалось узнать версию NeMo-Speech.cpp")
+        raise RuntimeError(
+            "не удалось узнать версию NeMo-Speech.cpp. "
+            f"Вручную: {install_command()}"
+        )
     if cancel is not None and cancel.is_set():
         raise InstallCancelled("установка NeMo отменена")
 
     selected = preferred_backend(prefer_cuda=prefer_cuda) if backend == "auto" else backend
-    if selected not in {"cpu", "cuda"}:
+    if selected not in {"cpu", "cuda", "metal"}:
         selected = "cpu"
-    arch = _host_arch()
     tag = version if version.startswith("v") else f"v{version}"
     release_version = version.lstrip("v")
-    archive_name = f"nemo-speech-{release_version}-windows-{arch}-{selected}.zip"
+    archive_name = _archive_name(version, selected)
     url = f"{RELEASE_BASE}/download/{tag}/{archive_name}"
 
     target_root = Path(prefix) if prefix is not None else install_prefix()
@@ -464,10 +515,10 @@ def install_runtime(
         except InstallCancelled:
             raise
         except Exception:
-            if selected == "cuda":
-                # Нет CUDA-сборки - берём CPU, диаризация всё равно работает.
+            if selected in {"cuda", "metal"}:
+                # Нет ускоренной сборки - берём CPU, диаризация всё равно работает.
                 selected = "cpu"
-                archive_name = f"nemo-speech-{release_version}-windows-{arch}-{selected}.zip"
+                archive_name = _archive_name(version, selected)
                 url = f"{RELEASE_BASE}/download/{tag}/{archive_name}"
                 archive_path = cache / archive_name
                 digest_path = cache / f"{archive_name}.sha256"
@@ -497,17 +548,24 @@ def install_runtime(
         progress("extract", 70.0, "Распаковываем рантайм…")
         extract = work / "extract"
         extract.mkdir(parents=True, exist_ok=True)
-        from dotaudio.archiveutil import safe_extract_zip
+        if sys.platform == "win32":
+            from dotaudio.archiveutil import safe_extract_zip
 
-        safe_extract_zip(archive_path, extract)
+            safe_extract_zip(archive_path, extract)
+        else:
+            from dotaudio.archiveutil import safe_extract_tar
+
+            safe_extract_tar(archive_path, extract)
         entries = list(extract.iterdir())
         root = entries[0] if len(entries) == 1 and entries[0].is_dir() else extract
-        staged = root / "bin" / "nemo-speech.exe"
+        staged = root / "bin" / _cli_basename()
         if not staged.is_file():
-            raise RuntimeError("в архиве нет bin\\nemo-speech.exe")
+            raise RuntimeError(f"в архиве нет bin/{_cli_basename()}")
+        if sys.platform != "win32":
+            staged.chmod(staged.stat().st_mode | 0o111)
 
         progress("activate", 88.0, "Подключаем установку…")
-        identity = f"{release_version} windows {arch} {selected}"
+        identity = f"{release_version} {_os_tag()} {_host_arch()} {selected}"
         (root / ".nemo-speech-install").write_text(identity, encoding="utf-8")
         target_root.parent.mkdir(parents=True, exist_ok=True)
         next_dir = Path(str(target_root) + ".new")
@@ -525,10 +583,10 @@ def install_runtime(
             raise
         shutil.rmtree(old_dir, ignore_errors=True)
 
-        path = str(target_root / "bin" / "nemo-speech.exe")
+        path = str(target_root / "bin" / _cli_basename())
         if not Path(path).is_file():
-            raise RuntimeError("после установки не найден nemo-speech.exe")
-        # Zip больше не нужен: место на диске важнее повторной распаковки.
+            raise RuntimeError(f"после установки не найден {_cli_basename()}")
+        _link_user_bin(Path(path))
         archive_path.unlink(missing_ok=True)
         digest_path.unlink(missing_ok=True)
         progress("ready", 100.0, f"NeMo {release_version} · {selected}")

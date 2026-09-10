@@ -83,6 +83,15 @@
 Проверки: unit-тесты capture/ffmpeg/archive/updater на Windows зелёные.
 Ручной прогон Ubuntu/macOS ещё не выполнен - не закрывать паритет.
 
+## Итерация hotkeys / NeMo / confidence, 2026-09-10
+
+- `desktop.py`: глобальные хоткеи на Linux/macOS через `pynput` (`_UnixHotkeyListener`);
+  paste best-effort через `osascript` / `xdotool`; зависимость `pynput` в pyproject.
+- Мастер: `systemAudioHint` / карточка «Системный звук» (BlackHole / Pulse monitor).
+- `nemo_diarize.install_runtime`: автоустановка zip/tar.gz на Windows/Linux/macOS
+  (cpu/cuda/metal), prefix как у upstream, symlink в `~/.local/bin`.
+- `test_engine.py`: ожидания сегментов учитывают поле `confidence`.
+
 ## MVP: готовые сценарии
 
 1. Диктовка: запуск записью или Ctrl+Alt+Space, завершение, текст в истории/буфере и безопасная попытка вставки.

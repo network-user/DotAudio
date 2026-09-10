@@ -1,10 +1,12 @@
 from dotaudio.desktop import (
     MOD_ALT,
     MOD_CONTROL,
+    MOD_NOREPEAT,
     MOD_WIN,
     Hotkey,
     combo_is_held,
     foreground_is_elevated,
+    hotkey_tokens,
 )
 
 
@@ -25,3 +27,8 @@ def test_combo_is_held_accepts_either_windows_key() -> None:
 
 def test_foreground_is_elevated_safe_without_user32() -> None:
     assert foreground_is_elevated(None) is False
+
+
+def test_hotkey_tokens_normalize_ctrl_alt_space() -> None:
+    tokens = hotkey_tokens(Hotkey(MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x20))
+    assert tokens == frozenset({"ctrl", "alt", "space"})

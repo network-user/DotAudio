@@ -200,6 +200,12 @@ class SetupController(QObject):
                 "nemoReady": nemo_ready,
                 "ffmpegReady": ffmpeg_available(data_dir),
             }
+            try:
+                from dotaudio.capture import system_audio_supported
+
+                readiness["systemAudioReady"] = bool(system_audio_supported())
+            except Exception:
+                readiness["systemAudioReady"] = False
             self.scanFinished.emit(summary, readiness)
 
         threading.Thread(target=work, name="dotaudio-setup-scan", daemon=True).start()
@@ -217,6 +223,7 @@ class SetupController(QObject):
             llm_ready=bool(ready.get("llmReady")),
             nemo_ready=bool(ready.get("nemoReady")),
             ffmpeg_ready=bool(ready.get("ffmpegReady")),
+            system_audio_ready=ready.get("systemAudioReady"),
         )
         # Всё уже на диске и это не ручной повтор - тихо закрываем мастер.
         if not self._force and plan.can_skip_setup(self._briefing):

@@ -120,11 +120,21 @@ def technology_cards(
     *,
     nemo_ready: bool = False,
     ffmpeg_ready: bool = False,
+    system_audio_ready: bool | None = None,
 ) -> list[dict[str, Any]]:
     """Короткий список найденных технологий для брифинга."""
 
+    import sys
+
+    from dotaudio.capture import system_audio_supported
+
     advice = str(hardware.get("computeAdvice") or "")
     gpu_label = str(hardware.get("gpuLabel") or hardware.get("gpuName") or "")
+    if system_audio_ready is None:
+        try:
+            system_audio_ready = system_audio_supported()
+        except Exception:
+            system_audio_ready = sys.platform == "win32"
     cards: list[dict[str, Any]] = [
         {
             "id": "cpu",
@@ -220,6 +230,23 @@ def technology_cards(
             "state": "ready" if ffmpeg_ready else "needed",
         }
     )
+    if sys.platform != "win32":
+        cards.append(
+            {
+                "id": "system_audio",
+                "title": "Системный звук",
+                "detail": (
+                    "monitor / BlackHole найден"
+                    if system_audio_ready
+                    else (
+                        "нужен BlackHole"
+                        if sys.platform == "darwin"
+                        else "нужен Pulse/PipeWire monitor"
+                    )
+                ),
+                "state": "ready" if system_audio_ready else "info",
+            }
+        )
     cards.append(
         {
             "id": "llm",
@@ -238,8 +265,13 @@ def build_briefing(
     llm_ready: bool = False,
     nemo_ready: bool = False,
     ffmpeg_ready: bool | None = None,
+    system_audio_ready: bool | None = None,
 ) -> dict[str, Any]:
     """Рекомендации и оценки размера для экрана брифинга."""
+
+    import sys
+
+    from dotaudio.capture import system_audio_hint, system_audio_supported
 
     plan = plan_whisper(hardware)
     model = plan.model
@@ -256,6 +288,12 @@ def build_briefing(
     if ffmpeg_ready is None:
         ffmpeg_ready = ffmpeg_available()
     ffmpeg_mb = 0 if ffmpeg_ready else FFMPEG_DOWNLOAD_MB
+    if system_audio_ready is None:
+        try:
+            system_audio_ready = system_audio_supported()
+        except Exception:
+            system_audio_ready = sys.platform == "win32"
+    audio_hint = "" if system_audio_ready else system_audio_hint()
     total_mb = 0
     if cuda_needed:
         total_mb += cuda_mb
@@ -296,6 +334,8 @@ def build_briefing(
         "ffmpegReady": bool(ffmpeg_ready),
         "downloadFfmpeg": not bool(ffmpeg_ready),
         "ffmpegMb": ffmpeg_mb,
+        "systemAudioReady": bool(system_audio_ready),
+        "systemAudioHint": audio_hint,
         "totalMb": total_mb,
         "computeHint": hint,
         "gpuLabel": str(hardware.get("gpuLabel") or hardware.get("gpuName") or ""),
@@ -306,6 +346,7 @@ def build_briefing(
             hardware,
             nemo_ready=bool(nemo_ready),
             ffmpeg_ready=bool(ffmpeg_ready),
+            system_audio_ready=bool(system_audio_ready),
         ),
     }
 

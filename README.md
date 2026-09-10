@@ -125,7 +125,7 @@ python3.12 -m venv .venv
 |---|---|---|---|
 | Диктовка с микрофона | да | да | да (нужно разрешение) |
 | Live «звук системы» | WASAPI loopback | Pulse/PipeWire monitor, если есть в списке | нужен BlackHole / аналог |
-| Глобальные хоткеи / автовставка | да | только кнопки в окне | только кнопки в окне |
+| Глобальные хоткеи / автовставка | да | pynput (+ xdotool для paste) | pynput (+ Accessibility / osascript) |
 | Авто-FFmpeg | да | да (скачивание) | brew / Intel zip |
 | Git-обновления из UI | да | да | да |
 

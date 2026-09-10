@@ -268,6 +268,14 @@ Item {
                             }
                         }
                     }
+                    Text {
+                        Layout.fillWidth: true
+                        visible: String(root.setupBrief.systemAudioHint || "").length > 0
+                        text: String(root.setupBrief.systemAudioHint || "")
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsSmall
+                        wrapMode: Text.Wrap
+                    }
 
                     Label {
                         text: "Что подготовим"

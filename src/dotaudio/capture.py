@@ -125,6 +125,23 @@ def system_audio_supported() -> bool:
     return bool(list_loopback_devices())
 
 
+def system_audio_hint() -> str:
+    """Короткая подсказка для мастера/настроек, если системный звук ещё недоступен."""
+
+    if sys.platform == "win32" or system_audio_supported():
+        return ""
+    if sys.platform == "darwin":
+        return (
+            "Системный звук Live на macOS: установите BlackHole "
+            "(https://existential.audio/blackhole/), добавьте его в Multi-Output "
+            "Device вместе с колонками и выберите BlackHole в «Звук системы»."
+        )
+    return (
+        "Системный звук Live на Linux: в списке входов должен появиться "
+        "monitor PulseAudio/PipeWire. Без него Live работает с микрофона."
+    )
+
+
 def _coerce_device(raw: Any) -> int | str | None:
     text = "" if raw is None else str(raw)
     if text.isdigit():
@@ -1157,6 +1174,8 @@ def list_loopback_devices() -> list[dict[str, str]]:
         "cable",
         "vb-audio",
         "vb cable",
+        "multi-output",
+        "aggregate",
     )
     result: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -1289,5 +1308,6 @@ __all__ = [
     "play_pcm",
     "resolve_microphone_candidates",
     "source_for_mode",
+    "system_audio_hint",
     "system_audio_supported",
 ]

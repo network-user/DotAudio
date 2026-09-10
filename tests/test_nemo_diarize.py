@@ -161,11 +161,25 @@ def test_install_runtime_skips_when_already_available(monkeypatch):
     assert result["installed"] is False
 
 
-def test_install_runtime_refuses_non_windows(monkeypatch):
-    monkeypatch.setattr(nemo_diarize, "executable", lambda: "")
+def test_archive_name_matches_platform(monkeypatch):
     monkeypatch.setattr(nemo_diarize.sys, "platform", "linux")
-    with pytest.raises(RuntimeError, match="Windows"):
-        nemo_diarize.install_runtime()
+    monkeypatch.setattr(nemo_diarize, "_host_arch", lambda: "x86_64")
+    assert nemo_diarize._archive_name("0.2.0", "cpu") == (
+        "nemo-speech-0.2.0-linux-x86_64-cpu.tar.gz"
+    )
+    monkeypatch.setattr(nemo_diarize.sys, "platform", "darwin")
+    monkeypatch.setattr(nemo_diarize, "_host_arch", lambda: "aarch64")
+    assert nemo_diarize._archive_name("0.2.0", "metal") == (
+        "nemo-speech-0.2.0-macos-aarch64-metal.tar.gz"
+    )
+
+
+def test_preferred_backend_metal_on_apple_silicon(monkeypatch):
+    monkeypatch.setattr(nemo_diarize.sys, "platform", "darwin")
+    monkeypatch.setattr(nemo_diarize, "_host_arch", lambda: "aarch64")
+    assert nemo_diarize.preferred_backend() == "metal"
+    monkeypatch.setattr(nemo_diarize.sys, "platform", "linux")
+    assert nemo_diarize.preferred_backend(prefer_cuda=True) == "cuda"
 
 
 def test_download_keeps_part_on_cancel(tmp_path, monkeypatch):
