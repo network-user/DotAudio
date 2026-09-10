@@ -48,7 +48,10 @@ from dotaudio.diag import (
     explain_transcribe_error,
     format_doctor_report,
     humanize_status,
+    probe_media_duration,
+    running_transcribe_check,
     summarize_doctor,
+    transcribe_wait_note,
     transcript_start_note,
     whisper_runtime_check,
 )
@@ -56,6 +59,12 @@ from dotaudio.engine import DownloadCancelled, Engine, RecognitionConfig
 from dotaudio.karaoke import export_ass, render_video
 from dotaudio.karaoke_align import align_words, compute_peaks, decode_file
 from dotaudio.karaoke_edit import apply_word, clamp_row, set_word_text, sync_words_to_text
+from dotaudio.longform import (
+    PEAKS_DECODE_MAX_SECONDS,
+    TickGate,
+    is_long_form,
+    want_word_timestamps,
+)
 from dotaudio.monitor_clips import PcmRing, WavStream, extract_match_clip
 from dotaudio.pipeline import (
     LIVE_SPEECH_THRESHOLD,
@@ -372,6 +381,7 @@ QUIT_HOTKEY_OPTIONS = {
 
 STATUS_LABELS = {
     "loading_model": "Загружаем выбранную модель…",
+    "reading_audio": "Читаем звук файла. Первая фраза появится после этого шага.",
     "transcribing_cpu": "Распознаём на процессоре…",
     "transcribing_cuda": "Распознаём на видеокарте…",
     "gpu_unavailable_falling_back_cpu": "Видеокарта недоступна, продолжаем на процессоре…",
@@ -4714,6 +4724,15 @@ class Controller(QObject):
             peaks: list[float] = []
             duration = 0.0
             try:
+                duration = float(probe_media_duration(source) or 0.0)
+                if duration >= PEAKS_DECODE_MAX_SECONDS:
+                    self.mediaPeaksReady.emit({
+                        "token": token,
+                        "peaks": [],
+                        "duration": duration,
+                        "error": "",
+                    })
+                    return
                 samples = decode_file(source)
                 peaks, duration = compute_peaks(samples, 16000, buckets=480)
             except Exception as exc:  # noqa: BLE001 - surface in UI notice
@@ -5054,12 +5073,17 @@ class Controller(QObject):
         self.transcribeChanged.emit()
 
         disk_info = Engine.disk_status(model)
+        duration = probe_media_duration(path) or float(self._media_peaks_duration or 0.0)
+        if duration > 0:
+            state["duration"] = duration
+            state["progress"] = 0.0
         start_note = transcript_start_note(
             Path(path),
             model=model,
             device=device,
             disk_ready=bool(disk_info.get("ready")),
             download_mb=MODEL_CATALOG.get(model, {}).get("download_mb"),
+            duration_s=duration,
         )
         self.transcribeStatus.emit(start_note)
         if not disk_info.get("ready"):
@@ -5116,6 +5140,15 @@ class Controller(QObject):
             payload["progress"] = -1.0
         self.transcribeTick.emit(payload)
 
+    def _on_voice_chunk(self, index: int, total: int) -> None:
+        """Доля окон диаризации, чтобы час не висел на неопределённом прогрессе."""
+
+        count = max(1, int(total))
+        self.transcribeTick.emit({
+            "stage": "voices",
+            "progress": min(0.99, (int(index) + 1) / count),
+        })
+
     @staticmethod
     def _probe_wav_duration(path: str) -> float:
         """Длительность WAV через stdlib wave; иначе 0 (не выдумываем)."""
@@ -5158,11 +5191,21 @@ class Controller(QObject):
     def _recognize_file(self, path: str) -> tuple[list[dict], str, str]:
         """Локальный ASR + необязательные голоса. В базу не пишет."""
 
-        # Параметры движения как в караоке (слова), но backend принудительно
-        # «local»: транскрибация никогда не отправляет аудио на сервер.
-        config = replace(self._config(media_mode=True), backend="local")
+        duration = (
+            probe_media_duration(path)
+            or float(getattr(self, "_media_peaks_duration", 0.0) or 0.0)
+            or self._probe_wav_duration(path)
+        )
+        long_session = is_long_form(duration)
+        config = replace(
+            self._config(media_mode=True),
+            backend="local",
+            word_timestamps=want_word_timestamps(
+                duration, karaoke=KARAOKE_PAGE_ENABLED
+            ),
+            vad_filter=True if (long_session or duration <= 0) else None,
+        )
         collected: list[dict] = []
-        duration = self._probe_wav_duration(path)
         audio = None
         diarize = str(self._settings.get("diarize_engine") or "off")
         if diarize != "off":
@@ -5172,9 +5215,18 @@ class Controller(QObject):
                 audio = decode_audio(path)
                 if duration <= 0 and audio is not None and len(audio) > 0:
                     duration = float(len(audio)) / float(SAMPLE_RATE)
+                    long_session = is_long_form(duration)
+                    config = replace(
+                        config,
+                        word_timestamps=want_word_timestamps(
+                            duration, karaoke=KARAOKE_PAGE_ENABLED
+                        ),
+                        vad_filter=True if long_session else config.vad_filter,
+                    )
             except Exception:  # noqa: BLE001
                 audio = None
         source = audio if audio is not None else path
+        gate = TickGate() if long_session else None
 
         def on_segment(segment):
             segment = self._translate_segment(segment)
@@ -5194,6 +5246,8 @@ class Controller(QObject):
             collected.append(row)
             end = float(row["end"])
             progress = min(0.99, end / duration) if duration > 0 else -1.0
+            if gate is not None and not gate.allow():
+                return
             self.transcribeTick.emit({
                 "segments": [dict(item) for item in collected],
                 "progress": progress,
@@ -5201,13 +5255,31 @@ class Controller(QObject):
                 "stage": "asr",
             })
 
-        results = self.engine.transcribe(
-            source,
-            config,
-            self._trans_cancel,
-            on_segment,
-            lambda s: self.transcribeStatus.emit(s),
-        )
+        stop_beat = threading.Event()
+        started = time.monotonic()
+
+        def beat():
+            while not stop_beat.wait(8.0):
+                if self._trans_cancel.is_set():
+                    return
+                note = transcribe_wait_note(
+                    time.monotonic() - started,
+                    len(collected),
+                    duration,
+                )
+                self.transcribeStatus.emit(note)
+
+        threading.Thread(target=beat, name="dotaudio-transcribe-beat", daemon=True).start()
+        try:
+            results = self.engine.transcribe(
+                source,
+                config,
+                self._trans_cancel,
+                on_segment,
+                lambda s: self.transcribeStatus.emit(s),
+            )
+        finally:
+            stop_beat.set()
         if needs_post_translate(self._settings.get("speech_mode")):
             results = [self._translate_segment(item) for item in results]
         collected = [item for item in collected if item["text"]] or results
@@ -5375,11 +5447,17 @@ class Controller(QObject):
         samples = audio if audio is not None else decode_audio(path)
         # Выбор устройства общий с Whisper: если пользователь увёл всё на
         # процессор, диаризация не должна втихую занимать видеокарту.
-        turns = diarize_audio(samples, device=str(self._settings.get("device") or "auto"),
-                              cancel=self._trans_cancel,
-                              on_status=self.transcribeStatus.emit)
+        turns = diarize_audio(
+            samples,
+            device=str(self._settings.get("device") or "auto"),
+            cancel=self._trans_cancel,
+            on_status=self.transcribeStatus.emit,
+            on_chunk=self._on_voice_chunk,
+        )
         rows = assign_turns(segments, turns)
         voices = len({row["role"] for row in rows if row.get("role") is not None})
+        if not turns or voices == 0:
+            raise RuntimeError("NeMo не разметил говорящих на этой записи")
         note = f"NVIDIA NeMo Sortformer · голосов: {voices}"
         split = len(rows) - len(segments)
         if split > 0:
@@ -5469,13 +5547,6 @@ class Controller(QObject):
     def runTranscriptDoctor(self):
         if self._doctor.get("phase") == "running":
             return
-        if self._jobs or self._trans_state["phase"] == "working" or self._model_preparing:
-            message = busy_job_reason(self._jobs) or "Дождитесь окончания распознавания или загрузки модели."
-            self._doctor.update({"phase": "fail", "message": message, "checks": [],
-                                 "canFix": False, "fixLabel": "", "fixes": [], "ok": False})
-            self.doctorChanged.emit()
-            self._record_log("warning", message)
-            return
         self._doctor.update({"phase": "running", "message": "Проверяем Whisper и устройство…",
                              "checks": [], "canFix": False, "fixLabel": "", "fixes": [], "ok": False})
         self.doctorChanged.emit()
@@ -5492,6 +5563,11 @@ class Controller(QObject):
             checks.append(item)
             self.doctorTick.emit({"checks": list(checks), "message": item.get("label") or "", "phase": "running"})
 
+        busy = bool(
+            self._jobs
+            or self._trans_state.get("phase") == "working"
+            or self._model_preparing
+        )
         hw = dict(self._hardware or {})
         push(check_python())
         push(check_hardware(hw))
@@ -5505,15 +5581,18 @@ class Controller(QObject):
         media = check_media_file(str(self._trans_state.get("path") or ""))
         if media:
             push(media)
-        try:
-            from dotaudio.engine import RecognitionConfig
-            config = RecognitionConfig(model=model, device=device, language="ru",
-                                       task="transcribe", backend="local")
-            probe = self.engine.probe_runtime(config, on_status=lambda s: self.transcribeStatus.emit(s))
-            push(whisper_runtime_check(probe, model))
-        except Exception as exc:  # noqa: BLE001
-            push({"id": "whisper_runtime", "ok": False, "label": "Whisper отвечает",
-                  "detail": explain_transcribe_error(exc), "fix": "cpu"})
+        if busy:
+            push(running_transcribe_check(str(self._trans_state.get("file") or "")))
+        else:
+            try:
+                from dotaudio.engine import RecognitionConfig
+                config = RecognitionConfig(model=model, device=device, language="ru",
+                                           task="transcribe", backend="local")
+                probe = self.engine.probe_runtime(config, on_status=lambda s: self.transcribeStatus.emit(s))
+                push(whisper_runtime_check(probe, model))
+            except Exception as exc:  # noqa: BLE001
+                push({"id": "whisper_runtime", "ok": False, "label": "Whisper отвечает",
+                      "detail": explain_transcribe_error(exc), "fix": "cpu"})
         summary = summarize_doctor(checks)
         phase = "ok" if summary["ok"] else "fail"
         extra = {

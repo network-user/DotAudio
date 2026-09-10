@@ -241,6 +241,10 @@ class RecognitionConfig:
     server_url: str = "http://127.0.0.1:8765"
     profile: str = "balanced"
     media_mode: bool = False
+    # None = как раньше: слова и без VAD в media_mode (пение). Длинная речь
+    # задаёт False/True явно, чтобы час не считал тайминг каждого слова.
+    word_timestamps: bool | None = None
+    vad_filter: bool | None = None
     # Preview requests are short, disposable snapshots used only by Live UI.
     # They deliberately favour cadence over the final transcript's accuracy.
     live_preview: bool = False
@@ -290,8 +294,11 @@ class Engine:
         # Последний compute_type, с которым модель реально поднялась.
         # Pascal/MX часто отказывают float16: следующий заход сразу берёт int8.
         self._compute_ok: dict[tuple[str, str], str] = {}
+        # None = неизвестно, пробуем float16. False = Pascal/MX, сразу int8.
+        self.cuda_float16: bool | None = None
         self._live_window = True
         self._model_lock = Lock()
+        self._load_lock = Lock()
         self._inference_lock = Lock()
         from dotaudio.vram_arbiter import get_arbiter
 
@@ -379,8 +386,12 @@ class Engine:
         if self._cancelled(cancel):
             self._status(on_status, "cancelled")
             raise DownloadCancelled("model prepare cancelled")
-        model, device = self._model_for(config.model, config.device)
+        model, device = self._model_for(config.model, config.device, on_status)
         if config.live_stream:
+            self._status(
+                on_status,
+                "warming_gpu" if device == "cuda" else "warming_model",
+            )
             warm_error = self._warm_live_decoder(model, config, device)
             if warm_error is not None:
                 if (
@@ -389,7 +400,7 @@ class Engine:
                 ):
                     self._status(on_status, "gpu_unavailable_falling_back_cpu")
                     self._drop_model(config.model, "cuda")
-                    model, device = self._model_for(config.model, "cpu")
+                    model, device = self._model_for(config.model, "cpu", on_status)
                     cpu_error = self._warm_live_decoder(model, config, device)
                     if cpu_error is not None:
                         raise cpu_error
@@ -431,7 +442,7 @@ class Engine:
         )
         self._status(on_status, "loading_model")
         try:
-            model, device = self._model_for(live_config.model, live_config.device)
+            model, device = self._model_for(live_config.model, live_config.device, on_status)
             if self._cancelled(cancel):
                 payload.update(
                     code="cancelled", device=device, detail="Проверка отменена."
@@ -445,7 +456,7 @@ class Engine:
             ):
                 self._status(on_status, "gpu_unavailable_falling_back_cpu")
                 self._drop_model(config.model, "cuda")
-                model, device = self._model_for(config.model, "cpu")
+                model, device = self._model_for(config.model, "cpu", on_status)
                 warm = self._warm_live_decoder(model, live_config, device)
             if warm is not None:
                 raise warm
@@ -550,7 +561,9 @@ class Engine:
         on_segment: SegmentCallback | None,
         on_status: StatusCallback | None,
     ) -> list[Segment]:
-        model, actual_device = self._model_for(config.model, requested_device)
+        model, actual_device = self._model_for(
+            config.model, requested_device, on_status
+        )
         if requested_device == "cuda" and actual_device == "cpu":
             self._status(on_status, "gpu_unavailable_falling_back_cpu")
         if self._cancelled(cancel):
@@ -585,7 +598,15 @@ class Engine:
         # Music commonly has speech-like instrumental fragments.  DotSound
         # keeps VAD off for this case.  Live already endpointed the phrase in
         # SpeechBuffer, so a second Silero pass only delays the caption.
-        use_vad = not config.media_mode and not live_fast
+        # Long speech sessions override both flags: VAD on, word timings off.
+        if config.vad_filter is None:
+            use_vad = not config.media_mode and not live_fast
+        else:
+            use_vad = bool(config.vad_filter) and not live_fast
+        if config.word_timestamps is None:
+            want_words = bool(config.media_mode)
+        else:
+            want_words = bool(config.word_timestamps)
         kwargs: dict[str, Any] = {
             "task": config.task,
             "language": language,
@@ -595,7 +616,7 @@ class Engine:
             "condition_on_previous_text": False,
             # Word alignment is needed for offline karaoke, but it adds work
             # that live phrase captions do not need.
-            "word_timestamps": config.media_mode,
+            "word_timestamps": want_words,
             "initial_prompt": self._initial_prompt(language, config.initial_prompt),
         }
         if live_fast:
@@ -618,13 +639,23 @@ class Engine:
                 "log_prob_threshold": -1.2,
                 "no_speech_threshold": 0.3,
             })
-        self._status(on_status, f"transcribing_{actual_device}")
         result: list[Segment] = []
         # CTranslate2 / CUDA execution is native and is not safe to run in
         # parallel inside one desktop process.  Model loading remains separate
         # so a second caller can observe the cache while this call is running.
+        if isinstance(source, (str, Path)):
+            # faster-whisper сначала декодирует весь файл. Без статуса это
+            # выглядит как зависание «Распознаём на видеокарте…».
+            self._status(on_status, "reading_audio")
+        else:
+            self._status(on_status, f"transcribing_{actual_device}")
         with self._inference_lock:
             segments, _info = model.transcribe(source, **kwargs)
+            if self._cancelled(cancel):
+                self._status(on_status, "cancelled")
+                return []
+            if isinstance(source, (str, Path)):
+                self._status(on_status, f"transcribing_{actual_device}")
             for raw in segments:
                 if self._cancelled(cancel):
                     self._status(on_status, "cancelled")
@@ -935,7 +966,12 @@ class Engine:
             result.append({"text": text, "start": start, "end": end})
         return result
 
-    def _model_for(self, model_name: str, requested_device: str) -> tuple[Any, str]:
+    def _model_for(
+        self,
+        model_name: str,
+        requested_device: str,
+        on_status: StatusCallback | None = None,
+    ) -> tuple[Any, str]:
         if requested_device == "auto":
             # Reuse the device that successfully handled the previous call.
             # In particular, after a CUDA runtime failure _run_local loads the
@@ -960,7 +996,7 @@ class Engine:
         last_error: BaseException | None = None
         for device in candidates:
             try:
-                return self._get_or_load_model(model_name, device), device
+                return self._get_or_load_model(model_name, device, on_status), device
             except _MODEL_LOAD_ERRORS as exc:
                 last_error = exc
                 if device == "cuda" and self._should_fallback_cpu(
@@ -1072,7 +1108,12 @@ class Engine:
             # поднимет свою понятную ошибку вместо нашей обёртки.
             return
 
-    def _get_or_load_model(self, model_name: str, device: str) -> Any:
+    def _get_or_load_model(
+        self,
+        model_name: str,
+        device: str,
+        on_status: StatusCallback | None = None,
+    ) -> Any:
         key = (model_name, device)
         with self._model_lock:
             cached = self._models.get(key)
@@ -1088,19 +1129,20 @@ class Engine:
 
             register_cuda_dll_directories()
             get_arbiter().acquire("asr")
-        with self._model_lock:
-            cached = self._models.get(key)
-            if cached is not None:
-                self._models.move_to_end(key)
-                return cached
-            # Imported here so remote-only installations do not need the
-            # local ASR stack at startup.
+        with self._load_lock:
+            with self._model_lock:
+                cached = self._models.get(key)
+                if cached is not None:
+                    self._models.move_to_end(key)
+                    return cached
             from faster_whisper import WhisperModel
 
             last_error: BaseException | None = None
             loaded = None
             used_type = ""
             for compute_type in self._compute_types_for(model_name, device):
+                if device == "cuda":
+                    self._status(on_status, f"loading_cuda_{compute_type}")
                 try:
                     loaded = WhisperModel(
                         model_name,
@@ -1119,13 +1161,14 @@ class Engine:
                 assert last_error is not None
                 self._compute_ok.pop(key, None)
                 raise last_error
-            self._models.clear()
-            self._tokenizers.clear()
-            self._detected_languages.clear()
-            self._models[key] = loaded
-            if used_type:
-                self._compute_ok[key] = used_type
-            return loaded
+            with self._model_lock:
+                self._models.clear()
+                self._tokenizers.clear()
+                self._detected_languages.clear()
+                self._models[key] = loaded
+                if used_type:
+                    self._compute_ok[key] = used_type
+                return loaded
 
     def _drop_model(self, model_name: str, device: str) -> None:
         with self._model_lock:
@@ -1135,7 +1178,13 @@ class Engine:
             self._detected_languages.pop((model_name, device), None)
 
     def _compute_types_for(self, model_name: str, device: str) -> tuple[str, ...]:
-        base = CUDA_COMPUTE_TYPES if device == "cuda" else CPU_COMPUTE_TYPES
+        if device == "cuda":
+            if self.cuda_float16 is False:
+                base = tuple(kind for kind in CUDA_COMPUTE_TYPES if kind != "float16")
+            else:
+                base = CUDA_COMPUTE_TYPES
+        else:
+            base = CPU_COMPUTE_TYPES
         last = self._compute_ok.get((model_name, device))
         if last and last in base:
             return (last,) + tuple(kind for kind in base if kind != last)

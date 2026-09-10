@@ -160,6 +160,90 @@ def empty_transcript_reason(model: str, disk_ready: bool) -> str:
     )
 
 
+def probe_media_duration(path: str | Path) -> float:
+    """Длительность из заголовка контейнера, без полной раскодировки звука."""
+
+    media = Path(path)
+    if not media.is_file():
+        return 0.0
+    if media.suffix.lower() == ".wav":
+        import wave
+
+        try:
+            with wave.open(str(media), "rb") as handle:
+                rate = int(handle.getframerate() or 0)
+                frames = int(handle.getnframes() or 0)
+            if rate > 0 and frames > 0:
+                return frames / float(rate)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        import av
+
+        with av.open(str(media)) as container:
+            if container.duration is not None and container.duration > 0:
+                return float(container.duration) / 1_000_000.0
+            for stream in container.streams:
+                if stream.type != "audio":
+                    continue
+                if stream.duration is None or stream.time_base is None:
+                    continue
+                seconds = float(stream.duration * stream.time_base)
+                if seconds > 0:
+                    return seconds
+    except Exception:  # noqa: BLE001
+        return 0.0
+    return 0.0
+
+
+def format_duration_ru(seconds: float) -> str:
+    total = int(round(max(0.0, float(seconds))))
+    if total <= 0:
+        return ""
+    minutes, sec = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours} ч {minutes} мин"
+    if minutes:
+        return f"{minutes} мин"
+    return f"{sec} с"
+
+
+def transcribe_wait_note(
+    elapsed_s: float,
+    phrases: int,
+    duration_s: float = 0.0,
+) -> str:
+    """Пока нет фраз: объяснить, что MP3 сначала читается целиком."""
+
+    elapsed = max(0, int(elapsed_s))
+    if phrases > 0:
+        return f"Идёт распознавание: {phrases} фраз · {elapsed} с"
+    length = format_duration_ru(duration_s)
+    if length:
+        return (
+            f"Читаем файл (~{length}) и считаем первый кусок. "
+            f"Уже {elapsed} с, фразы появятся после этого шага."
+        )
+    return (
+        f"Модель считает первый кусок звука ({elapsed} с). "
+        "Для MP3 файл сначала читается целиком."
+    )
+
+
+def running_transcribe_check(file_name: str = "") -> dict:
+    """Карточка анализа, когда Whisper уже занят расшифровкой."""
+
+    name = str(file_name or "").strip()
+    detail = (
+        "Расшифровка идёт. Это не ошибка: MP3 сначала читается целиком, "
+        "первая фраза появляется позже."
+    )
+    if name:
+        detail = f"Сейчас распознаём «{name}». {detail}"
+    return _check("running", True, "Распознавание", detail)
+
+
 def transcript_start_note(
     path: Path,
     *,
@@ -167,6 +251,7 @@ def transcript_start_note(
     device: str,
     disk_ready: bool,
     download_mb: int | None = None,
+    duration_s: float = 0.0,
 ) -> str:
     try:
         size_mb = path.stat().st_size / 1048576
@@ -177,8 +262,10 @@ def transcript_start_note(
     extra = ""
     if not disk_ready and download_mb:
         extra = f" (~{int(download_mb)} МБ, нужен интернет)"
+    length = format_duration_ru(duration_s)
+    length_bit = f" · ~{length}" if length else ""
     return (
-        f"Файл {path.name} · {size_text} · модель {model} ({cache}{extra}) · "
+        f"Файл {path.name} · {size_text}{length_bit} · модель {model} ({cache}{extra}) · "
         f"устройство {device}"
     )
 
@@ -339,11 +426,13 @@ def check_media_file(path: str) -> dict | None:
                 "Файл",
                 f"{media.name}: звуковой дорожки нет.",
             )
+        length = format_duration_ru(probe_media_duration(media))
+        extra = f" · ~{length}" if length else ""
         return _check(
             "media",
             True,
             "Файл",
-            f"{media.name} · есть звук · {size_mb:.1f} МБ",
+            f"{media.name} · есть звук · {size_mb:.1f} МБ{extra}",
         )
     except Exception as exc:  # noqa: BLE001
         return _check(
@@ -462,9 +551,13 @@ __all__ = [
     "empty_transcript_reason",
     "explain_transcribe_error",
     "format_doctor_report",
+    "format_duration_ru",
     "format_log_line",
     "humanize_status",
+    "probe_media_duration",
+    "running_transcribe_check",
     "summarize_doctor",
+    "transcribe_wait_note",
     "transcript_start_note",
     "whisper_runtime_check",
 ]

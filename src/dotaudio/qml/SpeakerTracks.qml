@@ -20,6 +20,48 @@ Item {
 
     readonly property real total: Math.max(0.001, Number(root.duration))
 
+    // Часовая расшифровка даёт тысячи фраз. Полоса рисует склейки одного
+    // голоса, а не каждый сегмент, иначе Repeater подвешивает Qt Quick.
+    function runsFor(key) {
+        var segs = root.segments || []
+        var runs = []
+        var gap = 0.6
+        var want = Number(key)
+        for (var i = 0; i < segs.length; i++) {
+            var s = segs[i]
+            if (Number(s.role) !== want)
+                continue
+            var a = Number(s.start)
+            var b = Number(s.end)
+            if (runs.length) {
+                var last = runs[runs.length - 1]
+                if (a - last.end <= gap) {
+                    last.end = Math.max(last.end, b)
+                    last.index = i
+                    continue
+                }
+            }
+            runs.push({ start: a, end: b, index: i })
+        }
+        var cap = 360
+        while (runs.length > cap) {
+            var denser = []
+            for (var j = 0; j < runs.length; j += 2) {
+                if (j + 1 < runs.length) {
+                    denser.push({
+                        start: runs[j].start,
+                        end: Math.max(runs[j].end, runs[j + 1].end),
+                        index: runs[j + 1].index
+                    })
+                } else {
+                    denser.push(runs[j])
+                }
+            }
+            runs = denser
+        }
+        return runs
+    }
+
     function isMuted(key) {
         var k = String(key)
         if (root.soloActive())
@@ -91,11 +133,9 @@ Item {
                         border.color: track.focused ? Theme.borderHi : Theme.hairline
                     }
                     Repeater {
-                        model: root.segments
+                        model: root.runsFor(track.key)
                         delegate: Rectangle {
                             required property var modelData
-                            required property int index
-                            visible: Number(modelData.role) === track.key
                             x: 2 + (parent.width - 4) * Math.min(1, Number(modelData.start) / root.total)
                             width: Math.max(2, (parent.width - 4)
                                    * Math.min(1, (Number(modelData.end) - Number(modelData.start)) / root.total))
@@ -108,9 +148,9 @@ Item {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: root.seekRequested(
-                                    Number(parent.modelData.start),
-                                    Number(parent.modelData.end),
-                                    parent.index
+                                    Number(modelData.start),
+                                    Number(modelData.end),
+                                    Number(modelData.index)
                                 )
                             }
                         }

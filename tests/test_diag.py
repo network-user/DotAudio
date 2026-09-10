@@ -8,7 +8,11 @@ from dotaudio.diag import (
     empty_transcript_reason,
     explain_transcribe_error,
     format_doctor_report,
+    format_duration_ru,
+    probe_media_duration,
+    running_transcribe_check,
     summarize_doctor,
+    transcribe_wait_note,
     whisper_runtime_check,
 )
 
@@ -120,3 +124,34 @@ def test_empty_transcript_reason_not_downloaded():
     result = empty_transcript_reason("small", False)
     lower = result.casefold()
     assert "не скачана" in lower or "скачайте" in lower or "скачать" in lower
+
+
+def test_format_duration_ru_minutes():
+    assert format_duration_ru(125) == "2 мин"
+    assert format_duration_ru(18) == "18 с"
+
+
+def test_transcribe_wait_note_explains_mp3_read():
+    note = transcribe_wait_note(12, 0, duration_s=900)
+    assert "файл" in note.casefold()
+    assert "12" in note
+    later = transcribe_wait_note(40, 3, duration_s=900)
+    assert "3" in later
+
+
+def test_probe_media_duration_wav(tmp_path):
+    import wave
+
+    wav = tmp_path / "tone.wav"
+    with wave.open(str(wav), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(16000)
+        handle.writeframes(b"\x00\x00" * 32000)
+    assert abs(probe_media_duration(wav) - 2.0) < 0.05
+
+
+def test_running_transcribe_check_is_not_a_failure():
+    result = running_transcribe_check("talk.mp3")
+    assert result["ok"] is True
+    assert "talk.mp3" in result["detail"]

@@ -733,13 +733,14 @@ Rectangle {
                             PillButton {
                                 text: "Анализ"
                                 compact: true
-                                enabled: !view.busyPhase && String(view.doctor.phase || "") !== "running"
+                                enabled: String(view.doctor.phase || "") !== "running"
                                 onClicked: bridge.runTranscriptDoctor()
                             }
                             PillButton {
                                 text: String(view.doctor.fixLabel || "Починить")
                                 compact: true
                                 visible: Boolean(view.doctor.canFix)
+                                enabled: !view.busyPhase
                                 onClicked: {
                                     var fixes = view.doctor.fixes || []
                                     if (fixes.indexOf("setup") >= 0 && typeof setup !== "undefined" && setup)

@@ -210,7 +210,71 @@ def gpu_label(gpu: GpuDevice | None) -> str:
     vram = gpu.vram_gb
     if vram is None:
         return gpu.name
-    return f"{gpu.name}, {vram:g} ГБ"
+        return f"{gpu.name}, {vram:g} ГБ"
+
+
+# CTranslate2 требует «efficient» FP16: Turing (7.0) и новее.
+# На Pascal (GTX 10xx, часть MX) WhisperModel(float16) часто не падает,
+# а зависает на минуты - GUI при этом ждёт lock.
+_FLOAT16_MIN_CC = 7.0
+_PRE_TURING_MARKERS = (
+    "gtx 10",
+    "geforce gtx 10",
+    "gtx 9",
+    "gtx 8",
+    "gtx 7",
+    "mx110",
+    "mx130",
+    "mx150",
+    "mx230",
+    "mx250",
+    "mx330",
+    "quadro p",
+    "quadro m",
+    "tesla p",
+    "tesla m",
+    "tesla k",
+)
+
+
+def parse_compute_cap(value: str) -> float | None:
+    text = str(value or "").strip().replace(",", ".")
+    if not text:
+        return None
+    match = re.match(r"(\d+(?:\.\d+)?)", text)
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def gpu_allows_efficient_float16(hardware: dict | None = None) -> bool | None:
+    """True - float16 можно. False - сразу int8. None - неизвестно."""
+
+    if not hardware:
+        return None
+    gpus = list(hardware.get("gpus") or [])
+    if not gpus:
+        return None
+
+    def _nvidia(gpu: dict) -> bool:
+        vendor = str(gpu.get("vendor") or "").casefold()
+        name = str(gpu.get("name") or "").casefold()
+        return vendor == "nvidia" or any(
+            token in name for token in ("nvidia", "geforce", "gtx ", "rtx ", "quadro", "tesla")
+        )
+
+    pool = [gpu for gpu in gpus if _nvidia(gpu)] or gpus
+    best = max(pool, key=lambda gpu: float(gpu.get("vramMb") or gpu.get("vram_mb") or 0))
+    cap = parse_compute_cap(str(best.get("compute") or ""))
+    if cap is not None:
+        return cap >= _FLOAT16_MIN_CC
+    name = str(best.get("name") or "").casefold()
+    if any(marker in name for marker in _PRE_TURING_MARKERS):
+        return False
+    return None
 
 
 def physical_memory_gb() -> float | None:

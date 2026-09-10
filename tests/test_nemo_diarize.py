@@ -18,11 +18,14 @@ import pytest
 from dotaudio import nemo_diarize
 from dotaudio.nemo_diarize import (
     NemoUnavailable,
+    Turn,
+    cli_device_arg,
     diarize_audio,
     executable,
     install_command,
     parse_turns,
     probe,
+    stitch_window_turns,
     write_wav,
 )
 
@@ -231,6 +234,14 @@ def test_download_keeps_part_on_cancel(tmp_path, monkeypatch):
     assert target.with_suffix(".zip.part").exists() or (tmp_path / "nemo.zip.part").exists()
 
 
+def test_cli_device_arg_maps_whisper_names():
+    assert cli_device_arg("auto") == ""
+    assert cli_device_arg("cpu") == "cpu"
+    assert cli_device_arg("CPU") == "cpu"
+    assert cli_device_arg("cuda") == "cuda:0"
+    assert cli_device_arg("cuda:1") == "cuda:1"
+
+
 @pytest.mark.parametrize(
     "device, expected",
     [("", False), ("auto", False), ("cpu", True), ("cuda", True)],
@@ -254,7 +265,44 @@ def test_device_choice_reaches_the_runtime(monkeypatch, device, expected):
     assert len(turns) == 1
     assert ("--device" in seen[0]) is expected
     if expected:
-        assert seen[0][seen[0].index("--device") + 1] == device
+        flag = "cuda:0" if device == "cuda" else device
+        assert seen[0][seen[0].index("--device") + 1] == flag
+    assert "--offline" in seen[0]
+
+
+def test_diarize_splits_long_audio_into_windows(monkeypatch):
+    """Час нельзя отдать Sortformer целиком: каждый кусок - отдельный CLI."""
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(nemo_diarize, "executable", lambda: "nemo-speech")
+    monkeypatch.setattr(nemo_diarize, "ensure_model", lambda *a, **k: None)
+
+    def fake_run(command, timeout, cancel=None):
+        seen.append(command)
+        target = command[command.index("--output") + 1]
+        with open(target, "w", encoding="utf-8") as out:
+            out.write('{"segments": [{"start": 0, "end": 0.3, "speaker": 1}]}')
+        return _completed()
+
+    monkeypatch.setattr(nemo_diarize, "_run", fake_run)
+    # Чуть длиннее одного окна (8 мин): два вызова CLI, не один час целиком.
+    audio = np.zeros(int(16_000 * 481), dtype=np.float32)
+    turns = diarize_audio(audio)
+    assert len(seen) >= 2
+    assert turns
+    assert turns[0].speaker == "1"
+
+
+def test_stitch_keeps_the_same_voice_across_windows():
+    first = [Turn(0.0, 10.0, "2")]
+    second = [Turn(8.0, 12.0, "1"), Turn(12.0, 20.0, "9")]
+    out = stitch_window_turns(
+        [(0.0, 10.0, first), (8.0, 20.0, second)], overlap=2.0
+    )
+    assert [(round(t.start), round(t.end), t.speaker) for t in out] == [
+        (0, 12, "1"),
+        (12, 20, "2"),
+    ]
 
 
 def test_install_command_is_offered_for_this_platform():

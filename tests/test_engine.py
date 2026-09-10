@@ -41,6 +41,29 @@ def test_local_engine_caches_model_and_normalises_segments(monkeypatch) -> None:
     assert created == [("base", "cpu", "int8")]
 
 
+def test_file_source_reports_reading_audio_before_decode(monkeypatch, tmp_path) -> None:
+    events: list[str] = []
+
+    class FakeModel:
+        def transcribe(self, _source, **_kwargs):
+            return iter([_Segment(0, 1, "hi")]), object()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=lambda *_a, **_k: FakeModel()),
+    )
+    wav = tmp_path / "clip.wav"
+    wav.write_bytes(b"fake")
+    Engine().transcribe(
+        str(wav),
+        RecognitionConfig(device="cpu"),
+        on_status=events.append,
+    )
+    assert "reading_audio" in events
+    assert events.index("reading_audio") < events.index("transcribing_cpu")
+
+
 def test_cached_model_skips_loading_status(monkeypatch) -> None:
     statuses: list[str] = []
 
@@ -319,6 +342,34 @@ def test_media_recipe_keeps_sung_words_and_word_timings(monkeypatch) -> None:
             "confidence": 1.0,
             "words": [{"text": "привет", "start": 0.1, "end": 0.5}],
         }
+    ]
+
+
+def test_long_speech_recipe_uses_vad_and_skips_word_timings(monkeypatch) -> None:
+    class Segment:
+        start, end, text, words = 0.0, 1.0, "привет", []
+
+    class FakeModel:
+        def transcribe(self, _source, **kwargs):
+            assert kwargs["vad_filter"] is True
+            assert kwargs["word_timestamps"] is False
+            assert "vad_parameters" in kwargs
+            assert "compression_ratio_threshold" not in kwargs
+            return iter([Segment()]), object()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=lambda *_args, **_kwargs: FakeModel()),
+    )
+    config = RecognitionConfig(
+        device="cpu",
+        media_mode=True,
+        word_timestamps=False,
+        vad_filter=True,
+    )
+    assert Engine().transcribe(np.zeros(1600), config) == [
+        {"start": 0.0, "end": 1.0, "text": "привет", "confidence": 1.0}
     ]
 
 

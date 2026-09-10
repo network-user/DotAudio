@@ -32,6 +32,13 @@ from typing import Any, Callable
 import httpx
 import numpy as np
 
+from dotaudio.longform import (
+    DIARIZE_OFFLINE_MAX_SECONDS,
+    DIARIZE_OVERLAP_SECONDS,
+    DIARIZE_WINDOW_SECONDS,
+    window_bounds,
+)
+
 StatusCallback = Callable[[str], None]
 ProgressCallback = Callable[[dict[str, Any]], None]
 
@@ -192,6 +199,24 @@ def _fail(result: subprocess.CompletedProcess[str], action: str) -> None:
     detail = (result.stderr or result.stdout or "").strip().splitlines()
     message = detail[-1].strip() if detail else f"код {result.returncode}"
     raise RuntimeError(f"{action}: {message[:400]}")
+
+
+def cli_device_arg(device: str) -> str:
+    """Флаг `--device` для CLI: Whisper-имена в то, что понимает NeMo.
+
+    Сборка CPU (`accelerator_compiled: false`) не принимает `cuda`.
+    CUDA-сборка ждёт `cuda:0`, а не `cuda`. Пустое и `auto` - не передаём.
+    """
+
+    text = str(device or "").strip()
+    if not text or text.casefold() in {"auto", "none"}:
+        return ""
+    key = text.casefold()
+    if key == "cpu":
+        return "cpu"
+    if key == "cuda":
+        return "cuda:0"
+    return text
 
 
 def probe(cancel: Event | None = None) -> dict[str, Any]:
@@ -646,18 +671,216 @@ def parse_turns(payload: str) -> list[Turn]:
     return turns
 
 
+def shift_turns(turns: list[Turn], offset: float) -> list[Turn]:
+    """Сдвинуть отрезки на ``offset`` секунд от начала файла."""
+
+    shift = float(offset)
+    return [
+        Turn(start=turn.start + shift, end=turn.end + shift, speaker=turn.speaker)
+        for turn in turns
+    ]
+
+
+def merge_adjacent_turns(turns: list[Turn], gap: float = 0.35) -> list[Turn]:
+    """Склеить соседние куски одного голоса, в том числе через короткую паузу."""
+
+    if not turns:
+        return []
+    ordered = sorted(turns, key=lambda turn: (turn.start, turn.end, turn.speaker))
+    merged = [ordered[0]]
+    for turn in ordered[1:]:
+        prev = merged[-1]
+        if turn.speaker == prev.speaker and turn.start <= prev.end + gap:
+            merged[-1] = Turn(start=prev.start, end=max(prev.end, turn.end), speaker=prev.speaker)
+        else:
+            merged.append(turn)
+    return merged
+
+
+def _overlap_seconds(left: Turn, right: Turn) -> float:
+    return max(0.0, min(left.end, right.end) - max(left.start, right.start))
+
+
+def stitch_window_turns(
+    windows: list[tuple[float, float, list[Turn]]],
+    overlap: float = DIARIZE_OVERLAP_SECONDS,
+) -> list[Turn]:
+    """Собрать окна Sortformer в одну дорожку с устойчивыми номерами голосов.
+
+    В каждом окне модель заново нумерует говорящих. Перекрытие окон даёт
+    якорь: локальная метка, которая звучит там же, где уже известный голос,
+    получает его глобальный номер.
+    """
+
+    if not windows:
+        return []
+    next_id = 1
+    global_turns: list[Turn] = []
+    prev_end = 0.0
+    shared = max(0.0, float(overlap))
+
+    for index, (_start, end, local) in enumerate(windows):
+        if not local:
+            prev_end = max(prev_end, float(end))
+            continue
+        if index == 0 or not global_turns:
+            mapping: dict[str, str] = {}
+            remapped: list[Turn] = []
+            for turn in local:
+                if turn.speaker not in mapping:
+                    mapping[turn.speaker] = str(next_id)
+                    next_id += 1
+                remapped.append(
+                    Turn(start=turn.start, end=turn.end, speaker=mapping[turn.speaker])
+                )
+            global_turns.extend(remapped)
+            prev_end = max(prev_end, float(end))
+            continue
+
+        handoff = max(0.0, prev_end - shared * 0.5)
+        local_ids = list(dict.fromkeys(turn.speaker for turn in local))
+        local_to_global: dict[str, str] = {}
+        known = list(dict.fromkeys(turn.speaker for turn in global_turns))
+        zone_end = prev_end
+        for local_id in local_ids:
+            local_turns = [turn for turn in local if turn.speaker == local_id]
+            best_g = ""
+            best_ov = 0.0
+            for global_id in known:
+                g_turns = [turn for turn in global_turns if turn.speaker == global_id]
+                overlap_s = sum(
+                    _overlap_seconds(left, right)
+                    for left in local_turns
+                    for right in g_turns
+                )
+                if overlap_s > best_ov:
+                    best_ov, best_g = overlap_s, global_id
+            local_in_zone = sum(
+                max(0.0, min(turn.end, zone_end) - max(turn.start, handoff))
+                for turn in local_turns
+            )
+            need = max(0.8, 0.25 * local_in_zone) if local_in_zone > 0 else 0.8
+            if best_g and best_ov >= need:
+                local_to_global[local_id] = best_g
+            else:
+                local_to_global[local_id] = str(next_id)
+                next_id += 1
+
+        for turn in local:
+            speaker = local_to_global[turn.speaker]
+            if turn.end <= handoff:
+                continue
+            start = max(turn.start, handoff)
+            if turn.end > start:
+                global_turns.append(Turn(start=start, end=turn.end, speaker=speaker))
+        prev_end = max(prev_end, float(end))
+
+    return merge_adjacent_turns(global_turns)
+
+
+def _diarize_command(
+    cli: str,
+    source: Path,
+    target: Path,
+    *,
+    model: str,
+    device_flag: str,
+    offline: bool,
+) -> list[str]:
+    command = [
+        cli, "diarize", str(source),
+        "--format", "json",
+        "--output", str(target),
+        "--force",
+    ]
+    if model:
+        command += ["--model", model]
+    if device_flag:
+        command += ["--device", device_flag]
+    if offline:
+        command.append("--offline")
+    return command
+
+
+def _diarize_wav(
+    audio: np.ndarray,
+    *,
+    cli: str,
+    model: str,
+    device: str,
+    cancel: Event | None,
+) -> list[Turn]:
+    """Один проход CLI по уже отрезанному куску."""
+
+    data = np.asarray(audio, dtype=np.float32).reshape(-1)
+    seconds = data.size / float(SAMPLE_RATE)
+    if seconds <= 0:
+        return []
+    mapped = cli_device_arg(device)
+    can_offline = seconds <= DIARIZE_OFFLINE_MAX_SECONDS
+    attempts: list[tuple[str, bool]] = [(mapped, can_offline)]
+    if mapped:
+        # CPU-сборка отвергает cuda:0; часть сборок не принимает явный cpu.
+        attempts.append(("", can_offline))
+    if can_offline:
+        attempts.append((mapped, False))
+        if mapped:
+            attempts.append(("", False))
+
+    workdir = Path(tempfile.mkdtemp(prefix="dotaudio-nemo-"))
+    source = workdir / "input.wav"
+    target = workdir / "turns.json"
+    last_error: BaseException | None = None
+    try:
+        write_wav(data, source)
+        budget = DIARIZE_BASE_SECONDS + DIARIZE_PER_SECOND * seconds
+        seen: set[tuple[str, bool]] = set()
+        for flag, offline in attempts:
+            key = (flag, offline)
+            if key in seen:
+                continue
+            seen.add(key)
+            if target.is_file():
+                target.unlink(missing_ok=True)
+            command = _diarize_command(
+                cli, source, target, model=model, device_flag=flag, offline=offline,
+            )
+            result = _run(command, budget, cancel)
+            if result.returncode != 0:
+                try:
+                    _fail(result, "определение голосов не удалось")
+                except RuntimeError as exc:
+                    last_error = exc
+                    continue
+            if not target.is_file():
+                last_error = RuntimeError("NeMo не создал файл с разметкой голосов")
+                continue
+            turns = parse_turns(target.read_text(encoding="utf-8"))
+            if turns:
+                return turns
+            last_error = RuntimeError("NeMo вернул пустую разметку голосов")
+        if last_error is not None:
+            raise last_error
+        return []
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def diarize_audio(
     audio: np.ndarray,
     model: str = "",
     device: str = "",
     cancel: Event | None = None,
     on_status: StatusCallback | None = None,
+    on_chunk: Callable[[int, int], None] | None = None,
 ) -> list[Turn]:
     """Разметить моно 16 кГц по голосам и вернуть отрезки речи.
 
-    Звук передаётся временным WAV рядом с системным temp и удаляется
-    сразу после прохода. Пустое значение ``device`` и "auto" оставляют
-    выбор рантайму: он сам берёт ускоритель, если сборка его умеет.
+    Час целиком в Sortformer часто не помещается: режем на окна короче
+    лимита `--offline` (~6,6 мин) и склеиваем метки. На процессоре
+    streaming нередко пустой, поэтому короткий кусок идёт с `--offline`.
+    `device=cuda` на CPU-сборке сбрасывается повтором без флага.
+    Пустое значение и "auto" не передают `--device`.
     """
 
     path = executable()
@@ -669,33 +892,42 @@ def diarize_audio(
         return []
 
     ensure_model(model, cancel, on_status)
+    bounds = window_bounds(seconds, DIARIZE_WINDOW_SECONDS, DIARIZE_OVERLAP_SECONDS)
     if on_status is not None:
-        on_status("Определяем говорящих моделью NVIDIA Sortformer…")
+        if len(bounds) == 1:
+            on_status("Определяем говорящих моделью NVIDIA Sortformer…")
+        else:
+            minutes = int(DIARIZE_WINDOW_SECONDS // 60)
+            on_status(
+                f"Определяем говорящих окнами по {minutes} мин ({len(bounds)} кусков)…"
+            )
 
-    workdir = Path(tempfile.mkdtemp(prefix="dotaudio-nemo-"))
-    source = workdir / "input.wav"
-    target = workdir / "turns.json"
-    try:
-        write_wav(data, source)
-        command = [
-            path, "diarize", str(source),
-            "--format", "json",
-            "--output", str(target),
-            "--force",
-        ]
-        if model:
-            command += ["--model", model]
-        if device and device != "auto":
-            command += ["--device", device]
-        budget = DIARIZE_BASE_SECONDS + DIARIZE_PER_SECOND * seconds
-        result = _run(command, budget, cancel)
-        if result.returncode != 0:
-            _fail(result, "определение голосов не удалось")
-        if not target.is_file():
-            raise RuntimeError("NeMo не создал файл с разметкой голосов")
-        return parse_turns(target.read_text(encoding="utf-8"))
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    windows: list[tuple[float, float, list[Turn]]] = []
+    last_error: BaseException | None = None
+    rate = float(SAMPLE_RATE)
+    for index, (start, end) in enumerate(bounds):
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError("определение голосов отменено")
+        if on_chunk is not None:
+            on_chunk(index, len(bounds))
+        if on_status is not None and len(bounds) > 1:
+            on_status(f"Голоса: кусок {index + 1} из {len(bounds)}…")
+        piece = data[int(start * rate):int(end * rate)]
+        try:
+            local = _diarize_wav(
+                piece, cli=path, model=model, device=device, cancel=cancel
+            )
+        except RuntimeError as exc:
+            last_error = exc
+            windows.append((start, end, []))
+            continue
+        windows.append((start, end, shift_turns(local, start)))
+
+    if all(not turns for _start, _end, turns in windows):
+        if last_error is not None:
+            raise last_error
+        return []
+    return stitch_window_turns(windows, DIARIZE_OVERLAP_SECONDS)
 
 
 __all__ = [
@@ -705,6 +937,7 @@ __all__ = [
     "InstallCancelled",
     "RUNTIME_DOWNLOAD_MB",
     "Turn",
+    "cli_device_arg",
     "diarize_audio",
     "download_cache_dir",
     "ensure_model",
@@ -712,9 +945,12 @@ __all__ = [
     "install_command",
     "install_prefix",
     "install_runtime",
+    "merge_adjacent_turns",
     "parse_turns",
     "preferred_backend",
     "probe",
     "resolve_release_version",
+    "shift_turns",
+    "stitch_window_turns",
     "write_wav",
 ]
