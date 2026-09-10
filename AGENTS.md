@@ -11,7 +11,9 @@
 
 - Тип: desktop-app с Python core и необязательным HTTP-сервисом.
 - Аудитория: пока internal; будущая демонстрация в статье.
-- Дистрибуция: local-only, установщик ещё не реализован.
+- Дистрибуция: local-only; git-установщик `deploy/install.ps1`, обновление через
+  `git reset --hard origin/main` (UI и `deploy/update.ps1`). Setup.exe / PyInstaller
+  ещё не собран.
 - Первая платформа: Windows. Остальные платформы не проверены.
 - Runtime: Python >=3.12,<3.14, Qt Quick через PySide6.
 - `pyproject.toml` - источник правды по зависимостям и entrypoints.
@@ -34,7 +36,9 @@ python -m venv .venv
 Для QML smoke-test задать `QT_QPA_PLATFORM=offscreen` и передать
 `--smoke-test --data-dir .local-check`.
 Не скачивать модели и не включать микрофон в обычных unit-тестах.
-Сборка установщика ещё не настроена; не выдумывать команду build.
+Git-установщик: `powershell -ExecutionPolicy Bypass -File .\deploy\install.ps1`.
+Обновление клона: Настройки → Обновления или `deploy\update.ps1`.
+Сборка Setup.exe / PyInstaller ещё не настроена; не выдумывать команду build.
 
 ## Структура
 
@@ -66,9 +70,11 @@ src/dotaudio/
   vram_arbiter.py                  mutex ASR↔LLM, вытеснение из VRAM
   assistant.py                     части записи, выжимки, поиск, действия
   assistant_controller.py           мост ассистента: воркеры и сигналы
+  updater.py                       проверка и apply обновлений через git
+  process_priority.py              BelowNormal в простое (Windows)
   server.py                        optional FastAPI
 tests/
-deploy/
+deploy/                            install.ps1 / update.ps1, Docker
 docs/
 ```
 

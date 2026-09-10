@@ -193,11 +193,15 @@ def main():
     # tests and screenshots must remain model/network free.  First-run setup
     # takes over downloads when the wizard is still needed.
     if not args.smoke_test and not args.screenshot:
+        from dotaudio.process_priority import set_process_priority
+
+        set_process_priority("below_normal")
         if setup.needed:
             QTimer.singleShot(0, setup.begin)
         else:
             controller.enableModelWarmup()
             QTimer.singleShot(0, controller.prepareSelectedModel)
+        controller.scheduleStartupUpdateCheck()
     if args.smoke_test or args.screenshot:
         def finish():
             if args.screenshot:

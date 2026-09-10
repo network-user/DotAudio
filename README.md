@@ -38,6 +38,26 @@ $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m dotaudio
 ```
 
+### Установщик из git (ярлык на рабочем столе)
+
+Нужны **Git** и **Python 3.12/3.13**. Скрипт клонирует репозиторий (или берёт
+текущий клон), ставит `.venv`, создаёт ярлыки на рабочем столе и в меню Пуск:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\install.ps1
+```
+
+Обновление: в приложении **Настройки → Обновления** (проверка при запуске и
+кнопка «Обновить»), либо вручную:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\update.ps1
+```
+
+Обновление делает `git fetch` + `reset --hard origin/main` и `pip install -e .`.
+Данные пользователя (`%LOCALAPPDATA%\DotCore\DotAudio`) не трогаются. Локальные
+правки в клоне при обновлении сбрасываются после подтверждения.
+
 Если окружение уже создано и зависимости установлены, нужны только последние
 dве строки. Альтернатива после `pip install -e`:
 

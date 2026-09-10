@@ -31,9 +31,11 @@ src/dotaudio/
   llm_worker.py   subprocess llama.cpp, JSON-lines протокол
   vram_arbiter.py mutex ASR↔LLM, вытеснение моделей из VRAM
   assistant_controller.py  мост ассистента: воркеры и сигналы
+  updater.py      git fetch/reset origin/main + pip install -e .
+  process_priority.py  Windows BelowNormal в простое
   server.py       необязательный FastAPI-сервис
 tests/            проверки с подставными моделями/устройствами
-deploy/           CPU Docker-заготовка, loopback-порт
+deploy/           install.ps1 / update.ps1, CPU Docker-заготовка
 docs/             продуктовый контекст и передача работы
 ```
 

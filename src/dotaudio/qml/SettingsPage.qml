@@ -64,6 +64,108 @@ Item {
             }
             Rectangle {
                 Layout.fillWidth: true
+                implicitHeight: updateBox.implicitHeight + 2 * Theme.padCard
+                radius: Theme.radiusLg
+                color: Theme.surface
+                border.width: 1
+                border.color: Theme.border
+                ColumnLayout {
+                    id: updateBox
+                    anchors.fill: parent
+                    anchors.margins: Theme.padCard
+                    spacing: Theme.gapSm
+                    Label {
+                        text: "Обновления"
+                        color: Theme.text
+                        font.pixelSize: Theme.fsTitle
+                        font.weight: Font.DemiBold
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "Синхронизация с веткой main через git (fetch и reset --hard). История и модели в папке данных не трогаются. Локальные правки в клоне при обновлении сбрасываются."
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsLabel
+                        wrapMode: Text.Wrap
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        text: {
+                            var u = bridge && bridge.updateStatus ? bridge.updateStatus : ({})
+                            var ver = u.appVersion ? ("v" + u.appVersion) : ""
+                            var cur = u.current ? String(u.current).slice(0, 7) : ""
+                            var tip = u.remoteTip ? String(u.remoteTip).slice(0, 7) : ""
+                            if (u.message)
+                                return (ver ? (ver + " · ") : "") + u.message
+                            if (ver || cur)
+                                return (ver ? ver : "DotAudio") + (cur ? (" · " + cur + (tip && tip !== cur ? (" → " + tip) : "")) : "")
+                            return "Проверка ещё не запускалась"
+                        }
+                        color: Theme.text
+                        font.pixelSize: Theme.fsSmall
+                        wrapMode: Text.Wrap
+                    }
+                    ToggleSwitch {
+                        text: "Проверять при запуске"
+                        checked: Boolean(bridge.settings.update_check_enabled)
+                        onToggled: bridge.setSetting("update_check_enabled", checked)
+                    }
+                    ToggleSwitch {
+                        text: "Показывать уведомление о новой версии"
+                        checked: Boolean(bridge.settings.update_auto_prompt)
+                        onToggled: bridge.setSetting("update_auto_prompt", checked)
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.gapSm
+                        PillButton {
+                            text: (bridge && bridge.updateStatus && bridge.updateStatus.busy) ? "Работаем…" : "Проверить"
+                            enabled: !(bridge && bridge.updateStatus && bridge.updateStatus.busy)
+                            onClicked: bridge.checkForUpdate()
+                        }
+                        PillButton {
+                            text: (bridge && bridge.updateStatus && bridge.updateStatus.needsConfirmDirty)
+                                  ? "Сбросить правки и обновить"
+                                  : "Обновить"
+                            primary: true
+                            enabled: !(bridge && bridge.updateStatus && bridge.updateStatus.busy)
+                                     && !(bridge && bridge.recording)
+                                     && !(bridge && bridge.busy)
+                                     && (Boolean(bridge.updateAvailable)
+                                         || Boolean(bridge.updateStatus && bridge.updateStatus.needsConfirmDirty)
+                                         || Boolean(bridge.updateStatus && bridge.updateStatus.supported))
+                            onClicked: {
+                                if (bridge.updateStatus && bridge.updateStatus.needsConfirmDirty)
+                                    bridge.confirmApplyUpdate()
+                                else
+                                    bridge.applyUpdate()
+                            }
+                        }
+                        PillButton {
+                            text: "Перезапустить"
+                            visible: Boolean(bridge && bridge.updateStatus && bridge.updateStatus.restartRequired)
+                            enabled: !(bridge && bridge.updateStatus && bridge.updateStatus.busy)
+                            onClicked: bridge.restartAfterUpdate()
+                        }
+                        PillButton {
+                            text: "Отмена"
+                            visible: Boolean(bridge && bridge.updateStatus && bridge.updateStatus.busy)
+                            onClicked: bridge.cancelUpdate()
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+                    Label {
+                        visible: Boolean(bridge && bridge.updateStatus && bridge.updateStatus.dirty)
+                                 && !Boolean(bridge.updateStatus.needsConfirmDirty)
+                        Layout.fillWidth: true
+                        text: "В клоне есть локальные изменения. Обновление их сотрёт - появится кнопка подтверждения."
+                        color: Theme.faint
+                        font.pixelSize: Theme.fsMicro
+                        wrapMode: Text.Wrap
+                    }
+                }
+            }
+            Rectangle {
+                Layout.fillWidth: true
                 implicitHeight: computeBox.implicitHeight + 2 * Theme.padCard
                 radius: Theme.radiusLg
                 color: Theme.surface

@@ -209,6 +209,9 @@ DEFAULTS = {
     "export_csv_bom": True,
     "export_subtitle_chars": 42,
     "export_subtitle_seconds": 6.0,
+    # Обновление из git-клона (fetch + reset --hard origin/main).
+    "update_check_enabled": True,
+    "update_auto_prompt": True,
 }
 
 # Настройка приложения -> ключ опции экспорта. Обе стороны читают только эту
@@ -588,6 +591,8 @@ class Controller(QObject):
     diarizeProbed = Signal("QVariantMap")
     gpuSetupProgress = Signal("QVariantMap")
     gpuSetupFinished = Signal("QVariantMap")
+    updateProgress = Signal("QVariantMap")
+    updateFinished = Signal("QVariantMap")
     hardwareArrived = Signal(object)
 
     def __init__(self, data_dir: Path, desktop):
@@ -744,6 +749,25 @@ class Controller(QObject):
             "restartRequired": False,
         }
         self._gpu_setup_cancel = threading.Event()
+        self._update = {
+            "phase": "idle",
+            "percent": 0.0,
+            "message": "",
+            "busy": False,
+            "available": False,
+            "supported": False,
+            "dirty": False,
+            "needsConfirmDirty": False,
+            "restartRequired": False,
+            "current": "",
+            "remoteTip": "",
+            "behind": 0,
+            "appVersion": "",
+            "repoRoot": "",
+            "error": "",
+        }
+        self._update_cancel = threading.Event()
+        self._update_check_started = False
         threading.Thread(target=self._probe_hardware, daemon=True, name="hardware-probe").start()
         # Each entry is a batch of (segment_id, before, after) snapshots.
         self._edit_undo: list[list[tuple[int, dict, dict]]] = []
@@ -782,6 +806,8 @@ class Controller(QObject):
         self.diarizeProbed.connect(self._on_diarize_probed)
         self.gpuSetupProgress.connect(self._on_gpu_setup_progress)
         self.gpuSetupFinished.connect(self._on_gpu_setup_finished)
+        self.updateProgress.connect(self._on_update_progress)
+        self.updateFinished.connect(self._on_update_finished)
         self.hardwareArrived.connect(self._on_hardware_arrived)
         desktop.dictate.connect(self.hotkeyRecord)
         desktop.island.connect(self.islandRequested)
@@ -1215,6 +1241,262 @@ class Controller(QObject):
         }
         self.changed.emit()
 
+    @Property("QVariantMap", notify=changed)
+    def updateStatus(self):
+        return self._update
+
+    @Property(bool, notify=changed)
+    def updateAvailable(self):
+        return bool(self._update.get("available"))
+
+    def _update_payload_from_status(self, status, *, busy: bool = False, phase: str = "idle") -> dict:
+        data = status.as_map() if hasattr(status, "as_map") else dict(status or {})
+        return {
+            "phase": phase,
+            "percent": float(self._update.get("percent") or 0.0),
+            "message": str(data.get("message") or ""),
+            "busy": busy,
+            "available": bool(data.get("available")),
+            "supported": bool(data.get("supported")),
+            "dirty": bool(data.get("dirty")),
+            "needsConfirmDirty": bool(data.get("needs_confirm_dirty") or data.get("needsConfirmDirty")),
+            "restartRequired": bool(data.get("restart_required") or data.get("restartRequired")),
+            "current": str(data.get("current") or ""),
+            "remoteTip": str(data.get("remote_tip") or data.get("remoteTip") or ""),
+            "behind": int(data.get("behind") or 0),
+            "appVersion": str(data.get("app_version") or data.get("appVersion") or ""),
+            "repoRoot": str(data.get("repo_root") or data.get("repoRoot") or ""),
+            "error": "",
+        }
+
+    def _on_update_progress(self, info) -> None:
+        payload = dict(info or {})
+        if "busy" not in payload:
+            payload["busy"] = True
+        self._update = {**self._update, **payload}
+        self.changed.emit()
+
+    def _on_update_finished(self, result) -> None:
+        payload = dict(result or {})
+        ok = bool(payload.get("ok"))
+        message = str(payload.get("message") or "")
+        self._update = self._update_payload_from_status(
+            payload,
+            busy=False,
+            phase="ready" if ok else "error",
+        )
+        self._update["percent"] = float(payload.get("percent") or 100.0)
+        if payload.get("restart_required") or payload.get("restartRequired"):
+            self._update["restartRequired"] = True
+        if not ok and payload.get("needs_confirm_dirty"):
+            self._update["needsConfirmDirty"] = True
+            self._update["dirty"] = True
+            self._update["phase"] = "confirm"
+        prompt = bool(self._settings.get("update_auto_prompt", True))
+        interesting = bool(
+            payload.get("available")
+            or payload.get("needs_confirm_dirty")
+            or payload.get("restart_required")
+            or payload.get("restartRequired")
+            or not ok
+        )
+        if message and prompt and interesting:
+            self._notice = message
+        if ok and payload.get("restart_required"):
+            self._record_log("success", message or "Обновление применено.")
+        elif ok and payload.get("available"):
+            self._record_log("info", message)
+        elif not ok and message:
+            self._record_log("error" if self._update.get("phase") == "error" else "info", message)
+        self.changed.emit()
+
+    @Slot()
+    def checkForUpdate(self):
+        """Фоновая проверка origin/main. Без записи на диск и без I/O в property."""
+
+        if self._update.get("busy"):
+            return
+        self._update_cancel = threading.Event()
+        self._update = {
+            **self._update,
+            "phase": "check",
+            "percent": 10.0,
+            "message": "Проверяем обновления…",
+            "busy": True,
+            "error": "",
+            "needsConfirmDirty": False,
+        }
+        self.changed.emit()
+
+        def run():
+            from dotaudio.updater import check_update
+
+            try:
+                self.updateProgress.emit(
+                    {
+                        "phase": "check",
+                        "percent": 40.0,
+                        "message": "Связь с remote…",
+                        "busy": True,
+                    }
+                )
+                status = check_update(cancel=self._update_cancel)
+                data = status.as_map()
+                self.updateFinished.emit(
+                    {
+                        "ok": True,
+                        "percent": 100.0,
+                        "available": data["available"],
+                        "supported": data["supported"],
+                        "dirty": data["dirty"],
+                        "current": data["current"],
+                        "remote_tip": data["remote_tip"],
+                        "behind": data["behind"],
+                        "app_version": data["app_version"],
+                        "repo_root": data["repo_root"],
+                        "message": data["message"],
+                        "restart_required": False,
+                    }
+                )
+            except Exception as exc:
+                self.updateFinished.emit(
+                    {
+                        "ok": False,
+                        "available": False,
+                        "supported": False,
+                        "message": str(exc),
+                        "error": str(exc),
+                    }
+                )
+
+        threading.Thread(target=run, name="dotaudio-update-check", daemon=True).start()
+
+    @Slot()
+    def applyUpdate(self):
+        """Сброс к origin/main и pip install -e . Локальные правки потребуют confirmApplyUpdate."""
+
+        self._start_apply_update(allow_dirty=False)
+
+    @Slot()
+    def confirmApplyUpdate(self):
+        """То же, что applyUpdate, но сбрасывает грязное дерево (reset --hard)."""
+
+        self._start_apply_update(allow_dirty=True)
+
+    def _start_apply_update(self, *, allow_dirty: bool) -> None:
+        if self._jobs or self._model_preparing or self._gpu_setup.get("busy"):
+            self._notice = "Дождитесь окончания текущей операции, затем обновите приложение."
+            self.changed.emit()
+            return
+        if self._update.get("busy"):
+            return
+        self._update_cancel = threading.Event()
+        self._update = {
+            **self._update,
+            "phase": "apply",
+            "percent": 5.0,
+            "message": "Обновляем из git…",
+            "busy": True,
+            "error": "",
+            "needsConfirmDirty": False,
+        }
+        self.changed.emit()
+
+        def run():
+            from dotaudio.updater import apply_update
+
+            try:
+                self.updateProgress.emit(
+                    {
+                        "phase": "fetch",
+                        "percent": 25.0,
+                        "message": "Забираем origin/main…",
+                        "busy": True,
+                    }
+                )
+                result = apply_update(
+                    allow_dirty=allow_dirty,
+                    cancel=self._update_cancel,
+                )
+                if result.get("needs_confirm_dirty"):
+                    self.updateFinished.emit(result)
+                    return
+                self.updateProgress.emit(
+                    {
+                        "phase": "reinstall",
+                        "percent": 70.0,
+                        "message": "Пересобираем пакет…",
+                        "busy": True,
+                    }
+                )
+                # apply_update already reinstalls; second progress is UI only.
+                payload = dict(result)
+                payload["percent"] = 100.0
+                self.updateFinished.emit(payload)
+            except Exception as exc:
+                self.updateFinished.emit(
+                    {
+                        "ok": False,
+                        "message": str(exc),
+                        "error": str(exc),
+                        "restart_required": False,
+                    }
+                )
+
+        threading.Thread(target=run, name="dotaudio-update-apply", daemon=True).start()
+
+    @Slot()
+    def cancelUpdate(self):
+        if not self._update.get("busy"):
+            return
+        self._update_cancel.set()
+        self._update = {
+            **self._update,
+            "message": "Отменяем обновление…",
+        }
+        self.changed.emit()
+
+    @Slot()
+    def restartAfterUpdate(self):
+        """Запустить новый процесс и закрыть текущий (после успешного git-update)."""
+
+        from dotaudio.updater import launch_restart
+
+        if not launch_restart():
+            self._notice = "Не удалось перезапустить. Закройте приложение и откройте снова."
+            self.changed.emit()
+            return
+        self.shutdownReady.emit()
+
+    def scheduleStartupUpdateCheck(self, delay_ms: int = 12000) -> None:
+        """Одноразовая проверка после старта UI, без блокировки первого кадра."""
+
+        if self._update_check_started:
+            return
+        if not bool(self._settings.get("update_check_enabled", True)):
+            return
+        self._update_check_started = True
+
+        def kick():
+            if self._jobs or self._model_preparing:
+                QTimer.singleShot(15000, kick)
+                return
+            self.checkForUpdate()
+
+        QTimer.singleShot(max(0, int(delay_ms)), kick)
+
+    def _sync_process_priority(self) -> None:
+        from dotaudio.process_priority import set_process_priority
+
+        busy = bool(
+            self._jobs
+            or self._model_preparing
+            or self._gpu_setup.get("busy")
+            or self._update.get("busy")
+            or self._state == "recording"
+        )
+        set_process_priority("normal" if busy else "below_normal")
+
     @Slot()
     def copyCudaInstallCommand(self):
         command = str(self._hardware.get("installCommand") or "")
@@ -1555,6 +1837,7 @@ class Controller(QObject):
             "live_auto_window", "live_show_times", "live_locked",
             "live_greedy_finals", "gpu_hint_dismissed", "setup_completed",
             "watch_folder_enabled", "history_semantic",
+            "update_check_enabled", "update_auto_prompt",
         ):
             value = bool(value)
         if name in ("caption_x", "caption_y", "caption_screen"):
@@ -2472,6 +2755,7 @@ class Controller(QObject):
         self.changed.emit()
 
     def _tick(self):
+        self._sync_process_priority()
         if self._jobs:
             if self.liveActive and self._capture_started_at is None:
                 return
