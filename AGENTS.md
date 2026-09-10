@@ -11,10 +11,14 @@
 
 - Тип: desktop-app с Python core и необязательным HTTP-сервисом.
 - Аудитория: пока internal; будущая демонстрация в статье.
-- Дистрибуция: local-only; git-установщик `deploy/install.ps1`, обновление через
-  `git reset --hard origin/main` (UI и `deploy/update.ps1`). Setup.exe / PyInstaller
-  ещё не собран.
-- Первая платформа: Windows. Остальные платформы не проверены.
+- Дистрибуция: local-only; git-установщик `deploy/install.ps1` (Windows) и
+  `deploy/install.sh` / `install.sh` (Linux, macOS); обновление через
+  `git reset --hard origin/main` (UI, `deploy/update.ps1`, `deploy/update.sh`).
+  Setup.exe / PyInstaller ещё не собран.
+- Платформы: Windows (полный UX: WASAPI loopback, глобальные хоткеи, автовставка);
+  Ubuntu/Linux и macOS - ядро (микрофон, Live при наличии monitor/BlackHole,
+  медиа, история, мастер загрузок, авто-FFmpeg). End-to-end на Unix ещё не
+  прогнан на целевых машинах - не заявлять паритет без ручной проверки.
 - Runtime: Python >=3.12,<3.14, Qt Quick через PySide6.
 - `pyproject.toml` - источник правды по зависимостям и entrypoints.
 - Git-репозиторий и remote на момент создания не инициализированы.
@@ -36,9 +40,20 @@ python -m venv .venv
 Для QML smoke-test задать `QT_QPA_PLATFORM=offscreen` и передать
 `--smoke-test --data-dir .local-check`.
 Не скачивать модели и не включать микрофон в обычных unit-тестах.
-Git-установщик: `powershell -ExecutionPolicy Bypass -File .\deploy\install.ps1`.
-Обновление клона: Настройки → Обновления или `deploy\update.ps1`.
+Git-установщик Windows: `Install.bat` / `deploy/install.ps1`.
+Linux/macOS: `./install.sh` или `deploy/install.sh`.
+Обновление клона: Настройки → Обновления, `deploy\update.ps1` или `deploy/update.sh`.
 Сборка Setup.exe / PyInstaller ещё не настроена; не выдумывать команду build.
+
+Linux / macOS (из корня DotAudio):
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev,server]'
+.venv/bin/dotaudio
+.venv/bin/python -m pytest -q
+.venv/bin/ruff check src tests
+```
 
 ## Структура
 
@@ -65,6 +80,7 @@ src/dotaudio/
   hardware.py, cuda_runtime.py      железо, GPU любого вендора, сборки ускорения
   adapt.py                          план Whisper/Live под класс машины
   modelhub.py                      скачивание файлов моделей с докачкой
+  tools_ffmpeg.py                  портативный FFmpeg (Windows/Linux; macOS brew)
   llm.py                           каталог языковых моделей, llama.cpp и Ollama
   llm_worker.py                    subprocess llama.cpp (JSON-lines)
   vram_arbiter.py                  mutex ASR↔LLM, вытеснение из VRAM
@@ -74,7 +90,7 @@ src/dotaudio/
   process_priority.py              BelowNormal в простое (Windows)
   server.py                        optional FastAPI
 tests/
-deploy/                            install.ps1 / update.ps1, Docker
+deploy/                            install.ps1 / update.ps1, install.sh / update.sh, Docker
 docs/
 ```
 

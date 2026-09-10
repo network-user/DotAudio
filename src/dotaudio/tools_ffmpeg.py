@@ -2,11 +2,19 @@
 
 Сначала берём ``ffmpeg`` из PATH. Если его нет - бинарник в
 ``data_dir/tools/ffmpeg``. Нужен для караоке-экспорта и HTTP-эфиров.
+
+Автоскачивание:
+- Windows: BtbN win64-gpl.zip
+- Linux x86_64 / aarch64: BtbN linux*-gpl.tar.xz
+- macOS: ``brew install ffmpeg`` при наличии Homebrew; иначе evermeet (Intel)
 """
 
 from __future__ import annotations
 
+import os
+import platform
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -18,15 +26,15 @@ from platformdirs import user_data_path
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 
-# Готовая Windows-сборка BtbN (GPL). Размер плавает; оценка для брифинга.
-FFMPEG_RELEASE_URL = (
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
-    "ffmpeg-master-latest-win64-gpl.zip"
-)
-FFMPEG_DOWNLOAD_MB = 95
 CHUNK_BYTES = 1024 * 1024
 PROGRESS_STEP_BYTES = 2 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 60.0
+
+# Оценки для брифинга мастера; фактический размер плавает.
+FFMPEG_DOWNLOAD_MB = 95
+
+_BTBN = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
+_EVERMEET = "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
 
 
 class FfmpegCancelled(RuntimeError):
@@ -54,6 +62,8 @@ def resolve_ffmpeg(data_dir: Path | None = None) -> str:
     if found:
         return found
     portable = local_binary(data_dir)
+    if portable.is_file() and os.access(portable, os.X_OK if sys.platform != "win32" else os.F_OK):
+        return str(portable)
     if portable.is_file():
         return str(portable)
     return ""
@@ -61,6 +71,65 @@ def resolve_ffmpeg(data_dir: Path | None = None) -> str:
 
 def ffmpeg_available(data_dir: Path | None = None) -> bool:
     return bool(resolve_ffmpeg(data_dir))
+
+
+def _machine_tag() -> str:
+    machine = platform.machine().casefold()
+    if machine in {"x86_64", "amd64"}:
+        return "x86_64"
+    if machine in {"aarch64", "arm64"}:
+        return "arm64"
+    return machine
+
+
+def ffmpeg_release_spec() -> dict[str, str] | None:
+    """URL и имя архива для текущей платформы, либо None если автоскачивание недоступно."""
+
+    if sys.platform == "win32":
+        return {
+            "url": f"{_BTBN}/ffmpeg-master-latest-win64-gpl.zip",
+            "archive": "ffmpeg-win64-gpl.zip",
+            "kind": "zip",
+            "hint": "",
+        }
+    if sys.platform.startswith("linux"):
+        tag = _machine_tag()
+        if tag == "x86_64":
+            name = "ffmpeg-master-latest-linux64-gpl.tar.xz"
+        elif tag == "arm64":
+            name = "ffmpeg-master-latest-linuxarm64-gpl.tar.xz"
+        else:
+            return None
+        return {
+            "url": f"{_BTBN}/{name}",
+            "archive": name,
+            "kind": "tar",
+            "hint": "",
+        }
+    if sys.platform == "darwin":
+        # Homebrew - основной путь на macOS; evermeet только Intel.
+        if _machine_tag() == "x86_64":
+            return {
+                "url": _EVERMEET,
+                "archive": "ffmpeg-evermeet.zip",
+                "kind": "zip",
+                "hint": "brew install ffmpeg",
+            }
+        return {
+            "url": "",
+            "archive": "",
+            "kind": "brew",
+            "hint": "brew install ffmpeg",
+        }
+    return None
+
+
+# Совместимость со старыми импортами/тестами.
+FFMPEG_RELEASE_URL = (
+    f"{_BTBN}/ffmpeg-master-latest-win64-gpl.zip"
+    if sys.platform == "win32"
+    else (ffmpeg_release_spec() or {}).get("url", "")
+)
 
 
 def _download_file(
@@ -136,6 +205,42 @@ def _find_ffmpeg_in_tree(root: Path) -> Path | None:
     return matches[0] if matches else None
 
 
+def _try_brew_install(
+    *,
+    cancel: Event | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> str:
+    brew = shutil.which("brew")
+    if not brew:
+        return ""
+    if on_progress is not None:
+        on_progress({"phase": "install", "percent": 20.0, "message": "Устанавливаем FFmpeg через Homebrew…"})
+    if cancel is not None and cancel.is_set():
+        raise FfmpegCancelled("загрузка FFmpeg остановлена")
+    try:
+        proc = subprocess.run(
+            [brew, "install", "ffmpeg"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=900.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"Homebrew не смог установить FFmpeg: {exc}") from exc
+    found = shutil.which("ffmpeg")
+    if found:
+        if on_progress is not None:
+            on_progress({"phase": "ready", "percent": 100.0, "message": "FFmpeg готов (Homebrew)"})
+        return found
+    detail = (proc.stderr or proc.stdout or "").strip()[:400]
+    raise RuntimeError(
+        "Homebrew не установил ffmpeg в PATH. "
+        + (detail or "Выполните вручную: brew install ffmpeg")
+    )
+
+
 def ensure_ffmpeg(
     data_dir: Path | None = None,
     *,
@@ -150,25 +255,44 @@ def ensure_ffmpeg(
             on_progress({"phase": "ready", "percent": 100.0, "message": "FFmpeg уже есть"})
         return existing
 
-    if sys.platform != "win32":
+    spec = ffmpeg_release_spec()
+    if spec is None:
         raise RuntimeError(
-            "Портативный FFmpeg в автонастройке пока только для Windows. "
-            "Установите ffmpeg в PATH."
+            "Автоустановка FFmpeg для этой платформы не настроена. "
+            "Установите ffmpeg в PATH (apt/brew/pacman)."
+        )
+
+    def progress(phase: str, percent: float, message: str) -> None:
+        if on_progress is not None:
+            on_progress({"phase": phase, "percent": percent, "message": message})
+
+    if spec["kind"] == "brew" or (sys.platform == "darwin" and shutil.which("brew")):
+        # На macOS сначала Homebrew - надёжнее статических сборок.
+        try:
+            brewed = _try_brew_install(cancel=cancel, on_progress=on_progress)
+            if brewed:
+                return brewed
+        except FfmpegCancelled:
+            raise
+        except RuntimeError:
+            if spec["kind"] == "brew" or not spec.get("url"):
+                raise
+
+    if not spec.get("url"):
+        raise RuntimeError(
+            "Портативный FFmpeg на Apple Silicon ставится через Homebrew: "
+            "brew install ffmpeg"
         )
 
     root = tools_root(data_dir)
     root.mkdir(parents=True, exist_ok=True)
     cache = root / "cache"
     cache.mkdir(parents=True, exist_ok=True)
-    archive = cache / "ffmpeg-win64-gpl.zip"
-
-    def progress(phase: str, percent: float, message: str) -> None:
-        if on_progress is not None:
-            on_progress({"phase": phase, "percent": percent, "message": message})
+    archive = cache / spec["archive"]
 
     progress("download", 2.0, "Скачиваем FFmpeg…")
     _download_file(
-        FFMPEG_RELEASE_URL,
+        spec["url"],
         archive,
         cancel=cancel,
         on_progress=on_progress,
@@ -180,16 +304,23 @@ def ensure_ffmpeg(
 
     progress("extract", 80.0, "Распаковываем FFmpeg…")
     extract = Path(tempfile.mkdtemp(prefix="dotaudio-ffmpeg-"))
+    target = local_binary(data_dir)
     try:
-        from dotaudio.archiveutil import safe_extract_zip
+        if spec["kind"] == "tar":
+            from dotaudio.archiveutil import safe_extract_tar
 
-        safe_extract_zip(archive, extract)
+            safe_extract_tar(archive, extract)
+        else:
+            from dotaudio.archiveutil import safe_extract_zip
+
+            safe_extract_zip(archive, extract)
         found = _find_ffmpeg_in_tree(extract)
         if found is None:
             raise RuntimeError("в архиве FFmpeg нет исполняемого файла")
-        target = local_binary(data_dir)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(found, target)
+        if sys.platform != "win32":
+            target.chmod(target.stat().st_mode | 0o111)
         # Рядом иногда нужны dll из той же bin/.
         for sibling in found.parent.glob("*.dll"):
             shutil.copy2(sibling, target.parent / sibling.name)
@@ -204,10 +335,12 @@ def ensure_ffmpeg(
 
 __all__ = [
     "FFMPEG_DOWNLOAD_MB",
+    "FFMPEG_RELEASE_URL",
     "FfmpegCancelled",
     "default_data_dir",
     "ensure_ffmpeg",
     "ffmpeg_available",
+    "ffmpeg_release_spec",
     "local_binary",
     "resolve_ffmpeg",
     "tools_root",

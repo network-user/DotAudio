@@ -398,7 +398,11 @@ Item {
                     Label { text: "Микрофон диктовки"; color: Theme.text; font.pixelSize: Theme.fsLabel; font.weight: Font.DemiBold }
                     Text {
                         Layout.fillWidth: true
-                        text: "Если микрофона наушников нет в списке - Windows отдаёт только их вывод, без входа. Включите микрофон гарнитуры в Параметры → Система → Звук → Ввод (или в приложении производителя), затем «Обновить». Пока его нет, выберите UNA или другой рабочий вход."
+                        text: bridge.platformName === "win32"
+                              ? "Если микрофона наушников нет в списке - Windows отдаёт только их вывод, без входа. Включите микрофон гарнитуры в Параметры → Система → Звук → Ввод, затем «Обновить»."
+                              : bridge.platformName === "darwin"
+                                ? "Разрешите микрофон в Системных настройках → Конфиденциальность. Для захвата системного звука нужен BlackHole или аналог."
+                                : "Если микрофона нет в списке, проверьте PipeWire/PulseAudio и права приложения, затем «Обновить»."
                         color: Theme.faint
                         font.pixelSize: Theme.fsSmall
                         wrapMode: Text.Wrap
@@ -435,11 +439,33 @@ Item {
                         }
                     }
                     Label { text: "Источник Live"; color: Theme.text; font.pixelSize: Theme.fsLabel; font.weight: Font.DemiBold }
+                    Label {
+                        visible: !bridge.systemAudioSupported
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsCaption
+                        text: bridge.platformName === "darwin"
+                              ? "Системный звук на macOS появится после установки виртуального входа (BlackHole и т.п.). Пока используйте микрофон."
+                              : "Системный звук на Linux - через monitor PulseAudio/PipeWire. Если их нет в списке, используйте микрофон."
+                    }
                     RowLayout {
                         Layout.fillWidth: true
                         PillButton { text: "Микрофон"; primary: String(bridge.settings.live_source) === "microphone"; onClicked: bridge.setSetting("live_source", "microphone") }
-                        PillButton { text: "Звук системы"; primary: String(bridge.settings.live_source) === "system"; onClicked: bridge.setSetting("live_source", "system") }
-                        PillButton { text: "Авто"; primary: String(bridge.settings.live_source) === "mixed"; onClicked: bridge.setSetting("live_source", "mixed"); ToolTip.visible: hovered; ToolTip.text: "Микрофон и звук компьютера одновременно" }
+                        PillButton {
+                            text: "Звук системы"
+                            primary: String(bridge.settings.live_source) === "system"
+                            enabled: bridge.systemAudioSupported || bridge.platformName === "win32"
+                            onClicked: bridge.setSetting("live_source", "system")
+                        }
+                        PillButton {
+                            text: "Авто"
+                            primary: String(bridge.settings.live_source) === "mixed"
+                            enabled: bridge.systemAudioSupported || bridge.platformName === "win32"
+                            onClicked: bridge.setSetting("live_source", "mixed")
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Микрофон и звук компьютера одновременно"
+                        }
                         Item { Layout.fillWidth: true }
                         PillButton { text: "Проверить Live"; onClicked: bridge.testLiveSource(); enabled: !bridge.recording && !bridge.busy }
                     }
@@ -449,7 +475,7 @@ Item {
                         Dropdown {
                             id: loopbackChooser
                             Layout.fillWidth: true
-                            model: [{ name: "Системный вывод Windows", id: "" }].concat(bridge.loopbacks)
+                            model: [{ name: bridge.platformName === "win32" ? "Системный вывод по умолчанию" : "Monitor / виртуальный вход", id: "" }].concat(bridge.loopbacks)
                             textRole: "name"
                             currentIndex: {
                                 var selected = String(bridge.settings.loopback_device)

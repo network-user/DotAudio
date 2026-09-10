@@ -2,7 +2,7 @@
 
 <p>
   <img src="https://img.shields.io/badge/Python-3.12--3.13-3776AB?style=flat" alt="Python 3.12-3.13" />
-  <img src="https://img.shields.io/badge/Platform-Windows_MVP-555?style=flat" alt="Windows MVP" />
+  <img src="https://img.shields.io/badge/Platform-Windows_|_Linux_|_macOS-555?style=flat" alt="Windows Linux macOS" />
   <img src="https://img.shields.io/badge/Category-Desktop_ASR-555?style=flat" alt="Desktop ASR" />
   <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-5657-lightgrey?style=flat" alt="5657 lines of code" /><!-- loc:end -->
 </p>
@@ -16,86 +16,124 @@
 
 <img src="docs/cover.svg" width="720" alt="DotAudio: речь и субтитры" />
 
-Desktop-приложение к статье о Whisper для Windows. Оно распознаёт русскую речь
-локально через faster-whisper, показывает живые субтитры, помогает с диктовкой
-и превращает аудио или видео в редактируемую расшифровку и караоке-субтитры.
-Локальный ассистент отвечает по сохранённым записям: изложение, главные мысли,
-вопросы по сказанному - всё на этом же компьютере.
+Desktop-приложение к статье о Whisper. Оно распознаёт русскую речь локально
+через faster-whisper, показывает живые субтитры, помогает с диктовкой и
+превращает аудио или видео в редактируемую расшифровку и караоке-субтитры.
+Первая и наиболее полная платформа - Windows; Ubuntu и macOS поддерживаются
+установщиком и ядром (микрофон, медиа, история, мастер загрузок).
 
 ## Запуск
 
-Нужен **Python 3.12 или 3.13**. Откройте PowerShell в папке проекта и выполните:
+Нужны **Git** и **Python 3.12 или 3.13**. На Linux обычно ещё `libportaudio2`
+(и при сборке wheels - `portaudio19-dev`).
+
+### Windows
 
 ```powershell
-cd <path-to-DotAudio>
+git clone https://github.com/network-user/DotAudio.git
+cd DotAudio
+.\Install.bat
+```
 
-# Только при первом запуске
+`Install.bat` создаёт `.venv`, ставит пакет, ярлык на рабочем столе и запускает
+приложение. Модели и портативный FFmpeg скачает мастер при первом запуске.
+
+Обновление:
+
+```powershell
+.\deploy\update.ps1
+```
+
+или **Настройки → Обновления**.
+
+### Ubuntu / Linux
+
+```bash
+git clone https://github.com/network-user/DotAudio.git
+cd DotAudio
+chmod +x install.sh deploy/*.sh
+./install.sh
+```
+
+Установщик создаёт `.venv`, ставит пакет, `.desktop` в
+`~/.local/share/applications` и лаунчер `deploy/dotaudio.sh`. Данные:
+`~/.local/share/DotCore/DotAudio`. FFmpeg при отсутствии в PATH скачивается
+автоматически (BtbN linux64/arm64).
+
+Обновление:
+
+```bash
+./deploy/update.sh
+```
+
+или **Настройки → Обновления**.
+
+Подсказка по системным пакетам (Ubuntu 24.04):
+
+```bash
+sudo apt install git python3.12 python3.12-venv libportaudio2
+```
+
+### macOS
+
+```bash
+git clone https://github.com/network-user/DotAudio.git
+cd DotAudio
+chmod +x install.sh deploy/*.sh
+./install.sh
+```
+
+Нужен Homebrew Python 3.12/3.13. FFmpeg: мастер вызывает `brew install ffmpeg`,
+если Homebrew есть; на Intel возможен и портативный архив. Данные:
+`~/Library/Application Support/DotCore/DotAudio`. Разрешите микрофон в
+Системных настройках. Системный звук Live требует виртуальный вход
+(BlackHole и т.п.).
+
+Обновление: `./deploy/update.sh` или **Настройки → Обновления**.
+
+### Ручной запуск для разработки
+
+Windows:
+
+```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev,server]"
-
-# Запуск приложения из исходников, без .exe
-$env:PYTHONPATH = "src"
-.\.venv\Scripts\python.exe -m dotaudio
-```
-
-### Установщик из git (ярлык на рабочем столе)
-
-Нужны **Git** и **Python 3.12/3.13**. Скрипт клонирует репозиторий (или берёт
-текущий клон), ставит `.venv`, создаёт ярлыки на рабочем столе и в меню Пуск:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\deploy\install.ps1
-```
-
-Обновление: в приложении **Настройки → Обновления** (проверка при запуске и
-кнопка «Обновить»), либо вручную:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\deploy\update.ps1
-```
-
-Обновление делает `git fetch` + `reset --hard origin/main` и `pip install -e .`.
-Данные пользователя (`%LOCALAPPDATA%\DotCore\DotAudio`) не трогаются. Локальные
-правки в клоне при обновлении сбрасываются после подтверждения.
-
-Если окружение уже создано и зависимости установлены, нужны только последние
-dве строки. Альтернатива после `pip install -e`:
-
-```powershell
 .\.venv\Scripts\dotaudio.exe
 ```
 
-При первом распознавании выбранная модель Whisper загрузится в локальный кеш.
-Для быстрой проверки выберите `tiny` в разделе «Модели». Для MP4-экспорта с
-караоке-субтитрами требуется установленный `ffmpeg` в `PATH`.
+Linux / macOS:
 
-Раздел «Ассистент» просит отдельную нативную сборку - её нет в базовой
-установке. Готовые колёса лежат в индексах по типу ускорения, поэтому команда
-зависит от того, чем считать:
-
-```powershell
-# Процессор: работает на любой машине
-.\.venv\Scripts\python.exe -m pip install llama-cpp-python `
-  --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-
-# Видеокарта NVIDIA: сборка плюс библиотеки CUDA 12
-.\.venv\Scripts\python.exe -m pip install nvidia-cublas-cu12 nvidia-cuda-runtime-cu12
-.\.venv\Scripts\python.exe -m pip install llama-cpp-python --upgrade --force-reinstall `
-  --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev,server]"
+.venv/bin/dotaudio
 ```
 
-То же самое делает кнопка «Ускорение» в каталоге моделей ассистента. Сборка под
-видеокарту не универсальна: если она не запускается на конкретном процессоре,
-приложение говорит об этом словами и предлагает вернуться к сборке «Процессор».
-Саму модель ассистента приложение скачивает само - каталог показывает размер и
-то, что подходит этому устройству. Если на машине уже запущен Ollama с нужной
-моделью, используется он, и второй копии в памяти не появляется.
+При первом распознавании модель Whisper попадёт в локальный кеш. Для быстрой
+проверки выберите `tiny` в «Модели».
+
+Раздел «Ассистент» просит отдельную нативную сборку `llama-cpp-python`:
+
+```bash
+.venv/bin/python -m pip install llama-cpp-python \
+  --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+```
+
+### Ограничения по платформам
+
+| Возможность | Windows | Linux | macOS |
+|---|---|---|---|
+| Диктовка с микрофона | да | да | да (нужно разрешение) |
+| Live «звук системы» | WASAPI loopback | Pulse/PipeWire monitor, если есть в списке | нужен BlackHole / аналог |
+| Глобальные хоткеи / автовставка | да | только кнопки в окне | только кнопки в окне |
+| Авто-FFmpeg | да | да (скачивание) | brew / Intel zip |
+| Git-обновления из UI | да | да | да |
 
 ## Что внутри
 
 - Переносимый мини-остров: уровень сигнала, статус записи, принудительная
   остановка во время «Завершаем», раскрытие в рабочее окно и переназначаемые
-  горячие клавиши.
+  горячие клавиши (глобально на Windows).
 - Live-субтитры - главный режим: отдельное always-on-top окно, предварительный
   текст по короткому окну текущей фразы и финализация в истории. Если модель
   отстаёт, неначатая фраза вытесняется новой, сессия не останавливается.
@@ -105,7 +143,7 @@ dве строки. Альтернатива после `pip install -e`:
   анимируются, предыдущая фраза уходит в строку истории. Одна и та же сцена
   работает в Live-окне и в окне зала.
 - Диктовка с копированием текста в буфер обмена, безопасной вставкой в
-  сохранённое целевое окно и сохранением исходной расшифровки в историю.
+  сохранённое целевое окно (Windows) и сохранением исходной расшифровки в историю.
 - Локальный словарь терминов, исправлений и voice snippets для финального
   текста диктовки без передачи правил на сервер.
 - Выбор и проверка устройств ввода и вывода, визуальный уровень сигнала.
@@ -153,23 +191,22 @@ src/dotaudio/
   karaoke.py                          # word timestamps, ASS и MP4
   speaker_id.py, nemo_diarize.py      # голоса: разметка дорожки и разбор фраз
   hardware.py, cuda_runtime.py        # опрос устройства и сборки ускорения
-  modelhub.py                         # скачивание файлов моделей с докачкой
+  modelhub.py, tools_ffmpeg.py        # модели и портативный FFmpeg
+  updater.py, process_priority.py     # git-обновления и приоритет (Windows)
   llm.py, assistant.py                # каталог языковых моделей и разбор записи
   assistant_controller.py             # мост ассистента: воркеры и сигналы
   qml/MainMvp.qml                     # оболочка: остров, сцена субтитров, окно
   qml/MiniIsland.qml, LiveTheater.qml, CaptionOverlay.qml
-                                      # фазы острова, Live-сцена и экран зала
   qml/Theme.js, CaptionText.qml, CaptionStage.qml
-                                      # токены и движение, живая строка и сцена фразы
-  qml/Icon.qml, Waveform.qml, StatusDot.qml
-  qml/PillButton.qml, IconButton.qml, ToggleSwitch.qml, Dropdown.qml
-                                      # общие элементы управления
+  qml/SettingsPage.qml                # среда, Live-источник, обновления
   qml/KaraokePreview.qml, TranscriptEditor.qml, TranscriptView.qml
-  qml/TranscriptExportDialog.qml      # окно сохранения: формат, параметры, предпросмотр
+  qml/TranscriptExportDialog.qml
   qml/AssistantPage.qml, AssistantModels.qml
-                                      # чат по записи и каталог языковых моделей
-tests/                                # pytest, без микрофона и без скачивания моделей
-docs/                                 # продукт, архитектура, аналоги, исследование
+deploy/
+  install.ps1 / update.ps1            # Windows
+  install.sh / update.sh              # Linux / macOS
+tests/
+docs/
 ```
 
 Распознавание и запись выполняются вне GUI-потока. Черновой Live-текст хранится
@@ -179,24 +216,31 @@ docs/                                 # продукт, архитектура, 
 
 ## Команды
 
+Windows:
+
 ```powershell
 $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\ruff.exe check src tests
-
-# Проверить загрузку QML без доступа к микрофону
 $env:QT_QPA_PLATFORM = "offscreen"
 .\.venv\Scripts\python.exe -m dotaudio --smoke-test --data-dir .local-check
 ```
 
-Последняя проверка: 489 passed, 11 skipped, `ruff check src tests` без ошибок,
-QML smoke-test завершается успешно. Четыре теста `test_engine.py` про поле
-`confidence` падают от незавершённой чужой правки движка и ждут её автора.
-В тестах остаются два предупреждения
-совместимости FastAPI и Starlette с TestClient. Реальные микрофон, системный
-звук, GPU и FFmpeg зависят от конкретного компьютера Windows и проверяются на
-нём вручную. Скорость ответа ассистента тоже машинная величина: замеры для
-конкретного железа лежат в [передаче проекта](docs/HANDOFF.md).
+Linux / macOS:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest -q
+.venv/bin/ruff check src tests
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m dotaudio --smoke-test --data-dir .local-check
+```
+
+Последняя проверка на машине разработки (Windows): связанные с портом тесты
+зелёные; полный прогон около 505 passed / 11 skipped при известных падениях
+четырёх тестов `test_engine.py` из-за поля `confidence`. `ruff check src tests`
+без ошибок. Реальные микрофон, системный звук, GPU и FFmpeg зависят от
+конкретного компьютера и проверяются на нём вручную. Ubuntu и macOS в этой
+сессии не прогонялись end-to-end - установщик и ветки кода добавлены, ручной
+чеклист на целевых машинах ещё впереди.
 
 ## Стек
 
@@ -221,7 +265,7 @@ QML smoke-test завершается успешно. Четыре теста `t
 ## Архитектура
 
 ```text
-микрофон / WASAPI loopback
+микрофон / loopback (WASAPI | Pulse monitor | BlackHole)
   -> capture.py, блоки 100 мс
   -> pipeline.py, endpointing + preview + final очередь
   -> engine.py, faster-whisper / CTranslate2

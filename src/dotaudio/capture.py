@@ -50,6 +50,17 @@ _SKIP_INPUT_NAME_TOKENS = (
 )
 
 
+def _mic_privacy_hint() -> str:
+    if sys.platform == "darwin":
+        return (
+            "Системные настройки → Конфиденциальность и безопасность → Микрофон "
+            "и разрешите DotAudio."
+        )
+    if sys.platform.startswith("linux"):
+        return "права Flatpak/PipeWire и что микрофон не занят другой программой."
+    return "Параметры Windows → Конфиденциальность → Микрофон и разрешите DotAudio."
+
+
 def describe_capture_error(kind: str, error: Exception | str) -> str:
     """Map driver exceptions to a named recovery hint.  Details stay attached."""
 
@@ -57,10 +68,7 @@ def describe_capture_error(kind: str, error: Exception | str) -> str:
     text = detail.casefold()
     if kind == "microphone":
         if any(token in text for token in ("denied", "permission", "access is denied", "not authorized")):
-            return (
-                "Нет доступа к микрофону. Откройте Параметры Windows → "
-                "Конфиденциальность → Микрофон и разрешите DotAudio."
-            )
+            return f"Нет доступа к микрофону. Откройте {_mic_privacy_hint()}"
         if any(token in text for token in ("invalid sample rate", "-9997", "unsupported format")):
             return (
                 "Микрофон не принял частоту дискретизации. DotAudio откроет "
@@ -80,12 +88,17 @@ def describe_capture_error(kind: str, error: Exception | str) -> str:
         if any(token in text for token in ("no default", "no device", "host error", "no input")):
             return (
                 "Микрофон не найден. Подключите устройство входа и проверьте "
-                "звук Windows."
+                "системные настройки звука."
             )
         return (
             "Не удалось открыть микрофон. Выберите другое устройство в "
-            "«Среде» или на странице «Диктовка» и проверьте разрешение "
-            f"Windows для микрофона. Детали драйвера: {detail}"
+            "«Среде» или на странице «Диктовка» и проверьте доступ к микрофону. "
+            f"Детали драйвера: {detail}"
+        )
+    if "unix system audio" in text or "blackhole" in text or "monitor" in text:
+        return detail if detail else (
+            "Системный звук на этой ОС недоступен. Выберите микрофон или "
+            "установите виртуальное устройство захвата (Pulse monitor / BlackHole)."
         )
     if any(token in text for token in ("not found", "invalid", "no speaker", "no output")):
         return (
@@ -96,6 +109,20 @@ def describe_capture_error(kind: str, error: Exception | str) -> str:
         "Не удалось открыть системный звук. Проверьте устройство вывода "
         f"и драйвер, затем попробуйте микрофон. Детали драйвера: {detail}"
     )
+
+
+def default_live_source() -> str:
+    """Windows defaults to system loopback; other desktops start on the mic."""
+
+    return "system" if sys.platform == "win32" else "microphone"
+
+
+def system_audio_supported() -> bool:
+    """True when Live can open system/mixed audio on this platform."""
+
+    if sys.platform == "win32":
+        return True
+    return bool(list_loopback_devices())
 
 
 def _coerce_device(raw: Any) -> int | str | None:
@@ -233,14 +260,18 @@ def source_for_mode(mode: str, settings: Mapping[str, Any]) -> tuple[str, int | 
     """Pick capture kind and device for dictation vs live captions.
 
     Dictation always uses the microphone.  Live defaults to system loopback
-    even when a leftover ``source=microphone`` setting remains from older
-    builds.  ``mixed`` listens to microphone and system audio together.
+    on Windows even when a leftover ``source=microphone`` setting remains
+    from older builds; on Linux/macOS the default is the microphone.
+    ``mixed`` listens to microphone and system audio together when supported.
     """
 
     if mode == "live":
-        kind = str(settings.get("live_source") or "system")
+        kind = str(settings.get("live_source") or default_live_source())
         if kind not in LIVE_SOURCES:
-            kind = "system"
+            kind = default_live_source()
+        if kind in {"system", "mixed"} and sys.platform != "win32" and not system_audio_supported():
+            # Keep UI choice, but capture must open something that works.
+            kind = "microphone"
         if kind == "mixed":
             return kind, None
         raw = settings.get("input_device") if kind == "microphone" else settings.get("loopback_device")
@@ -249,12 +280,13 @@ def source_for_mode(mode: str, settings: Mapping[str, Any]) -> tuple[str, int | 
 
 
 def next_live_source(current: str) -> str:
-    kind = current if current in LIVE_SOURCES else "system"
+    fallback = default_live_source()
+    kind = current if current in LIVE_SOURCES else fallback
     return LIVE_SOURCES[(LIVE_SOURCES.index(kind) + 1) % len(LIVE_SOURCES)]
 
 
 def live_source_label(kind: str) -> str:
-    return LIVE_SOURCE_LABELS.get(kind, LIVE_SOURCE_LABELS["system"])
+    return LIVE_SOURCE_LABELS.get(kind, LIVE_SOURCE_LABELS[default_live_source()])
 
 
 def mix_audio_blocks(left: np.ndarray | None, right: np.ndarray | None) -> np.ndarray:
@@ -473,8 +505,10 @@ class AudioCapture(_CallbackDispatcher):
             try:
                 if self.kind == "microphone":
                     self._start_microphone()
-                else:
+                elif sys.platform == "win32":
                     self._start_system_loopback()
+                else:
+                    self._start_unix_system_capture()
             except Exception as exc:
                 self._stop.set()
                 self._stop_dispatcher()
@@ -500,12 +534,35 @@ class AudioCapture(_CallbackDispatcher):
 
     @property
     def running(self) -> bool:
-        if self.kind == "microphone":
+        if self.kind == "microphone" or (
+            self.kind == "system" and sys.platform != "win32"
+        ):
             return self._stream is not None and not self._stop.is_set()
         return self._system_thread is not None and self._system_thread.is_alive()
 
     def _start_error(self, error: Exception) -> str:
         return describe_capture_error(self.kind, error)
+
+    def _start_unix_system_capture(self) -> None:
+        """Capture a Pulse monitor / BlackHole-style input via PortAudio."""
+
+        device = self.device
+        if device is None or device == "":
+            monitors = list_loopback_devices()
+            if not monitors:
+                if sys.platform == "darwin":
+                    raise RuntimeError(
+                        "unix system audio: на macOS нужен виртуальный вход "
+                        "(например BlackHole). Без него выберите микрофон."
+                    )
+                raise RuntimeError(
+                    "unix system audio: не найден monitor PulseAudio/PipeWire. "
+                    "Выберите микрофон или укажите monitor-устройство в списке."
+                )
+            device = _coerce_device(monitors[0]["id"])
+            self.device = device
+        # Reuse the microphone PortAudio path against the virtual capture device.
+        self._start_microphone()
 
     def _start_microphone(self) -> None:
         import sounddevice as sd
@@ -1066,24 +1123,49 @@ def list_output_devices() -> list[dict[str, str | int]]:
 
 
 def list_loopback_devices() -> list[dict[str, str]]:
-    """Return Windows playback endpoints that SoundCard can capture exactly.
+    """Return playback endpoints (Windows) or monitor/virtual inputs (Unix).
 
-    SoundDevice indexes are useful for playback, but can be duplicated by
-    Windows audio APIs.  A SoundCard speaker id is the Media Foundation
-    endpoint id and is the matching key for its loopback microphone.
+    On Windows SoundCard speakers map to WASAPI loopback. On Linux/macOS we
+    expose PortAudio inputs that look like Pulse monitors, BlackHole, Stereo
+    Mix and similar virtual capture devices.
     """
 
-    try:
-        import soundcard as sc
+    if sys.platform == "win32":
+        try:
+            import soundcard as sc
 
-        speakers = sc.all_speakers()
-    except Exception:
-        return []
+            speakers = sc.all_speakers()
+        except Exception:
+            return []
+        result: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for speaker in speakers:
+            identifier = str(getattr(speaker, "id", ""))
+            name = str(getattr(speaker, "name", ""))
+            if identifier and name and identifier not in seen:
+                result.append({"id": identifier, "name": name})
+                seen.add(identifier)
+        return result
+
+    markers = (
+        "monitor",
+        "loopback",
+        "what u hear",
+        "stereo mix",
+        "blackhole",
+        "soundflower",
+        "cable",
+        "vb-audio",
+        "vb cable",
+    )
     result: list[dict[str, str]] = []
     seen: set[str] = set()
-    for speaker in speakers:
-        identifier = str(getattr(speaker, "id", ""))
-        name = str(getattr(speaker, "name", ""))
+    for device in list_input_devices():
+        name = str(device.get("name") or "")
+        folded = name.casefold()
+        if not any(token in folded for token in markers):
+            continue
+        identifier = str(device.get("id", ""))
         if identifier and name and identifier not in seen:
             result.append({"id": identifier, "name": name})
             seen.add(identifier)
@@ -1096,7 +1178,14 @@ def playback_device_for_loopback(endpoint_id: str | None) -> int | None:
     Windows can expose one physical output through MME, DirectSound, WASAPI
     and WDM-KS at once.  For a loopback probe we must play through an alias of
     the exact endpoint being captured, rather than an arbitrary output index.
+    On other platforms the endpoint id is already a PortAudio input index.
     """
+
+    if sys.platform != "win32":
+        if endpoint_id is None or endpoint_id == "":
+            return None
+        text = str(endpoint_id)
+        return int(text) if text.isdigit() else None
 
     try:
         import soundcard as sc
@@ -1186,6 +1275,7 @@ __all__ = [
     "LIVE_SOURCES",
     "MixedCapture",
     "StreamCapture",
+    "default_live_source",
     "describe_capture_error",
     "list_input_devices",
     "list_loopback_devices",
@@ -1199,4 +1289,5 @@ __all__ = [
     "play_pcm",
     "resolve_microphone_candidates",
     "source_for_mode",
+    "system_audio_supported",
 ]

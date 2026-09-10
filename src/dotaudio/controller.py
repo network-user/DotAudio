@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog
 from dotaudio.capture import (
     AudioCapture,
     StreamCapture,
+    default_live_source,
     list_input_devices,
     list_loopback_devices,
     list_output_devices,
@@ -27,6 +28,7 @@ from dotaudio.capture import (
     play_pcm,
     playback_device_for_loopback,
     source_for_mode,
+    system_audio_supported,
 )
 from dotaudio.desktop import MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, Hotkey
 from dotaudio.engine import DownloadCancelled, Engine, RecognitionConfig
@@ -124,7 +126,8 @@ DEFAULTS = {
     # en_ru - Whisper language=en + локальный OPUS-MT EN→RU (см. translate.py).
     "speech_mode": "ru",
     "backend": "local", "server_url": "http://127.0.0.1:8765", "source": "microphone",
-    "live_source": "system",
+    # Windows: system loopback. Linux/macOS: microphone until a monitor/BlackHole exists.
+    "live_source": default_live_source(),
     "input_device": "", "auto_paste": True, "keywords": "Whisper, искусственный интеллект",
     "channels": "", "profile": "balanced", "output_device": "", "loopback_device": "",
     "island_opacity": 0.94, "island_click_through": False, "island_snap": True,
@@ -1762,6 +1765,26 @@ class Controller(QObject):
     @Property(bool, constant=True)
     def hotkeysAvailable(self): return self.desktop.available
 
+    @Property(str, constant=True)
+    def platformName(self):
+        """win32 | darwin | linux | other - for QML platform-specific hints."""
+
+        import sys
+
+        if sys.platform == "win32":
+            return "win32"
+        if sys.platform == "darwin":
+            return "darwin"
+        if sys.platform.startswith("linux"):
+            return "linux"
+        return sys.platform
+
+    @Property(bool, constant=True)
+    def systemAudioSupported(self):
+        """Live «звук системы» доступен (WASAPI / monitor / BlackHole)."""
+
+        return system_audio_supported()
+
     @Property(str, notify=changed)
     def lastTranscript(self): return self._last_transcript
 
@@ -2580,7 +2603,7 @@ class Controller(QObject):
                 self.deviceTestFinished.emit(
                     "silent",
                     "Микрофон открыт, но сигнал нулевой. Выберите другое устройство "
-                    "или разрешите доступ в Параметры Windows → Конфиденциальность → Микрофон.",
+                    "или разрешите доступ к микрофону в системных настройках.",
                 )
                 return
 
@@ -2633,7 +2656,7 @@ class Controller(QObject):
             "message": "Подаём тихий тестовый тон и проверяем возврат в Live…",
             "level": 0.0,
         }
-        self._record_log("info", "Запущена проверка Windows loopback выбранного выхода.")
+        self._record_log("info", "Запущена проверка системного звука (loopback/monitor) выбранного выхода.")
         self.changed.emit()
 
         def test():
@@ -2650,7 +2673,7 @@ class Controller(QObject):
                 time.sleep(0.2)
                 tone_device = playback_device_for_loopback(loopback_device)
                 if tone_device is None:
-                    raise RuntimeError("не найден выход Windows для выбранного loopback-устройства")
+                    raise RuntimeError("не найден выход для выбранного loopback-устройства")
                 play_output_tone(tone_device)
                 time.sleep(0.5)
             except Exception as exc:
@@ -2662,7 +2685,7 @@ class Controller(QObject):
                 self.deviceTestFinished.emit("error", errors[-1])
             elif peak < 0.001:
                 self.deviceTestFinished.emit(
-                    "error", "Loopback не получил тестовый тон. Выберите другой выход или проверьте драйвер Windows."
+                    "error", "Loopback не получил тестовый тон. Выберите другой выход или проверьте драйвер звука."
                 )
             else:
                 self.deviceTestFinished.emit(
@@ -2721,7 +2744,7 @@ class Controller(QObject):
                 hint = {
                     "system": "Выберите в списке именно устройство, через которое сейчас играет звук.",
                     "mixed": "Проверьте микрофон и выход, через который играет звук.",
-                }.get(kind, "Проверьте разрешение Windows для микрофона и уровень входа.")
+                }.get(kind, "Проверьте доступ к микрофону в системных настройках и уровень входа.")
                 self.deviceTestFinished.emit("silent", f"Источник «{source_name}» открыт, но сигнал нулевой. {hint}")
             else:
                 self.deviceTestFinished.emit("ready", f"Источник «{source_name}» отвечает. Тестовая запись не сохранена.")

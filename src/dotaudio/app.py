@@ -21,14 +21,51 @@ from dotaudio.setup_controller import SetupController
 
 
 def _register_ui_fonts():
-    """Load Segoe UI from Windows so offscreen and custom Qt plugins can render text."""
-    font_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
-    if not font_dir.is_dir():
-        return
-    for name in ("segoeui.ttf", "segoeuib.ttf", "segoeuil.ttf", "segoeuiz.ttf", "segoeuisl.ttf", "consola.ttf"):
-        path = font_dir / name
+    """Load a UI font so offscreen and custom Qt plugins can render text."""
+
+    candidates: list[Path] = []
+    windir = os.environ.get("WINDIR")
+    if windir:
+        font_dir = Path(windir) / "Fonts"
+        candidates.extend(
+            font_dir / name
+            for name in (
+                "segoeui.ttf",
+                "segoeuib.ttf",
+                "segoeuil.ttf",
+                "segoeuiz.ttf",
+                "segoeuisl.ttf",
+                "consola.ttf",
+            )
+        )
+    # Linux / common packaging
+    for path in (
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
+        Path("/usr/share/fonts/TTF/DejaVuSans.ttf"),
+    ):
+        candidates.append(path)
+    # macOS
+    for path in (
+        Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+        Path("/Library/Fonts/Arial.ttf"),
+        Path("/System/Library/Fonts/Helvetica.ttc"),
+    ):
+        candidates.append(path)
+    for path in candidates:
         if path.is_file():
             QFontDatabase.addApplicationFont(str(path))
+
+
+def _default_ui_font() -> QFont:
+    import sys
+
+    if sys.platform == "darwin":
+        return QFont(".AppleSystemUIFont", 13)
+    if sys.platform.startswith("linux"):
+        return QFont("DejaVu Sans", 10)
+    return QFont("Segoe UI", 10)
 
 
 def main():
@@ -51,7 +88,7 @@ def main():
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
     _register_ui_fonts()
-    app.setFont(QFont("Segoe UI", 10))
+    app.setFont(_default_ui_font())
     palette = QPalette()
     for role, color in ((QPalette.Window, "#111214"), (QPalette.WindowText, "#eeeeef"),
                         (QPalette.Base, "#1b1c20"), (QPalette.Text, "#eeeeef"),

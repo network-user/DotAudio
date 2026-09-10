@@ -27,8 +27,11 @@ Lint: `.venv\Scripts\python.exe -m ruff check src tests`.
 запись идут через один рендер; новый формат добавлять в каталог, а не в QML.
 Окно app — системная рамка Windows; остров/сцена безрамные. Иконка: `assets/`, `branding.py`.
 Первый запуск: `setup.py` / `setup_controller.py` / `SetupWizard.qml` — опрос, брифинг, фоновая загрузка.
-Установка из git: `deploy/install.ps1` (ярлык на рабочем столе). Обновление:
-`updater.py` + Настройки → Обновления / `deploy/update.ps1` (`reset --hard origin/main`).
+Установка из git: `deploy/install.ps1` / `Install.bat` (Windows); `install.sh` /
+`deploy/install.sh` (Linux, macOS). Обновление: `updater.py` + Настройки → Обновления /
+`deploy/update.ps1` / `deploy/update.sh` (`reset --hard origin/main`).
+FFmpeg: `tools_ffmpeg.ensure_ffmpeg` (Windows zip, Linux tar.xz, macOS brew/Intel).
+Live «звук системы»: WASAPI на Windows; на Linux/macOS - monitor/BlackHole при наличии.
 В простое процесс Windows получает BelowNormal (`process_priority.py`).
 
 При глобальных изменениях обновляй README через `generate-readme`,

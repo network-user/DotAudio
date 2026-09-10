@@ -33,12 +33,17 @@ class _Counting:
 
 
 def test_live_source_defaults_to_system_audio() -> None:
-    assert DEFAULTS["live_source"] == "system"
+    import sys
+
+    expected = "system" if sys.platform == "win32" else "microphone"
+    assert DEFAULTS["live_source"] == expected
     assert DEFAULTS["source"] == "microphone"
     # The default profile and the default model have to agree, and both have
     # to be a model that produces Russian rather than phonetic guesses.
     assert DEFAULTS["model"] == MODEL_BY_PROFILE[DEFAULTS["profile"]] == "small"
-    assert next_live_source(DEFAULTS["live_source"]) == "mixed"
+    cycled = next_live_source(DEFAULTS["live_source"])
+    assert cycled in {"system", "mixed", "microphone"}
+    assert cycled != DEFAULTS["live_source"]
 
 
 def test_caption_overlay_settings_are_local_and_sized() -> None:

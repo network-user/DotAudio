@@ -245,13 +245,18 @@ def test_play_pcm_rejects_empty_and_plays_mono(monkeypatch) -> None:
 def test_capture_error_explains_how_to_recover() -> None:
     capture = AudioCapture(kind="microphone")
     message = capture._start_error(RuntimeError("driver failed"))
-    assert "разрешение Windows" in message
+    assert "микрофон" in message.casefold()
     assert "Среде" in message or "Диктовка" in message
     assert "driver failed" in message
 
 
 def test_capture_error_names_permission_busy_and_missing_device() -> None:
-    assert "Конфиденциальность" in describe_capture_error("microphone", PermissionError("access is denied"))
+    permission = describe_capture_error("microphone", PermissionError("access is denied"))
+    assert "микрофон" in permission.casefold()
+    assert any(
+        token in permission
+        for token in ("Конфиденциальность", "системных настройках", "PipeWire", "права")
+    )
     assert "занят" in describe_capture_error("microphone", RuntimeError("device unavailable"))
     assert "недоступен" in describe_capture_error("microphone", RuntimeError("Invalid device"))
     assert "не найден" in describe_capture_error("microphone", RuntimeError("no default input device"))
@@ -283,6 +288,8 @@ def test_system_capture_resolves_selected_output_index(monkeypatch) -> None:
 
 
 def test_live_defaults_to_system_audio_even_if_legacy_source_is_microphone() -> None:
+    import sys
+
     kind, device = source_for_mode(
         "live",
         {
@@ -291,8 +298,25 @@ def test_live_defaults_to_system_audio_even_if_legacy_source_is_microphone() -> 
             "loopback_device": "{0.0.0.00000000}.{speaker}",
         },
     )
-    assert kind == "system"
-    assert device == "{0.0.0.00000000}.{speaker}"
+    if sys.platform == "win32":
+        assert kind == "system"
+        assert device == "{0.0.0.00000000}.{speaker}"
+    else:
+        # Without a monitor/BlackHole device the live default is the microphone.
+        assert kind in {"system", "microphone"}
+        if kind == "system":
+            assert device == "{0.0.0.00000000}.{speaker}"
+        else:
+            assert device == 1
+
+
+def test_default_live_source_matches_platform() -> None:
+    import sys
+
+    from dotaudio.capture import default_live_source
+
+    expected = "system" if sys.platform == "win32" else "microphone"
+    assert default_live_source() == expected
 
 
 def test_dictation_ignores_live_system_source() -> None:

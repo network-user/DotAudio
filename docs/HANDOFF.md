@@ -62,6 +62,26 @@
 
 Проверки: `tests/test_updater.py` (локальный bare remote, без сети GitHub).
 
+## Итерация Linux / macOS, 2026-09-10
+
+Пользователь попросил доступность на Ubuntu и macOS с автонастройкой и
+автоскачиванием.
+
+- `deploy/install.sh`, `deploy/update.sh`, `deploy/download-and-install.sh`,
+  корневой `install.sh`: клон, `.venv`, `pip install -e .`, `.desktop` (Linux)
+  или `DotAudio.command` (macOS), лаунчер `deploy/dotaudio.sh`.
+- `tools_ffmpeg.py`: автоскачивание BtbN linux64/arm64; на macOS сначала
+  Homebrew, на Intel - evermeet; `archiveutil.safe_extract_tar`.
+- Live: на non-Windows по умолчанию микрофон; системный звук через PortAudio
+  monitor / BlackHole, если устройство есть в списке. Без него UI подсказывает.
+- Шрифты UI: DejaVu/Noto/Helvetica помимо Segoe; подсказки в Настройках
+  зависят от `bridge.platformName`.
+- Данные: `platformdirs` (`~/.local/share/DotCore/DotAudio` /
+  `~/Library/Application Support/DotCore/DotAudio`).
+- Глобальные хоткеи и автовставка по-прежнему Windows-only (`desktop.py`).
+
+Проверки: unit-тесты capture/ffmpeg/archive/updater на Windows зелёные.
+Ручной прогон Ubuntu/macOS ещё не выполнен - не закрывать паритет.
 
 ## MVP: готовые сценарии
 

@@ -18,6 +18,19 @@ def test_resolve_ffmpeg_falls_back_to_portable(monkeypatch, tmp_path):
     assert tools_ffmpeg.resolve_ffmpeg(tmp_path) == str(binary)
 
 
+def test_ffmpeg_release_spec_for_platform():
+    spec = tools_ffmpeg.ffmpeg_release_spec()
+    assert spec is not None
+    if tools_ffmpeg.sys.platform == "win32":
+        assert spec["kind"] == "zip"
+        assert "win64" in spec["archive"]
+    elif tools_ffmpeg.sys.platform.startswith("linux"):
+        assert spec["kind"] == "tar"
+        assert "linux" in spec["archive"]
+    elif tools_ffmpeg.sys.platform == "darwin":
+        assert spec["kind"] in {"zip", "brew"}
+
+
 def test_ensure_ffmpeg_skips_download_when_present(monkeypatch, tmp_path):
     monkeypatch.setattr(tools_ffmpeg, "resolve_ffmpeg", lambda data_dir=None: r"C:\ffmpeg.exe")
     path = tools_ffmpeg.ensure_ffmpeg(tmp_path)
