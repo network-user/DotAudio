@@ -124,18 +124,18 @@ if ($LASTEXITCODE -ne 0) { throw "pip install -e . не удался" }
 
 $icon = Join-Path $InstallDir "src\dotaudio\assets\app_icon.ico"
 $target = if (Test-Path $venvPythonw) { $venvPythonw } else { $venvPython }
-$args = "-m dotaudio"
+$launchArgs = "-m dotaudio"
 
 if (-not $SkipShortcut) {
     $desktop = [Environment]::GetFolderPath("Desktop")
     $desktopLnk = Join-Path $desktop "DotAudio.lnk"
-    New-Shortcut -Path $desktopLnk -Target $target -Arguments $args `
+    New-Shortcut -Path $desktopLnk -Target $target -Arguments $launchArgs `
         -WorkingDirectory $InstallDir -IconLocation $icon
     Write-Host "Ярлык на рабочем столе: $desktopLnk"
 
     $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\DotAudio"
     $startLnk = Join-Path $startMenu "DotAudio.lnk"
-    New-Shortcut -Path $startLnk -Target $target -Arguments $args `
+    New-Shortcut -Path $startLnk -Target $target -Arguments $launchArgs `
         -WorkingDirectory $InstallDir -IconLocation $icon
     Write-Host "Ярлык в меню Пуск: $startLnk"
 }
@@ -154,9 +154,8 @@ start "" ".venv\Scripts\pythonw.exe" -m dotaudio
 Write-Host ""
 Write-Host "Готово. Данные пользователя: %LOCALAPPDATA%\DotCore\DotAudio"
 Write-Host "Запуск: ярлык DotAudio или $launcher"
-Write-Host "Обновление из UI: Настройки → Обновления, либо:"
-Write-Host "  powershell -ExecutionPolicy Bypass -File `"$InstallDir\deploy\update.ps1`""
+Write-Host "Обновление из UI: Настройки - Обновления, либо deploy\update.ps1"
 
 if ($Launch) {
-    Start-Process -FilePath $target -ArgumentList $args -WorkingDirectory $InstallDir
+    Start-Process -FilePath $target -ArgumentList $launchArgs -WorkingDirectory $InstallDir
 }
