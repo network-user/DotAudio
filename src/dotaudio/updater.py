@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from importlib import metadata
 from pathlib import Path
@@ -47,6 +49,61 @@ def app_version() -> str:
 
 def package_root() -> Path:
     return Path(__file__).resolve().parent
+
+
+def git_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return a subprocess environment with Git's helper programs reachable.
+
+    Some Windows Git installations expose ``git.exe`` from ``cmd`` but omit
+    ``mingw64/bin`` from PATH.  Local transports then fail with
+    ``git-upload-pack: command not found`` even though the helper is installed.
+    Keep the repair local to Git subprocesses and never mutate the application
+    process environment.
+    """
+
+    environment = dict(base or os.environ)
+    if sys.platform != "win32":
+        return environment
+
+    path_value = environment.get("PATH", "")
+    git_executable = shutil.which("git", path=path_value or None)
+    if not git_executable:
+        return environment
+
+    git_path = Path(git_executable).resolve()
+    roots = (git_path.parent.parent, git_path.parent)
+    candidates: list[Path] = []
+    for root in roots:
+        candidates.extend(
+            (
+                root / "mingw64" / "bin",
+                root / "mingw64" / "libexec" / "git-core",
+                root / "libexec" / "git-core",
+                root / "bin",
+            )
+        )
+
+    helper_dir = next(
+        (
+            candidate
+            for candidate in candidates
+            if (candidate / "git-upload-pack.exe").is_file()
+            or (candidate / "git-upload-pack").is_file()
+        ),
+        None,
+    )
+    if helper_dir is None:
+        return environment
+
+    path_parts = [part for part in path_value.split(os.pathsep) if part]
+    helper_text = str(helper_dir)
+    if helper_text.casefold() not in {part.casefold() for part in path_parts}:
+        path_parts.insert(0, helper_text)
+    environment["PATH"] = os.pathsep.join(path_parts)
+    current_exec_path = environment.get("GIT_EXEC_PATH", "")
+    if not current_exec_path or not Path(current_exec_path).is_dir():
+        environment["GIT_EXEC_PATH"] = helper_text
+    return environment
 
 
 def find_repo_root(start: Path | None = None) -> Path | None:
@@ -87,6 +144,7 @@ def _git(
         timeout=timeout,
         check=check,
         creationflags=creationflags,
+        env=git_environment(),
     )
 
 
@@ -414,6 +472,7 @@ __all__ = [
     "apply_update",
     "check_update",
     "find_repo_root",
+    "git_environment",
     "launch_restart",
     "package_root",
 ]

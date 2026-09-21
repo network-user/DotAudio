@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ def _git(cwd: Path, *args: str) -> str:
         check=True,
         capture_output=True,
         text=True,
+        env=updater.git_environment(),
     )
     return (proc.stdout or "").strip()
 
@@ -118,3 +120,39 @@ def test_defaults_include_update_keys() -> None:
 
     assert DEFAULTS["update_check_enabled"] is True
     assert DEFAULTS["update_auto_prompt"] is True
+
+
+def test_git_environment_does_not_mutate_the_base_mapping() -> None:
+    base = {"PATH": "missing", "DOTAUDIO_TEST": "keep"}
+    result = updater.git_environment(base)
+
+    assert base == {"PATH": "missing", "DOTAUDIO_TEST": "keep"}
+    assert result["DOTAUDIO_TEST"] == "keep"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Git helper layout")
+def test_git_environment_adds_installed_upload_pack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    git_root = tmp_path / "Git"
+    git_executable = git_root / "cmd" / "git.exe"
+    helper_dir = git_root / "mingw64" / "bin"
+    git_executable.parent.mkdir(parents=True)
+    helper_dir.mkdir(parents=True)
+    git_executable.write_bytes(b"")
+    (helper_dir / "git-upload-pack.exe").write_bytes(b"")
+    monkeypatch.setattr(updater.shutil, "which", lambda *_args, **_kwargs: str(git_executable))
+
+    result = updater.git_environment({"PATH": "base"})
+
+    assert result["PATH"].split(";")[0] == str(helper_dir)
+    assert result["GIT_EXEC_PATH"] == str(helper_dir)
+
+
+def test_git_environment_without_helper_keeps_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    git_executable = tmp_path / "cmd" / "git.exe"
+    git_executable.parent.mkdir(parents=True)
+    git_executable.write_bytes(b"")
+    monkeypatch.setattr(updater.shutil, "which", lambda *_args, **_kwargs: str(git_executable))
+
+    result = updater.git_environment({"PATH": "base"})
+
+    assert result == {"PATH": "base"}
