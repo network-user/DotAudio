@@ -47,7 +47,7 @@ from dotaudio.diag import (
     check_whisper_disk,
     empty_transcript_reason,
     explain_transcribe_error,
-    format_doctor_report,
+    export_diagnostic_report,
     humanize_status,
     probe_media_duration,
     running_transcribe_check,
@@ -615,6 +615,25 @@ def recommended_model(hardware: dict) -> str:
     from dotaudio.adapt import recommended_whisper
 
     return recommended_whisper(hardware)
+
+
+def hardware_validation(
+    model: str,
+    hardware: dict,
+    *,
+    device: str = "auto",
+    compute_type: str = "auto",
+) -> dict:
+    """Return the no-inference readiness plan used by the doctor and UI."""
+
+    from dotaudio.hardware import validate_hardware
+
+    return validate_hardware(
+        str(model),
+        hardware,
+        device=str(device or "auto"),
+        compute_type=str(compute_type or "auto"),
+    ).as_dict()
 
 
 class Controller(QObject):
@@ -6049,6 +6068,23 @@ class Controller(QObject):
         hw = dict(self._hardware or {})
         push(check_python())
         push(check_hardware(hw))
+        validation = hardware_validation(model, hw, device=device)
+        validation_state = str(validation.get("state") or "unknown")
+        validation_ok = validation_state in {"ready", "fallback"}
+        validation_reason = str(validation.get("reason") or "План запуска не подтверждён.")
+        validation_recommendations = validation.get("recommendations") or []
+        if validation_recommendations:
+            validation_reason += " " + " ".join(str(item) for item in validation_recommendations[:2])
+        validation_fix = ""
+        if validation_state in {"insufficient", "unavailable"}:
+            validation_fix = "cpu" if validation.get("device") == "cuda" else "smaller_model"
+        push({
+            "id": "model_hardware",
+            "ok": validation_ok,
+            "label": "Память и устройство модели",
+            "detail": f"{validation_state}: {validation_reason}",
+            "fix": validation_fix,
+        })
         push(check_ctranslate2())
         push({"id": "device", "ok": True, "label": "Устройство ASR",
               "detail": f"настройка {device} · {hw.get('compute_label') or hw.get('computeHint') or 'нет сводки'}",
@@ -6086,7 +6122,18 @@ class Controller(QObject):
             "fixLabel": summary["fixLabel"],
             "fixes": summary["fixes"],
             "ok": summary["ok"],
-            "report": format_doctor_report(checks, summary["message"], extra=extra),
+            "report": export_diagnostic_report(
+                {
+                    "phase": phase,
+                    "message": summary["message"],
+                    "checks": checks,
+                    "canFix": summary["canFix"],
+                    "fixLabel": summary["fixLabel"],
+                    "fixes": summary["fixes"],
+                    "extra": extra,
+                },
+                format="text",
+            ),
         })
 
     @Slot()
@@ -6111,8 +6158,7 @@ class Controller(QObject):
 
     @Slot()
     def copyDoctorReport(self):
-        text = str(self._doctor.get("report") or format_doctor_report(
-            self._doctor.get("checks") or [], self._doctor.get("message") or ""))
+        text = export_diagnostic_report(self._doctor, format="text")
         QApplication.clipboard().setText(text)
         self._notice = "Отчёт анализа скопирован."
         self.changed.emit()

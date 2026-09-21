@@ -1,12 +1,16 @@
 """Тесты diag.py: журнал, check_*, summarize_doctor, format_doctor_report."""
 from __future__ import annotations
 
+import json
+
 from dotaudio.diag import (
+    DIAGNOSTIC_REPORT_MAX_BYTES,
     FileLog,
     busy_job_reason,
     check_whisper_disk,
     empty_transcript_reason,
     explain_transcribe_error,
+    export_diagnostic_report,
     format_doctor_report,
     format_duration_ru,
     probe_media_duration,
@@ -155,3 +159,96 @@ def test_running_transcribe_check_is_not_a_failure():
     result = running_transcribe_check("talk.mp3")
     assert result["ok"] is True
     assert "talk.mp3" in result["detail"]
+
+
+def test_export_diagnostic_report_success_has_stable_sections_and_json():
+    result = {
+        "ok": True,
+        "message": "Проверки прошли",
+        "phase": "ok",
+        "checks": [
+            {"id": "python", "ok": True, "label": "Python", "detail": "CPython 3.12"},
+            {"id": "whisper", "ok": True, "label": "Whisper", "detail": "модель готова"},
+        ],
+        "extra": {"model": "small", "device": "cpu"},
+    }
+
+    text = export_diagnostic_report(result)
+    assert text == export_diagnostic_report(result)
+    assert "format_version: 1" in text
+    assert "[summary]" in text
+    assert "[environment]" in text
+    assert "[checks]" in text
+    assert "[actions]" in text
+
+    payload = json.loads(export_diagnostic_report(result, format="json"))
+    assert payload["format_version"] == 1
+    assert list(payload["sections"]) == ["summary", "environment", "checks", "actions"]
+    assert payload["sections"]["summary"]["status"] == "ok"
+    assert payload["sections"]["environment"]["device"] == "cpu"
+    assert payload["sections"]["checks"][0]["id"] == "python"
+
+
+def test_export_diagnostic_report_errors_include_recommended_actions():
+    result = {
+        "ok": False,
+        "message": "Whisper не отвечает",
+        "phase": "fail",
+        "canFix": True,
+        "fixLabel": "Починить: процессор",
+        "fixes": ["cpu", "prepare_model"],
+        "checks": [
+            {
+                "id": "whisper_runtime",
+                "ok": False,
+                "label": "Whisper отвечает",
+                "detail": "CUDA не приняла модель",
+                "fix": "cpu",
+                "advice": ["Переключить устройство на процессор"],
+            }
+        ],
+    }
+
+    payload = json.loads(export_diagnostic_report(result, format="json"))
+    summary = payload["sections"]["summary"]
+    actions = payload["sections"]["actions"]
+    assert summary["status"] == "failed"
+    assert summary["can_fix"] is True
+    assert summary["fix_label"] == "Починить: процессор"
+    assert actions[:2] == ["cpu", "prepare_model"]
+    assert "Переключить устройство на процессор" in actions
+    assert "CUDA не приняла модель" in payload["sections"]["checks"][0]["detail"]
+
+
+def test_export_diagnostic_report_redacts_sensitive_and_bounds_huge_values():
+    result = {
+        "ok": False,
+        "message": "token=super-secret-token; файл C:\\Users\\frog2\\secret folder\\input.wav",
+        "checks": [
+            {
+                "id": "media",
+                "ok": False,
+                "label": "Файл",
+                "detail": "Authorization: Bearer very-secret-value",
+            }
+        ],
+        "extra": {
+            "secret_token": "do-not-export",
+            "log_path": r"C:\Users\frog2\secret folder\diagnostic.log",
+            "huge_field": "X" * 100_000,
+        },
+        "report": "сырой отчёт не должен попадать в новый bounded API",
+    }
+
+    text = export_diagnostic_report(result)
+    payload_text = export_diagnostic_report(result, format="json")
+    for report in (text, payload_text):
+        assert len(report.encode("utf-8")) <= DIAGNOSTIC_REPORT_MAX_BYTES
+        assert "super-secret-token" not in report
+        assert "do-not-export" not in report
+        assert r"C:\Users\frog2" not in report
+        assert "secret folder" not in report
+        assert "сырой отчёт не должен" not in report
+        assert "[truncated]" in report
+    payload = json.loads(payload_text)
+    assert payload["sections"]["environment"]["log_path"] == "[path redacted]"

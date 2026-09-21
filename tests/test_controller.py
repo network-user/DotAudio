@@ -9,6 +9,7 @@ from dotaudio.controller import (
     QUIT_HOTKEY_OPTIONS,
     STATUS_LABELS,
     Controller,
+    hardware_validation,
     hotkey_id,
     live_draft_model_for,
     parse_hotkey,
@@ -279,6 +280,44 @@ def test_model_fit_compares_memory_with_the_real_machine() -> None:
     assert recommended_model({"threads": 0, "ram_gb": None, "cuda_devices": 0}) == "tiny"
     assert recommended_model({"threads": 8, "ram_gb": 32.0, "cuda_devices": 1, "gpuVramGb": 8}) == "medium"
     assert model_fit("small", {"threads": 4, "ram_gb": 16.0, "cuda_devices": 0})["state"] == "slow"
+
+
+def test_hardware_validation_adapter_reports_ready_cpu_plan() -> None:
+    result = hardware_validation(
+        "small",
+        {"cuda_devices": 0, "ram_available_gb": 16.0},
+        device="cpu",
+    )
+    assert result["state"] == "ready"
+    assert result["device"] == "cpu"
+    assert result["can_run"] is True
+
+
+def test_hardware_validation_adapter_reports_cuda_to_cpu_fallback() -> None:
+    result = hardware_validation(
+        "small",
+        {
+            "cuda_devices": 1,
+            "nvidiaPresent": True,
+            "ram_available_gb": 16.0,
+            "cudaVramFreeGb": 0.25,
+        },
+        device="cuda",
+    )
+    assert result["state"] == "fallback"
+    assert result["device"] == "cpu"
+    assert result["fallback_device"] == "cpu"
+
+
+def test_hardware_validation_adapter_does_not_guess_custom_model() -> None:
+    result = hardware_validation(
+        "my-private-whisper",
+        {"cuda_devices": 1, "nvidiaPresent": True},
+        device="auto",
+    )
+    assert result["state"] == "unknown"
+    assert result["model_known"] is False
+    assert result["can_run"] is False
 
 
 def test_show_gpu_hint_for_nvidia_until_dismissed() -> None:

@@ -7,13 +7,106 @@
 
 from __future__ import annotations
 
+import json
 import math
+import re
 import threading
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 LOG_MAX_BYTES = 2_000_000
 TRACE_LIMIT = 40
+DIAGNOSTIC_REPORT_FORMAT = "dotaudio-diagnostic-report"
+DIAGNOSTIC_REPORT_VERSION = 1
+DIAGNOSTIC_REPORT_MAX_BYTES = 64_000
+
+_REPORT_MAX_STRING = 512
+_REPORT_MAX_CHECKS = 64
+_REPORT_MAX_ACTIONS = 32
+_REPORT_MAX_ENVIRONMENT_FIELDS = 32
+_REPORT_MAX_LIST_ITEMS = 16
+_REPORT_REDACTED = "[redacted]"
+_REPORT_PATH_REDACTED = "[path redacted]"
+_REPORT_TRUNCATED = "… [truncated]"
+
+_SENSITIVE_KEY_PARTS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "access_key",
+    "private_key",
+    "credential",
+    "authorization",
+    "cookie",
+    "bearer",
+    "jwt",
+    "refresh_token",
+    "client_secret",
+    "clientsecret",
+    "ssh_key",
+    "privatekey",
+    "accesskey",
+    "refreshtoken",
+)
+_PATH_KEY_PARTS = (
+    "path",
+    "file",
+    "filepath",
+    "filename",
+    "directory",
+    "dir",
+    "root",
+    "cache",
+    "cwd",
+    "home",
+    "location",
+    "logfile",
+    "socket",
+)
+_REPORT_RESERVED_KEYS = {
+    "actions",
+    "canfix",
+    "checks",
+    "diagnostic",
+    "environment",
+    "extra",
+    "fixes",
+    "message",
+    "phase",
+    "report",
+    "summary",
+}
+_ABSOLUTE_PATH_RE = re.compile(r"(?i)(?<![\w])(?:[a-z]:[\\/]|\\\\|/)[^\s,;|]+")
+_ABSOLUTE_PATH_WITH_SPACES_RE = re.compile(
+    r"(?i)(?<![\w])(?:[a-z]:[\\/]|\\\\|~[\\/])[^<>\"'`\r\n]*"
+)
+_SECRET_FILE_RE = re.compile(
+    r"(?i)(?<![\w.-])(?:\.env(?:\.[\w.-]+)?|"
+    r"(?:secrets?|credentials?|tokens?|passwords?)[\\/][^\s,;|]+|"
+    r"[^\s,;|]+\.(?:pem|key|p12|pfx))(?![\w.-])"
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)([\"']?(?:password|passwd|pwd|secret|token|api[_-]?key|"
+    r"access[_-]?key|accesskey|private[_-]?key|privatekey|client[_-]?secret|clientsecret|"
+    r"refresh[_-]?token|refreshtoken|authorization|"
+    r"cookie|bearer)[\"']?\s*[:=]\s*)"
+    r"(?:[\"'][^\"']*[\"']|[^\s,;\]}]+)"
+)
+_SECRET_QUERY_RE = re.compile(
+    r"(?i)([?&](?:token|secret|password|api[_-]?key|access[_-]?key)=)[^&#\s]+"
+)
+_BEARER_RE = re.compile(r"(?i)(\bbearer\s+)[^\s,;]+")
+_TOKEN_PREFIX_RE = re.compile(r"\b(?:sk|ghp|gho|github_pat|hf|xoxb|xoxp)_[A-Za-z0-9_-]{12,}\b")
+_PATH_ASSIGNMENT_RE = re.compile(
+    r"(?i)(\b(?:path|file|filepath|filename|directory|dir|cache|cwd|home|root|location|"
+    r"log(?:[_-]?path)?|data[_-]?dir)\s*[:=]\s*)[^\r\n]+"
+)
+_REPORT_URL_RE = re.compile(r"(?i)\b(?:https?|ftp)://[^\s<>\"'`]+")
 
 
 def _empty_setup_error() -> dict:
@@ -827,6 +920,533 @@ def summarize_doctor(checks: list[dict]) -> dict:
     }
 
 
+_REPORT_OMIT = object()
+_REPORT_ENVIRONMENT_KEYS = {
+    "app_version",
+    "architecture",
+    "backend",
+    "compute",
+    "compute_type",
+    "cuda",
+    "cuda_devices",
+    "cuda_version",
+    "device",
+    "gpu",
+    "gpu_count",
+    "gpu_name",
+    "language",
+    "model",
+    "os",
+    "platform",
+    "python",
+    "ram",
+    "task",
+    "threads",
+    "version",
+    "vram",
+}
+
+
+def _report_key(value: object) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    return text[:80] or "field"
+
+
+def _report_normalised_key(value: object) -> str:
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(value or ""))
+    return re.sub(r"[^a-z0-9]+", "_", text.casefold()).strip("_")
+
+
+def _report_is_sensitive_key(value: object) -> bool:
+    key = _report_normalised_key(value)
+    return bool(key) and any(part in key for part in _SENSITIVE_KEY_PARTS)
+
+
+def _report_is_path_key(value: object) -> bool:
+    key = _report_normalised_key(value)
+    if not key:
+        return False
+    return any(part in key.split("_") or key.endswith(part) for part in _PATH_KEY_PARTS)
+
+
+def _truncate_report_text(text: str, limit: int = _REPORT_MAX_STRING) -> str:
+    if len(text) <= limit:
+        return text
+    marker = _REPORT_TRUNCATED
+    if limit <= len(marker):
+        return marker[:limit]
+    return text[: limit - len(marker)].rstrip() + marker
+
+
+def _redact_report_text(text: str) -> str:
+    """Удалить из диагностической строки секреты и абсолютные пути."""
+
+    text = _PATH_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{_REPORT_PATH_REDACTED}", text)
+    text = _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{_REPORT_REDACTED}", text)
+    text = _SECRET_QUERY_RE.sub(lambda match: f"{match.group(1)}{_REPORT_REDACTED}", text)
+    text = _BEARER_RE.sub(lambda match: f"{match.group(1)}{_REPORT_REDACTED}", text)
+    text = _TOKEN_PREFIX_RE.sub(_REPORT_REDACTED, text)
+    text = _REPORT_URL_RE.sub("[url redacted]", text)
+    text = _ABSOLUTE_PATH_WITH_SPACES_RE.sub(_REPORT_PATH_REDACTED, text)
+    text = _ABSOLUTE_PATH_RE.sub(_REPORT_PATH_REDACTED, text)
+    return _SECRET_FILE_RE.sub(_REPORT_PATH_REDACTED, text)
+
+
+def _safe_report_text(value: object, *, key: object = "", limit: int = _REPORT_MAX_STRING) -> str:
+    if _report_is_sensitive_key(key):
+        return _REPORT_REDACTED
+    if isinstance(value, Path) or _report_is_path_key(key):
+        return _REPORT_PATH_REDACTED
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, float) and not math.isfinite(value):
+            return ""
+        text = str(value)
+    elif isinstance(value, str):
+        text = value
+    else:
+        return f"<{type(value).__name__}>"
+    text = _redact_report_text(text)
+    text = " ".join(text.split())
+    return _truncate_report_text(text, limit)
+
+
+def _safe_report_value(value: object, *, key: object = "", depth: int = 0) -> object:
+    """Вернуть JSON-совместимое bounded-значение или специальный omit-маркер."""
+
+    if _report_is_sensitive_key(key):
+        return _REPORT_OMIT
+    if isinstance(value, Path) or _report_is_path_key(key):
+        return _REPORT_PATH_REDACTED
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(-1_000_000_000_000, min(1_000_000_000_000, value))
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return _safe_report_text(value, key=key)
+    if depth >= 2:
+        return f"<{type(value).__name__} omitted>"
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        raw_keys = sorted(value, key=lambda item: str(item).casefold())
+        for raw_key in raw_keys[:_REPORT_MAX_LIST_ITEMS]:
+            if _report_is_sensitive_key(raw_key):
+                continue
+            safe_key = _report_key(raw_key)
+            safe_value = _safe_report_value(value[raw_key], key=raw_key, depth=depth + 1)
+            if safe_value is not _REPORT_OMIT:
+                result[safe_key] = safe_value
+        if len(raw_keys) > _REPORT_MAX_LIST_ITEMS:
+            result["_truncated"] = True
+        return result
+    if isinstance(value, (list, tuple)):
+        result = []
+        for item in value[:_REPORT_MAX_LIST_ITEMS]:
+            safe_item = _safe_report_value(item, depth=depth + 1)
+            if safe_item is not _REPORT_OMIT:
+                result.append(safe_item)
+        if len(value) > _REPORT_MAX_LIST_ITEMS:
+            result.append(_REPORT_TRUNCATED)
+        return result
+    return f"<{type(value).__name__}>"
+
+
+def _report_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        value_casefold = value.strip().casefold()
+        if value_casefold in {"1", "true", "yes", "ok", "passed", "success"}:
+            return True
+        if value_casefold in {"0", "false", "no", "fail", "failed", "error"}:
+            return False
+    return None
+
+
+def _report_count(value: object, default: int = 0) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, min(1_000_000, count))
+
+
+def _report_sequence(value: object) -> list[object]:
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if isinstance(value, Mapping):
+        return [value[key] for key in sorted(value, key=lambda item: str(item).casefold())]
+    return []
+
+
+def _report_first(sources: list[Mapping[str, Any]], *keys: str) -> object:
+    for source in sources:
+        for key in keys:
+            if key in source and source[key] is not None:
+                return source[key]
+    return None
+
+
+def _normalise_report_check(value: object, index: int) -> dict[str, object]:
+    source = value if isinstance(value, Mapping) else {}
+    check_id = _safe_report_text(source.get("id") or f"check-{index}", key="id", limit=80)
+    raw_ok = _report_bool(source.get("ok"))
+    if raw_ok is None:
+        raw_ok = _report_bool(source.get("status"))
+    ok = bool(raw_ok)
+    label = _safe_report_text(source.get("label") or check_id, key="label", limit=160)
+    raw_detail = value if not isinstance(value, Mapping) else (
+        source.get("detail") or source.get("message") or source.get("error") or ""
+    )
+    detail = _safe_report_text(
+        raw_detail,
+        key="detail",
+    )
+    fix = _safe_report_text(source.get("fix") or source.get("action") or "", key="fix", limit=160)
+    advice = []
+    raw_advice = source.get("advice") or source.get("recommendations")
+    for item in _report_sequence(raw_advice)[:8]:
+        text = _safe_report_text(item, key="advice", limit=256)
+        if text:
+            advice.append(text)
+    return {
+        "id": check_id,
+        "ok": ok,
+        "label": label,
+        "detail": detail,
+        "fix": fix,
+        "advice": advice,
+    }
+
+
+def _report_action_text(value: object) -> str:
+    if isinstance(value, Mapping):
+        value = value.get("label") or value.get("message") or value.get("action") or value.get("id")
+    return _safe_report_text(value, key="action", limit=256)
+
+
+def _collect_report_actions(
+    sources: list[Mapping[str, Any]],
+    checks: list[dict[str, object]],
+) -> tuple[list[str], bool]:
+    values: list[object] = []
+    for source in sources:
+        for key in (
+            "actions",
+            "fixes",
+            "recommended_actions",
+            "recommendedActions",
+            "recommendations",
+            "advice",
+        ):
+            values.extend(_report_sequence(source.get(key)))
+    for check in checks:
+        if check["fix"]:
+            values.append(check["fix"])
+        values.extend(check["advice"])
+
+    actions: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _report_action_text(value)
+        marker = text.casefold()
+        if not text or marker in seen:
+            continue
+        seen.add(marker)
+        actions.append(text)
+        if len(actions) >= _REPORT_MAX_ACTIONS:
+            break
+    return actions, len(values) > len(actions)
+
+
+def _collect_report_environment(
+    result: Mapping[str, Any],
+    diagnostic: Mapping[str, Any] | None,
+) -> tuple[dict[str, object], bool]:
+    sources: list[Mapping[str, Any]] = []
+    for container in (diagnostic, result):
+        if not isinstance(container, Mapping):
+            continue
+        for key in ("environment", "extra"):
+            value = container.get(key)
+            if isinstance(value, Mapping):
+                sources.append(value)
+
+    top_level_sources = [source for source in (diagnostic, result) if isinstance(source, Mapping)]
+    collected: dict[str, object] = {}
+    truncated = False
+    for source in sources:
+        keys = sorted(source, key=lambda item: str(item).casefold())
+        for raw_key in keys:
+            if len(collected) >= _REPORT_MAX_ENVIRONMENT_FIELDS:
+                truncated = True
+                break
+            if _report_is_sensitive_key(raw_key) or _report_normalised_key(raw_key) in _REPORT_RESERVED_KEYS:
+                continue
+            safe_key = _report_key(raw_key)
+            safe_value = _safe_report_value(source[raw_key], key=raw_key)
+            if safe_value is not _REPORT_OMIT and safe_key not in collected:
+                collected[safe_key] = safe_value
+
+    for source in top_level_sources:
+        for raw_key in sorted(_REPORT_ENVIRONMENT_KEYS):
+            if len(collected) >= _REPORT_MAX_ENVIRONMENT_FIELDS:
+                truncated = True
+                break
+            if raw_key not in source or raw_key in collected:
+                continue
+            safe_value = _safe_report_value(source[raw_key], key=raw_key)
+            if safe_value is not _REPORT_OMIT:
+                collected[raw_key] = safe_value
+    return dict(sorted(collected.items(), key=lambda item: item[0].casefold())), truncated
+
+
+def _report_contains_truncation(value: object) -> bool:
+    if isinstance(value, str):
+        return _REPORT_TRUNCATED in value
+    if isinstance(value, Mapping):
+        return any(_report_contains_truncation(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_report_contains_truncation(item) for item in value)
+    return False
+
+
+def _shrink_report_value(value: object, limit: int = 128) -> object:
+    if isinstance(value, str):
+        return _truncate_report_text(value, limit)
+    if isinstance(value, list):
+        return [_shrink_report_value(item, limit) for item in value[:8]]
+    if isinstance(value, dict):
+        return {key: _shrink_report_value(item, limit) for key, item in list(value.items())[:8]}
+    return value
+
+
+def _shrink_report_payload(payload: dict[str, object]) -> dict[str, object]:
+    sections = payload["sections"]
+    assert isinstance(sections, dict)
+    summary = sections["summary"]
+    assert isinstance(summary, dict)
+    summary["message"] = _shrink_report_value(summary.get("message", ""), 128)
+    environment = sections["environment"]
+    assert isinstance(environment, dict)
+    sections["environment"] = {
+        key: _shrink_report_value(value, 128) for key, value in list(environment.items())[:8]
+    }
+    checks = sections["checks"]
+    assert isinstance(checks, list)
+    sections["checks"] = [_shrink_report_value(item, 128) for item in checks[:8]]
+    actions = sections["actions"]
+    assert isinstance(actions, list)
+    sections["actions"] = [_shrink_report_value(item, 128) for item in actions[:8]]
+    truncated = payload["truncated"]
+    assert isinstance(truncated, dict)
+    truncated.update({"environment": True, "checks": True, "actions": True})
+    return payload
+
+
+def _minimal_report_payload(payload: dict[str, object]) -> dict[str, object]:
+    sections = payload["sections"]
+    assert isinstance(sections, dict)
+    summary = sections["summary"]
+    assert isinstance(summary, dict)
+    return {
+        "format": DIAGNOSTIC_REPORT_FORMAT,
+        "format_version": DIAGNOSTIC_REPORT_VERSION,
+        "sections": {
+            "summary": {
+                "status": summary.get("status", "unknown"),
+                "message": _truncate_report_text(str(summary.get("message") or ""), 128),
+                "phase": _truncate_report_text(str(summary.get("phase") or ""), 64),
+                "failed": summary.get("failed", 0),
+                "total": summary.get("total", 0),
+                "can_fix": bool(summary.get("can_fix")),
+                "fix_label": _truncate_report_text(str(summary.get("fix_label") or ""), 128),
+            },
+            "environment": {},
+            "checks": [],
+            "actions": [],
+        },
+        "truncated": {"environment": True, "checks": True, "actions": True},
+    }
+
+
+def _render_report_json(payload: dict[str, object]) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False, allow_nan=False) + "\n"
+
+
+def _render_report_text(payload: dict[str, object]) -> str:
+    sections = payload["sections"]
+    assert isinstance(sections, dict)
+    summary = sections["summary"]
+    environment = sections["environment"]
+    checks = sections["checks"]
+    actions = sections["actions"]
+    assert isinstance(summary, dict)
+    assert isinstance(environment, dict)
+    assert isinstance(checks, list)
+    assert isinstance(actions, list)
+
+    lines = [
+        "DotAudio diagnostic report",
+        f"format: {DIAGNOSTIC_REPORT_FORMAT}",
+        f"format_version: {DIAGNOSTIC_REPORT_VERSION}",
+        "",
+        "[summary]",
+        f"status: {summary['status']}",
+        f"message: {summary['message']}",
+        f"phase: {summary['phase']}",
+        f"failed: {summary['failed']}",
+        f"total: {summary['total']}",
+        f"can_fix: {'yes' if summary['can_fix'] else 'no'}",
+        f"fix_label: {summary['fix_label']}",
+        "",
+        "[environment]",
+    ]
+    if environment:
+        lines.extend(f"{key}: {_report_text_value(value)}" for key, value in environment.items())
+    else:
+        lines.append("none")
+    lines.extend(["", "[checks]"])
+    if checks:
+        for index, check in enumerate(checks, start=1):
+            lines.append(
+                f"{index}. {'ok' if check['ok'] else 'failed'} | id={check['id']} | "
+                f"label={check['label']} | detail={check['detail']} | fix={check['fix']}"
+            )
+            for advice in check["advice"]:
+                lines.append(f"   advice: {advice}")
+    else:
+        lines.append("none")
+    lines.extend(["", "[actions]"])
+    if actions:
+        lines.extend(f"- {action}" for action in actions)
+    else:
+        lines.append("none")
+    truncated = payload["truncated"]
+    assert isinstance(truncated, dict)
+    lines.extend(
+        [
+            "",
+            "[limits]",
+            f"environment_truncated: {'yes' if truncated['environment'] else 'no'}",
+            f"checks_truncated: {'yes' if truncated['checks'] else 'no'}",
+            f"actions_truncated: {'yes' if truncated['actions'] else 'no'}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _report_text_value(value: object) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def export_diagnostic_report(result: Mapping[str, Any] | None, *, format: str = "text") -> str:
+    """Экспортировать bounded-отчёт диагностики для копирования или сохранения.
+
+    В отчёт попадают только фиксированные секции ``summary``, ``environment``,
+    ``checks`` и ``actions``. Сырые логи, traceback, произвольные поля и старый
+    текстовый отчёт намеренно не копируются. ``format`` принимает ``text`` или
+    ``json``; оба варианта имеют одну и ту же версию формата и лимиты.
+    """
+
+    output_format = str(format or "").casefold()
+    if output_format not in {"text", "json"}:
+        raise ValueError("format must be 'text' or 'json'")
+
+    root: Mapping[str, Any] = result if isinstance(result, Mapping) else {}
+    diagnostic = root.get("diagnostic")
+    diagnostic_map = diagnostic if isinstance(diagnostic, Mapping) else None
+    summary_map = root.get("summary")
+    summary_map = summary_map if isinstance(summary_map, Mapping) else None
+    summary_sources = [source for source in (summary_map, diagnostic_map, root) if source is not None]
+
+    raw_checks = _report_first(
+        [source for source in (diagnostic_map, root) if source is not None],
+        "checks",
+    )
+    check_items = _report_sequence(raw_checks)
+    checks_truncated = len(check_items) > _REPORT_MAX_CHECKS
+    checks = [
+        _normalise_report_check(item, index)
+        for index, item in enumerate(check_items[:_REPORT_MAX_CHECKS], start=1)
+    ]
+    failed_from_checks = sum(1 for check in checks if not check["ok"])
+    explicit_ok = _report_bool(_report_first(summary_sources, "ok"))
+    explicit_failed = _report_first(summary_sources, "failed")
+    explicit_total = _report_first(summary_sources, "total")
+    failed = _report_count(explicit_failed, failed_from_checks)
+    total = _report_count(explicit_total, len(check_items))
+    if explicit_ok is True:
+        status = "ok"
+    elif explicit_ok is False or failed:
+        status = "failed"
+    elif total and not checks_truncated:
+        status = "ok"
+    else:
+        status = "unknown"
+
+    actions, actions_truncated = _collect_report_actions(summary_sources, checks)
+    can_fix = _report_bool(_report_first(summary_sources, "canFix", "can_fix"))
+    if can_fix is None:
+        can_fix = bool(actions)
+    summary = {
+        "status": status,
+        "message": _safe_report_text(
+            _report_first(summary_sources, "message", "error", "detail") or "",
+            key="message",
+        ),
+        "phase": _safe_report_text(_report_first(summary_sources, "phase") or "", key="phase", limit=80),
+        "failed": failed,
+        "total": total,
+        "can_fix": can_fix,
+        "fix_label": _safe_report_text(
+            _report_first(summary_sources, "fixLabel", "fix_label") or "",
+            key="fix_label",
+            limit=160,
+        ),
+    }
+    environment, environment_truncated = _collect_report_environment(root, diagnostic_map)
+    payload: dict[str, object] = {
+        "format": DIAGNOSTIC_REPORT_FORMAT,
+        "format_version": DIAGNOSTIC_REPORT_VERSION,
+        "sections": {
+            "summary": summary,
+            "environment": environment,
+            "checks": checks,
+            "actions": actions,
+        },
+        "truncated": {
+            "environment": environment_truncated,
+            "checks": checks_truncated,
+            "actions": actions_truncated,
+        },
+    }
+    truncated = payload["truncated"]
+    assert isinstance(truncated, dict)
+    truncated["environment"] = bool(truncated["environment"] or _report_contains_truncation(environment))
+    truncated["checks"] = bool(truncated["checks"] or _report_contains_truncation(checks))
+    truncated["actions"] = bool(truncated["actions"] or _report_contains_truncation(actions))
+
+    render = _render_report_json if output_format == "json" else _render_report_text
+    report = render(payload)
+    if len(report.encode("utf-8")) > DIAGNOSTIC_REPORT_MAX_BYTES:
+        report = render(_shrink_report_payload(payload))
+    if len(report.encode("utf-8")) > DIAGNOSTIC_REPORT_MAX_BYTES:
+        report = render(_minimal_report_payload(payload))
+    return report
+
+
 def format_doctor_report(
     checks: list[dict],
     message: str = "",
@@ -857,6 +1477,9 @@ def _check(key: str, ok: bool, label: str, detail: str, fix: str = "") -> dict:
 
 
 __all__ = [
+    "DIAGNOSTIC_REPORT_FORMAT",
+    "DIAGNOSTIC_REPORT_MAX_BYTES",
+    "DIAGNOSTIC_REPORT_VERSION",
     "TRACE_LIMIT",
     "FileLog",
     "busy_job_reason",
@@ -869,6 +1492,7 @@ __all__ = [
     "check_whisper_disk",
     "empty_transcript_reason",
     "explain_transcribe_error",
+    "export_diagnostic_report",
     "format_doctor_report",
     "format_duration_ru",
     "format_log_line",

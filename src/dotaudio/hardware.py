@@ -18,9 +18,12 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from math import isfinite
 from pathlib import Path
+from typing import Any, Literal
 
 VENDOR_NVIDIA = "nvidia"
 VENDOR_AMD = "amd"
@@ -239,6 +242,649 @@ class HardwareProfile:
             "platform": self.platform,
             "notes": list(self.notes),
         }
+
+
+HardwareValidationState = Literal[
+    "ready",
+    "fallback",
+    "insufficient",
+    "unknown",
+    "unavailable",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class HardwareValidationResult:
+    """Pure, serialisable result of a model/device readiness check.
+
+    The result deliberately describes a *plan*, not a successful model load.
+    ``state='unknown'`` means that the available telemetry is not sufficient
+    to prove readiness; it never means that inference was attempted.  This
+    makes the same object safe to pass to a CLI, QML or a setup wizard.
+    """
+
+    model: str
+    requested_device: str
+    device: str
+    compute_type: str
+    state: HardwareValidationState
+    model_known: bool
+    cuda_runtime_available: bool | None
+    available_memory_gb: float | None
+    available_ram_gb: float | None
+    available_vram_gb: float | None
+    required_memory_gb: float | None
+    required_ram_gb: float | None
+    required_vram_gb: float | None
+    reason: str
+    recommendations: tuple[str, ...] = ()
+    fallback_device: str | None = None
+    telemetry: tuple[str, ...] = ()
+
+    @property
+    def can_run(self) -> bool:
+        """Whether the selected plan is backed by known memory telemetry."""
+
+        return self.state in {"ready", "fallback"}
+
+    @property
+    def is_unknown(self) -> bool:
+        return self.state == "unknown"
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON/QML-friendly snapshot without dataclass objects."""
+
+        recommendations = list(self.recommendations)
+        telemetry = list(self.telemetry)
+        return {
+            "model": self.model,
+            "requested_device": self.requested_device,
+            "requestedDevice": self.requested_device,
+            "device": self.device,
+            "compute_type": self.compute_type,
+            "computeType": self.compute_type,
+            "state": self.state,
+            "status": self.state,
+            "model_known": self.model_known,
+            "modelKnown": self.model_known,
+            "cuda_runtime_available": self.cuda_runtime_available,
+            "cudaRuntimeAvailable": self.cuda_runtime_available,
+            "available_memory_gb": self.available_memory_gb,
+            "availableMemoryGb": self.available_memory_gb,
+            "available_ram_gb": self.available_ram_gb,
+            "availableRamGb": self.available_ram_gb,
+            "available_vram_gb": self.available_vram_gb,
+            "availableVramGb": self.available_vram_gb,
+            "required_memory_gb": self.required_memory_gb,
+            "requiredMemoryGb": self.required_memory_gb,
+            "required_ram_gb": self.required_ram_gb,
+            "requiredRamGb": self.required_ram_gb,
+            "required_vram_gb": self.required_vram_gb,
+            "requiredVramGb": self.required_vram_gb,
+            "reason": self.reason,
+            "recommendations": recommendations,
+            "fallback_device": self.fallback_device,
+            "fallbackDevice": self.fallback_device,
+            "telemetry": telemetry,
+            "can_run": self.can_run,
+            "canRun": self.can_run,
+        }
+
+    to_dict = as_dict
+
+
+def _validation_snapshot(
+    hardware: HardwareProfile | Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if hardware is None:
+        return {}
+    if isinstance(hardware, HardwareProfile):
+        return hardware.as_dict()
+    if isinstance(hardware, Mapping):
+        return dict(hardware)
+    raise TypeError("hardware must be HardwareProfile or a mapping")
+
+
+def _validation_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def _validation_first_number(
+    mapping: Mapping[str, Any],
+    *keys: str,
+) -> float | None:
+    for key in keys:
+        if key not in mapping:
+            continue
+        number = _validation_number(mapping[key])
+        if number is not None:
+            return number
+    return None
+
+
+def _validation_gpu_items(snapshot: Mapping[str, Any]) -> tuple[Any, ...]:
+    raw = snapshot.get("gpus")
+    if isinstance(raw, (list, tuple)):
+        return tuple(raw)
+    return ()
+
+
+def _validation_gpu_value(gpu: Any, *keys: str) -> Any:
+    if isinstance(gpu, GpuDevice):
+        values = gpu.as_dict()
+    elif isinstance(gpu, Mapping):
+        values = gpu
+    else:
+        return None
+    for key in keys:
+        if key in values:
+            return values[key]
+    return None
+
+
+def _validation_gpu_is_nvidia(gpu: Any) -> bool:
+    vendor = str(_validation_gpu_value(gpu, "vendor") or "").casefold()
+    name = str(_validation_gpu_value(gpu, "name") or "").casefold()
+    return vendor == VENDOR_NVIDIA or "nvidia" in name or "geforce" in name or "quadro" in name
+
+
+def _validation_nvidia_presence(snapshot: Mapping[str, Any]) -> bool | None:
+    """Return whether an NVIDIA adapter is known, without probing the host."""
+
+    for key in ("nvidiaPresent", "nvidia_present"):
+        if key not in snapshot:
+            continue
+        value = snapshot[key]
+        if isinstance(value, bool):
+            return value
+
+    if "gpus" not in snapshot:
+        return None
+    gpus = _validation_gpu_items(snapshot)
+    if not gpus:
+        return False
+    known = False
+    for gpu in gpus:
+        if _validation_gpu_is_nvidia(gpu):
+            return True
+        vendor = str(_validation_gpu_value(gpu, "vendor") or "").casefold()
+        name = str(_validation_gpu_value(gpu, "name") or "").strip()
+        if vendor or name:
+            known = True
+    return False if known else None
+
+
+def _validation_cuda_runtime(snapshot: Mapping[str, Any]) -> bool | None:
+    for key in ("cuda_devices", "cudaDevices", "cuda_runtime_devices", "cudaRuntimeDevices"):
+        if key not in snapshot:
+            continue
+        number = _validation_number(snapshot[key])
+        if number is not None:
+            return number > 0
+    for key in ("cuda_available", "cudaAvailable"):
+        if key in snapshot and isinstance(snapshot[key], bool):
+            return snapshot[key]
+
+    nvidia = _validation_nvidia_presence(snapshot)
+    if nvidia is False:
+        return False
+    return None
+
+
+def _validation_available_ram(snapshot: Mapping[str, Any]) -> float | None:
+    return _validation_first_number(
+        snapshot,
+        "ram_available_gb",
+        "ramAvailableGb",
+        "available_ram_gb",
+        "availableMemoryGb",
+        "available_memory_gb",
+    )
+
+
+def _validation_available_vram(snapshot: Mapping[str, Any]) -> float | None:
+    direct = _validation_first_number(
+        snapshot,
+        "cudaVramFreeGb",
+        "gpuVramFreeGb",
+        "vram_free_gb",
+        "cuda_vram_free_gb",
+    )
+    if direct is not None:
+        return direct
+
+    direct_mb = _validation_first_number(
+        snapshot,
+        "cudaVramFreeMb",
+        "gpuVramFreeMb",
+        "vram_free_mb",
+        "cuda_vram_free_mb",
+    )
+    if direct_mb is not None:
+        return direct_mb / 1024.0
+
+    candidates: list[float] = []
+    for gpu in _validation_gpu_items(snapshot):
+        if not _validation_gpu_is_nvidia(gpu):
+            continue
+        free_gb = _validation_number(
+            _validation_gpu_value(gpu, "vramFreeGb", "vram_free_gb")
+        )
+        if free_gb is not None:
+            candidates.append(free_gb)
+            continue
+        free_mb = _validation_number(
+            _validation_gpu_value(gpu, "vramFreeMb", "vram_free_mb")
+        )
+        if free_mb is not None:
+            candidates.append(free_mb / 1024.0)
+    return max(candidates) if candidates else None
+
+
+def model_memory_requirements(
+    model: str,
+    *,
+    device: str = "cpu",
+    compute_type: str = "int8",
+) -> dict[str, Any]:
+    """Return the conservative built-in Whisper memory estimate.
+
+    This is a pure catalogue lookup.  Unknown/custom models return
+    ``known=False`` instead of receiving an invented memory budget.
+    """
+
+    from dotaudio.adapt import whisper_memory_requirements
+
+    return whisper_memory_requirements(
+        model,
+        device=device,
+        compute_type=compute_type,
+    )
+
+
+def _validation_device(value: str | None) -> str:
+    normalized = "auto" if value is None else str(value).strip().casefold()
+    aliases = {"automatic": "auto", "gpu": "cuda", "processor": "cpu"}
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"auto", "cpu", "cuda"}:
+        raise ValueError("device must be one of: auto, cpu, cuda")
+    return normalized
+
+
+def _validation_compute_type(value: str | None, device: str) -> str:
+    normalized = "auto" if value is None else str(value).strip().casefold()
+    if not normalized or normalized == "auto":
+        return "float16" if device == "cuda" else "int8"
+    return normalized
+
+
+def _validation_unique(items: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    result: list[str] = []
+    for item in items:
+        if item and item not in result:
+            result.append(item)
+    return tuple(result)
+
+
+def _validation_path(
+    snapshot: Mapping[str, Any],
+    model: str,
+    *,
+    device: str,
+    compute_type: str,
+    cuda_runtime: bool | None,
+) -> dict[str, Any]:
+    requirements = model_memory_requirements(
+        model,
+        device=device,
+        compute_type=compute_type,
+    )
+    available_ram = _validation_available_ram(snapshot)
+    available_vram = _validation_available_vram(snapshot)
+    required_ram = (
+        None
+        if requirements.get("ram_mb") is None
+        else float(requirements["ram_mb"]) / 1024.0
+    )
+    required_vram = (
+        None
+        if requirements.get("vram_mb") is None
+        else float(requirements["vram_mb"]) / 1024.0
+    )
+    base = {
+        "device": device,
+        "compute_type": compute_type,
+        "model_known": bool(requirements.get("known")),
+        "available_ram_gb": available_ram,
+        "available_vram_gb": available_vram,
+        "required_ram_gb": required_ram,
+        "required_vram_gb": required_vram,
+    }
+
+    if not requirements.get("known"):
+        return {
+            **base,
+            "state": "unknown",
+            "available_memory_gb": available_vram if device == "cuda" else available_ram,
+            "required_memory_gb": required_vram if device == "cuda" else required_ram,
+            "reason": "Для этой модели нет безопасной оценки требований к памяти.",
+            "recommendations": (
+                "Проверьте модель в её документации или запустите её с ручным контролем памяти.",
+            ),
+        }
+
+    if device == "cuda":
+        if cuda_runtime is False:
+            return {
+                **base,
+                "state": "unavailable",
+                "available_memory_gb": available_vram,
+                "required_memory_gb": required_vram,
+                "reason": "Доступный CUDA runtime для Whisper не подтверждён.",
+                "recommendations": (
+                    "Проверьте установку CUDA/CTranslate2 или выберите процессор.",
+                ),
+            }
+        if cuda_runtime is None:
+            return {
+                **base,
+                "state": "unknown",
+                "available_memory_gb": available_vram,
+                "required_memory_gb": required_vram,
+                "reason": "Нельзя подтвердить доступность CUDA без телеметрии runtime.",
+                "recommendations": (
+                    "Обновите проверку железа и явно проверьте CUDA runtime.",
+                ),
+            }
+        if available_ram is None or available_vram is None:
+            missing = []
+            if available_ram is None:
+                missing.append("доступной ОЗУ")
+            if available_vram is None:
+                missing.append("свободной VRAM")
+            return {
+                **base,
+                "state": "unknown",
+                "available_memory_gb": available_vram,
+                "required_memory_gb": required_vram,
+                "reason": f"Неизвестно значение: {', '.join(missing)}.",
+                "recommendations": (
+                    "Повторите проверку после получения полной телеметрии памяти.",
+                ),
+            }
+        if required_ram is not None and available_ram < required_ram:
+            return {
+                **base,
+                "state": "insufficient",
+                "available_memory_gb": available_vram,
+                "required_memory_gb": required_vram,
+                "reason": (
+                    f"Для загрузки нужно около {required_ram:.1f} ГБ ОЗУ, "
+                    f"доступно {available_ram:.1f} ГБ."
+                ),
+                "recommendations": (
+                    "Освободите ОЗУ или выберите меньшую модель.",
+                ),
+            }
+        if required_vram is not None and available_vram < required_vram:
+            return {
+                **base,
+                "state": "insufficient",
+                "available_memory_gb": available_vram,
+                "required_memory_gb": required_vram,
+                "reason": (
+                    f"Для модели нужно около {required_vram:.1f} ГБ свободной VRAM, "
+                    f"доступно {available_vram:.1f} ГБ."
+                ),
+                "recommendations": (
+                    "Переключитесь на CPU или выберите меньшую модель/тип вычислений.",
+                ),
+            }
+        return {
+            **base,
+            "state": "ready",
+            "available_memory_gb": available_vram,
+            "required_memory_gb": required_vram,
+            "reason": "Модель помещается в измеренные RAM и VRAM.",
+            "recommendations": ("Можно запускать транскрибацию на CUDA.",),
+        }
+
+    if available_ram is None:
+        return {
+            **base,
+            "state": "unknown",
+            "available_memory_gb": available_ram,
+            "required_memory_gb": required_ram,
+            "reason": "Свободная оперативная память не определена.",
+            "recommendations": (
+                "Повторите проверку с доступной RAM или выберите модель вручную.",
+            ),
+        }
+    if required_ram is not None and available_ram < required_ram:
+        return {
+            **base,
+            "state": "insufficient",
+            "available_memory_gb": available_ram,
+            "required_memory_gb": required_ram,
+            "reason": (
+                f"Для загрузки нужно около {required_ram:.1f} ГБ ОЗУ, "
+                f"доступно {available_ram:.1f} ГБ."
+            ),
+            "recommendations": (
+                "Освободите ОЗУ или выберите меньшую модель.",
+            ),
+        }
+    return {
+        **base,
+        "state": "ready",
+        "available_memory_gb": available_ram,
+        "required_memory_gb": required_ram,
+        "reason": "Модель помещается в измеренную оперативную память.",
+        "recommendations": ("Можно запускать транскрибацию на CPU.",),
+    }
+
+
+def _validation_result(
+    path: Mapping[str, Any],
+    *,
+    model: str,
+    requested_device: str,
+    cuda_runtime: bool | None,
+    state: HardwareValidationState | None = None,
+    reason: str | None = None,
+    recommendations: tuple[str, ...] = (),
+    fallback_device: str | None = None,
+    telemetry: tuple[str, ...] = (),
+) -> HardwareValidationResult:
+    merged_recommendations = _validation_unique(
+        tuple(path.get("recommendations") or ()) + recommendations
+    )
+    return HardwareValidationResult(
+        model=str(model),
+        requested_device=requested_device,
+        device=str(path.get("device") or requested_device),
+        compute_type=str(path.get("compute_type") or ""),
+        state=state or path["state"],
+        model_known=bool(path.get("model_known")),
+        cuda_runtime_available=cuda_runtime,
+        available_memory_gb=path.get("available_memory_gb"),
+        available_ram_gb=path.get("available_ram_gb"),
+        available_vram_gb=path.get("available_vram_gb"),
+        required_memory_gb=path.get("required_memory_gb"),
+        required_ram_gb=path.get("required_ram_gb"),
+        required_vram_gb=path.get("required_vram_gb"),
+        reason=str(reason or path.get("reason") or ""),
+        recommendations=merged_recommendations,
+        fallback_device=fallback_device,
+        telemetry=telemetry,
+    )
+
+
+def build_hardware_validation(
+    model: str,
+    hardware: HardwareProfile | Mapping[str, Any] | None = None,
+    *,
+    device: str = "auto",
+    compute_type: str = "auto",
+) -> HardwareValidationResult:
+    """Build a no-inference readiness result from supplied hardware facts.
+
+    ``hardware`` must be a snapshot, not an instruction to probe the machine.
+    Missing values remain missing and produce ``state='unknown'`` where they
+    affect the requested path.  A known VRAM/RAM failure may produce a CPU
+    ``fallback`` when the CPU path itself is proven to fit.
+    """
+
+    snapshot = _validation_snapshot(hardware)
+    requested_device = _validation_device(device)
+    cuda_runtime = _validation_cuda_runtime(snapshot)
+    nvidia_presence = _validation_nvidia_presence(snapshot)
+
+    if requested_device == "auto":
+        if cuda_runtime is True:
+            candidate = "cuda"
+        elif cuda_runtime is False:
+            candidate = "cpu"
+        elif nvidia_presence is True:
+            candidate = "cuda"
+        else:
+            candidate = "cpu"
+    else:
+        candidate = requested_device
+
+    candidate_compute_type = _validation_compute_type(compute_type, candidate)
+    candidate_path = _validation_path(
+        snapshot,
+        model,
+        device=candidate,
+        compute_type=candidate_compute_type,
+        cuda_runtime=cuda_runtime,
+    )
+
+    if (
+        requested_device == "auto"
+        and candidate == "cpu"
+        and cuda_runtime is False
+        and nvidia_presence is True
+        and candidate_path["state"] == "ready"
+    ):
+        return _validation_result(
+            candidate_path,
+            model=model,
+            requested_device=requested_device,
+            cuda_runtime=cuda_runtime,
+            state="fallback",
+            reason=(
+                "NVIDIA GPU обнаружена, но CUDA runtime недоступен. "
+                "Выбран безопасный fallback на CPU."
+            ),
+            recommendations=(
+                "Проверьте установку CUDA/CTranslate2, если нужен GPU-режим.",
+            ),
+            fallback_device="cpu",
+            telemetry=("cuda_unavailable", "fallback_cpu"),
+        )
+
+    should_try_cpu = candidate == "cuda" and candidate_path["state"] in {
+        "unavailable",
+        "insufficient",
+    }
+    if should_try_cpu:
+        cpu_compute_type = _validation_compute_type(compute_type, "cpu")
+        cpu_path = _validation_path(
+            snapshot,
+            model,
+            device="cpu",
+            compute_type=cpu_compute_type,
+            cuda_runtime=cuda_runtime,
+        )
+        if cpu_path["state"] == "ready":
+            fallback = _validation_result(
+                cpu_path,
+                model=model,
+                requested_device=requested_device,
+                cuda_runtime=cuda_runtime,
+                state="fallback",
+                reason=(
+                    f"CUDA недоступна для выбранного плана: {candidate_path['reason']} "
+                    "Выбран безопасный fallback на CPU."
+                ),
+                recommendations=(
+                    "Проверьте CUDA/VRAM позже, если нужен GPU-режим.",
+                ),
+                fallback_device="cpu",
+                telemetry=("cuda_path_rejected", "cpu_path_ready", "fallback_cpu"),
+            )
+            # Keep the rejected accelerator budget visible to UI/CLI callers;
+            # ``available_memory_gb`` and ``required_memory_gb`` still refer
+            # to the selected CPU path.
+            return replace(
+                fallback,
+                available_vram_gb=candidate_path["available_vram_gb"],
+                required_vram_gb=candidate_path["required_vram_gb"],
+            )
+        if cpu_path["state"] == "insufficient":
+            return _validation_result(
+                candidate_path,
+                model=model,
+                requested_device=requested_device,
+                cuda_runtime=cuda_runtime,
+                reason=(
+                    f"Не подходит CUDA: {candidate_path['reason']} "
+                    f"CPU fallback также невозможен: {cpu_path['reason']}"
+                ),
+                recommendations=(
+                    "Выберите меньшую модель или освободите RAM и VRAM.",
+                ),
+                telemetry=("cuda_path_rejected", "cpu_path_insufficient"),
+            )
+        return _validation_result(
+            cpu_path,
+            model=model,
+            requested_device=requested_device,
+            cuda_runtime=cuda_runtime,
+            reason=(
+                f"CUDA-путь не подтверждён: {candidate_path['reason']} "
+                f"CPU fallback нельзя подтвердить: {cpu_path['reason']}"
+            ),
+            recommendations=(
+                "Не запускайте автоматический inference до получения полной телеметрии.",
+            ),
+            telemetry=("cuda_path_rejected", "cpu_path_unknown"),
+        )
+
+    return _validation_result(
+        candidate_path,
+        model=model,
+        requested_device=requested_device,
+        cuda_runtime=cuda_runtime,
+        telemetry=("selected_cpu",) if candidate == "cpu" else ("selected_cuda",),
+    )
+
+
+def validate_hardware(
+    model: str,
+    hardware: HardwareProfile | Mapping[str, Any] | None = None,
+    *,
+    device: str = "auto",
+    compute_type: str = "auto",
+) -> HardwareValidationResult:
+    """Alias with an action-oriented name for CLI/UI callers."""
+
+    return build_hardware_validation(
+        model,
+        hardware,
+        device=device,
+        compute_type=compute_type,
+    )
 
 
 def gpu_label(gpu: GpuDevice | None) -> str:
