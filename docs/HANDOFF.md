@@ -16,6 +16,8 @@
 preflight RAM/VRAM и выбор compute type с fallback, честный indeterminate
 progress вместо зависания на условных 55%, структурированные статусы подготовки
 модели и диагностика, bounded Live-очереди/окна и опциональная обработка шума.
+Аппаратная validation теперь возвращает явный план без запуска inference, а
+Doctor добавляет его в пользовательский отчёт.
 
 Распознавание теперь поддерживает multilingual/auto без насильственного
 перевода. Локальный EN→RU оставлен явным режимом, а пользовательские
@@ -24,11 +26,15 @@ CTranslate2 translation-модели проходят безопасную ре�
 передаёт фактическое устройство, пробует CPU fallback и сохраняет текст, если
 diarization недоступен. Watch-folder ждёт стабильный размер файла.
 
-Проверки этой итерации: `552 passed, 11 skipped` без updater-тестов; полный
-прогон - `555 passed, 11 skipped, 5 errors` из-за отсутствующего в окружении
-Git helper `git-upload-pack` при создании bare remote. Ruff и QML smoke-test
-проходят. GPU, микрофон, системный звук и end-to-end Linux/macOS требуют
-ручной проверки на целевых машинах.
+Проверки этой итерации: полный `pytest -q` - `596 passed, 11 skipped, 3
+warnings`; `ruff check src tests` и QML offscreen smoke-test проходят. GPU,
+микрофон, системный звук и end-to-end Linux/macOS требуют ручной проверки на
+целевых машинах.
+
+Коммиты этой сессии: `f3ce86c` (основной контур feedback), `e9ddcc7`
+(портативный Git updater), `b6cd880` (устойчивый preflight при временной
+нехватке RAM), `bf5bc0c` (safe diagnostics и hardware validation). Коммиты
+созданы локально; push не выполнялся.
 
 Подробная матрица проблем: [FEEDBACK_PLAN.md](FEEDBACK_PLAN.md).
 

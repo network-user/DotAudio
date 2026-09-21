@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Python-3.12--3.13-3776AB?style=flat" alt="Python 3.12-3.13" />
   <img src="https://img.shields.io/badge/Platform-Windows_|_Linux_|_macOS-555?style=flat" alt="Windows Linux macOS" />
   <img src="https://img.shields.io/badge/Category-Desktop_ASR-555?style=flat" alt="Desktop ASR" />
-  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-47175-lightgrey?style=flat" alt="47175 lines of code" /><!-- loc:end -->
+  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-49229-lightgrey?style=flat" alt="49229 lines of code" /><!-- loc:end -->
 </p>
 
 <img src="docs/cover.svg" width="720" alt="DotAudio: речь и субтитры" />
@@ -172,7 +172,7 @@ python3.12 -m venv .venv
   с backoff.
 - Локальная SQLite-история с миграциями и восстановлением прерванных сессий,
   журнал работы, модели `tiny`, `base`, `small`,
-  `medium` и `large-v3`, профили скорости и качества.
+  `medium`, `large-v3` и `turbo`, профили скорости и качества.
 - Ассистент по записям на локальной языковой модели: выбор записи слева, чат
   справа, готовые действия «изложение», «главные мысли», «задачи», «темы» и
   свободный разговор без записи. Часовой разговор не помещается в контекст
@@ -187,6 +187,10 @@ python3.12 -m venv .venv
   безопасного compute type и явный fallback на CPU или другой доступный GPU.
   Пока модель инициализируется, UI показывает неопределённый прогресс, а не
   зависание на условных 55 %.
+- Аппаратная validation-проверка без запуска inference: состояния `ready`,
+  `fallback`, `insufficient`, `unknown` и `unavailable` попадают в «Диагностику».
+  Отчёт можно скопировать в bounded text/JSON-формате без секретов, traceback и
+  абсолютных путей.
 - Опциональная обработка аудио: стационарное шумоподавление, high-pass и
   настраиваемое короткое окно Live. Все тяжёлые операции выполняются вне GUI.
 - При транскрибации с голосами Whisper и NeMo работают в согласованном
@@ -204,10 +208,10 @@ src/dotaudio/
   storage.py, transcripts.py          # SQLite, миграции и экспорт расшифровок
   karaoke.py                          # word timestamps, ASS и MP4
   speaker_id.py, nemo_diarize.py      # голоса: разметка дорожки и разбор фраз
-  hardware.py, cuda_runtime.py        # опрос устройства и сборки ускорения
+  hardware.py, cuda_runtime.py        # опрос, RAM/VRAM validation и ускорение
   adapt.py, modelhub.py                # preflight памяти и модели с докачкой
   model_registry.py, translate.py      # локальные модели перевода и пары языков
-  diag.py, setup_controller.py         # диагностика и мастер подготовки
+  diag.py, setup_controller.py         # диагностика, отчёт и мастер подготовки
   watch_folder.py, tools_ffmpeg.py    # стабильный watcher и портативный FFmpeg
   updater.py, process_priority.py     # git-обновления и приоритет (Windows)
   llm.py, assistant.py                # каталог языковых моделей и разбор записи
@@ -225,24 +229,6 @@ deploy/
 tests/
 docs/
 ```
-
-## Архитектура
-
-```text
-audio source ──> capture ──> bounded pipeline ──> engine (Whisper)
-                                      │                    │
-                                      └──> live preview    ├──> transcript/storage
-                                                           ├──> optional translate
-                                                           └──> NeMo diarization
-
-hardware/adapt/modelhub ──> preflight ──> model cache ──> actual runtime device
-controller ──(Qt signals)─> QML; workers never touch QML objects directly
-```
-
-Распознавание и запись выполняются вне GUI-потока. Черновой Live-текст хранится
-только в памяти, а SQLite получает подтверждённые сегменты. В live-режиме не
-запрашиваются word timestamps, чтобы уменьшить задержку. В медиа-режиме они
-сохраняются для караоке и точной правки таймкодов.
 
 ## Команды
 
@@ -269,10 +255,10 @@ python3.12 -m venv .venv
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m dotaudio --smoke-test --data-dir .local-check
 ```
 
-Последняя проверка на машине разработки (Windows): `552 passed, 11 skipped`
-без `tests/test_updater.py`; полный прогон даёт `555 passed, 11 skipped, 5
-errors`, потому что в окружении отсутствует Git helper `git-upload-pack` для
-fixture bare remote. `ruff check src tests` и QML smoke-test проходят. Реальные
+Последняя проверка на машине разработки (Windows): `596 passed, 11 skipped`.
+`ruff check src tests` и QML smoke-test проходят. Три предупреждения относятся к
+FastAPI/Starlette TestClient и невозможности pytest записать `.pytest_cache` в
+управляемом окружении. Реальные
 микрофон, системный звук, GPU и FFmpeg зависят от конкретного компьютера и
 проверяются на нём вручную. Ubuntu и macOS в этой сессии не прогонялись
 end-to-end - установщик и ветки кода добавлены, ручной чеклист на целевых
@@ -312,6 +298,11 @@ LoC-бейдж пересчитан fallback-методом: непустые с
   -> engine.py, faster-whisper / CTranslate2
   -> controller.py, Qt signals
   -> CaptionOverlay.qml / LiveTheater.qml / SQLite history
+
+hardware.py + adapt.py + modelhub.py
+  -> hardware validation (RAM/VRAM/CUDA, без inference)
+  -> engine preflight -> model cache -> фактическое runtime-устройство
+  -> Doctor -> bounded text/JSON report без секретов и абсолютных путей
 ```
 
 ```text
@@ -324,6 +315,8 @@ LoC-бейдж пересчитан fallback-методом: непустые с
 ```
 
 - QML не запускает inference и не обращается к SQLite.
+- Аппаратная validation не делает повторный probe и не считает неизвестную
+  телеметрию успешным запуском.
 - Свойства контроллеров не трогают диск и сеть: интерфейс читает их на каждой
   перерисовке, поэтому готовность модели считается в воркере.
 - Модель готовится до старта захвата Live, тяжёлая работа не выполняется в GUI-потоке.

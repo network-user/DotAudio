@@ -78,11 +78,11 @@ src/dotaudio/
   engine.py                        локальный/удалённый ASR
   storage.py, transcripts.py        история и текстовый экспорт
   karaoke.py                        ASS и MP4-экспорт караоке
-  hardware.py, cuda_runtime.py      железо, GPU любого вендора, сборки ускорения
+  hardware.py, cuda_runtime.py      железо, RAM/VRAM validation, сборки ускорения
   adapt.py                          план Whisper/Live под класс машины
   modelhub.py                      скачивание файлов моделей с докачкой
   model_registry.py, translate.py   каталог локальных CTranslate2-переводов
-  diag.py, watch_folder.py         диагностика и стабильный watcher
+  diag.py, watch_folder.py         bounded-диагностика, отчёт и стабильный watcher
   tools_ffmpeg.py                  портативный FFmpeg (Windows/Linux; macOS brew)
   llm.py                           каталог языковых моделей, llama.cpp и Ollama
   llm_worker.py                    subprocess llama.cpp (JSON-lines)
@@ -128,6 +128,10 @@ docs/
  и проверять через `normalise_export_options`, а не заводить ещё одну ветку в
  QML. Предпросмотр и запись обязаны идти через один `render_export`.
 - Не подменять фактические уровни аудио и результаты демонстрационными.
+- Диагностический отчёт собирать через bounded/sanitized API: не включать
+  секреты, абсолютные пути, traceback и необработанные логи.
+- Для нового функционала проверять минимум три независимых сценария: штатный,
+  граничный/неполный ввод и отказ с безопасным fallback или понятной ошибкой.
 - Поддержку устройства/ОС и скорость заявлять после реальной проверки.
 - Конфигурация серверного режима не означает готовность public API.
 - В Q_PROPERTY не обращаться к диску, сети и подпроцессам: интерфейс читает
