@@ -1292,6 +1292,34 @@ class Engine:
             return
         if fit.get("state") != "insufficient":
             return
+
+        # ``available_memory_gb`` is a live snapshot and can be temporarily
+        # low because of the test runner, browser, or another process.  The
+        # model budget already contains runtime headroom, so do not reject a
+        # load when the installed RAM can hold that budget and the explicit
+        # device memory is not the failing resource.  CUDA VRAM remains a hard
+        # gate when its free value is known: that is the allocation that most
+        # often turns the old 55% spinner into an OOM.
+        try:
+            total_ram_mb = float(hardware.get("ram_gb")) * 1024
+        except (TypeError, ValueError):
+            total_ram_mb = None
+        try:
+            required_ram_mb = float(fit.get("ram_mb"))
+        except (TypeError, ValueError):
+            required_ram_mb = None
+        if total_ram_mb is not None and required_ram_mb is not None:
+            if total_ram_mb >= required_ram_mb + 512:
+                if device == "cpu":
+                    return
+                try:
+                    available_vram_mb = fit.get("available_vram_mb")
+                    required_vram_mb = float(fit.get("vram_mb"))
+                    if available_vram_mb is None or float(available_vram_mb) >= required_vram_mb:
+                        return
+                except (TypeError, ValueError):
+                    return
+
         available = fit.get("available_mb")
         required = fit.get("ram_mb" if device == "cpu" else "vram_mb")
         resource = "ОЗУ" if device == "cpu" else "видеопамяти"
