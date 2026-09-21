@@ -74,7 +74,9 @@ Item {
                         visible: bridge.showGpuHint || bridge.gpuSetup.busy || String(bridge.hardware.computeAdvice) === "needs_runtime"
                         PillButton {
                             text: bridge.gpuSetup.busy
-                                   ? ("Настройка… " + Math.round(bridge.gpuSetup.percent || 0) + "%")
+                                   ? (Number(bridge.gpuSetup.percent) < 0
+                                      ? "Настройка… инициализация"
+                                      : "Настройка… " + Math.round(bridge.gpuSetup.percent || 0) + "%")
                                    : (bridge.hardware.computeAction === "use_gpu" ? "Включить GPU" : "Настроить GPU")
                             enabled: !bridge.gpuSetup.busy && !bridge.modelPreparing && !bridge.recording
                             onClicked: bridge.setupGpu()

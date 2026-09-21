@@ -13,6 +13,7 @@ from dotaudio.controller import (
     hotkey_id,
     live_draft_model_for,
     parse_hotkey,
+    scale_gpu_setup_progress,
     sensitivity_label,
 )
 from dotaudio.engine import Engine
@@ -318,6 +319,29 @@ def test_hardware_validation_adapter_does_not_guess_custom_model() -> None:
     assert result["state"] == "unknown"
     assert result["model_known"] is False
     assert result["can_run"] is False
+
+
+def test_gpu_progress_scaler_maps_measured_runtime_percent() -> None:
+    assert scale_gpu_setup_progress({"percent": 50}, span=55) == 27.5
+
+
+def test_gpu_progress_scaler_keeps_missing_percent_indeterminate() -> None:
+    assert scale_gpu_setup_progress({"message": "Загружаем модель"}) == -1.0
+
+
+def test_gpu_progress_scaler_rejects_zero_total_for_model_loading() -> None:
+    assert scale_gpu_setup_progress(
+        {"percent": 0, "total_mb": 0},
+        start=55,
+        span=45,
+        require_total=True,
+    ) == -1.0
+    assert scale_gpu_setup_progress(
+        {"percent": 0, "total_mb": 100},
+        start=55,
+        span=45,
+        require_total=True,
+    ) == 55.0
 
 
 def test_show_gpu_hint_for_nvidia_until_dismissed() -> None:

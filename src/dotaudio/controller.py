@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 import os
 import re
 import sys
@@ -636,6 +637,45 @@ def hardware_validation(
     ).as_dict()
 
 
+def scale_gpu_setup_progress(
+    info: dict | None = None,
+    *,
+    start: float = 0.0,
+    span: float = 100.0,
+    require_total: bool = False,
+) -> float:
+    """Scale a backend percentage without fabricating progress.
+
+    ``-1`` is the UI contract for an indeterminate phase.  A value of zero
+    from a backend with no known total is not evidence that a measurable
+    operation has started, so model-loading callbacks stay indeterminate.
+    """
+
+    raw = dict(info or {})
+    if raw.get("indeterminate") is True:
+        return -1.0
+    try:
+        percent = float(raw.get("percent"))
+    except (TypeError, ValueError):
+        return -1.0
+    if not math.isfinite(percent) or not 0.0 <= percent <= 100.0:
+        return -1.0
+    if require_total and raw.get("determinate") is not True:
+        total = raw.get("total")
+        if total in (None, "", 0, 0.0):
+            total = raw.get("total_mb")
+        if total in (None, "", 0, 0.0):
+            total = raw.get("total_bytes")
+        try:
+            if float(total) <= 0:
+                return -1.0
+        except (TypeError, ValueError):
+            return -1.0
+    bounded_span = max(0.0, float(span))
+    bounded_start = max(0.0, min(100.0, float(start)))
+    return round(bounded_start + bounded_span * percent / 100.0, 2)
+
+
 class Controller(QObject):
     # ``changed`` - общее уведомление «пересчитать интерфейс». Оно дорогое:
     # по нему перечитываются настройки, журнал, списки устройств и карточки
@@ -1183,11 +1223,10 @@ class Controller(QObject):
                 def progress(info):
                     # Runtime install - первая половина; подготовка модели - вторая.
                     phase = str(info.get("phase") or "")
-                    raw = float(info.get("percent") or 0.0)
                     if phase in {"check", "runtime", "register"}:
-                        scaled = min(55.0, raw * 0.55)
+                        scaled = scale_gpu_setup_progress(info, span=55.0)
                     else:
-                        scaled = 55.0 + min(45.0, raw * 0.45)
+                        scaled = scale_gpu_setup_progress(info, start=55.0, span=45.0)
                     payload = {
                         "phase": phase or "runtime",
                         "percent": scaled,
@@ -1331,12 +1370,17 @@ class Controller(QObject):
                 self.modelProgressArrived.emit(model, "Загружаем или проверяем файлы модели…")
 
                 def progress(info):
-                    raw = float((info or {}).get("percent") or 0.0)
+                    scaled = scale_gpu_setup_progress(
+                        info,
+                        start=55.0,
+                        span=45.0,
+                        require_total=True,
+                    )
                     self.modelDownloadProgress.emit(model, info)
                     self.gpuSetupProgress.emit(
                         {
                             "phase": "model",
-                            "percent": 55.0 + min(45.0, raw * 0.45),
+                            "percent": scaled,
                             "message": str((info or {}).get("message") or f"Модель {model}…"),
                             "busy": True,
                             "error": "",
