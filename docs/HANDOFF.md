@@ -26,14 +26,15 @@ CTranslate2 translation-модели проходят безопасную ре�
 передаёт фактическое устройство, пробует CPU fallback и сохраняет текст, если
 diarization недоступен. Watch-folder ждёт стабильный размер файла.
 
-Проверки этой итерации: полный `pytest -q` - `596 passed, 11 skipped, 3
+Проверки этой итерации: полный `pytest -q` - `599 passed, 11 skipped, 3
 warnings`; `ruff check src tests` и QML offscreen smoke-test проходят. GPU,
 микрофон, системный звук и end-to-end Linux/macOS требуют ручной проверки на
 целевых машинах.
 
 Коммиты этой сессии: `f3ce86c` (основной контур feedback), `e9ddcc7`
 (портативный Git updater), `b6cd880` (устойчивый preflight при временной
-нехватке RAM), `bf5bc0c` (safe diagnostics и hardware validation). Коммиты
+нехватке RAM), `bf5bc0c` (safe diagnostics и hardware validation), `eef945f`
+(честный indeterminate GPU progress). Коммиты
 созданы локально; push не выполнялся.
 
 Подробная матрица проблем: [FEEDBACK_PLAN.md](FEEDBACK_PLAN.md).

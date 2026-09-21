@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Python-3.12--3.13-3776AB?style=flat" alt="Python 3.12-3.13" />
   <img src="https://img.shields.io/badge/Platform-Windows_|_Linux_|_macOS-555?style=flat" alt="Windows Linux macOS" />
   <img src="https://img.shields.io/badge/Category-Desktop_ASR-555?style=flat" alt="Desktop ASR" />
-  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-49229-lightgrey?style=flat" alt="49229 lines of code" /><!-- loc:end -->
+  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-49289-lightgrey?style=flat" alt="49289 lines of code" /><!-- loc:end -->
 </p>
 
 <img src="docs/cover.svg" width="720" alt="DotAudio: речь и субтитры" />
@@ -255,7 +255,7 @@ python3.12 -m venv .venv
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m dotaudio --smoke-test --data-dir .local-check
 ```
 
-Последняя проверка на машине разработки (Windows): `596 passed, 11 skipped`.
+Последняя проверка на машине разработки (Windows): `599 passed, 11 skipped`.
 `ruff check src tests` и QML smoke-test проходят. Три предупреждения относятся к
 FastAPI/Starlette TestClient и невозможности pytest записать `.pytest_cache` в
 управляемом окружении. Реальные
