@@ -7,6 +7,7 @@ so a slow visualizer cannot cause microphone overflows or block a UI thread.
 
 from __future__ import annotations
 
+import math
 import subprocess
 import sys
 import time
@@ -25,6 +26,10 @@ GapCallback = Callable[[int], None]
 _QUEUE_LIMIT = 24
 _SAMPLE_RATE = 16000
 _BLOCK_FRAMES = 1600
+DEFAULT_BLOCK_SECONDS = _BLOCK_FRAMES / _SAMPLE_RATE
+MIN_BLOCK_SECONDS = 0.02
+MAX_BLOCK_SECONDS = 0.5
+_MIX_QUEUE_SECONDS = 0.8
 LIVE_SOURCES = ("system", "mixed", "microphone")
 LIVE_SOURCE_LABELS = {
     "microphone": "Микрофон",
@@ -48,6 +53,32 @@ _SKIP_INPUT_NAME_TOKENS = (
     "sound mapper",
     "mapper",
 )
+
+
+def bounded_block_seconds(seconds: float | None = None) -> float:
+    """Clamp a capture block to a latency/memory-safe range."""
+
+    if seconds is None:
+        return DEFAULT_BLOCK_SECONDS
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        value = DEFAULT_BLOCK_SECONDS
+    if not math.isfinite(value):
+        value = DEFAULT_BLOCK_SECONDS
+    return min(MAX_BLOCK_SECONDS, max(MIN_BLOCK_SECONDS, value))
+
+
+def capture_block_frames(
+    seconds: float | None = None,
+    sample_rate: int = _SAMPLE_RATE,
+) -> int:
+    """Convert a bounded block duration to a positive frame count."""
+
+    rate = int(sample_rate)
+    if rate <= 0:
+        raise ValueError("sample_rate must be positive")
+    return max(1, int(round(rate * bounded_block_seconds(seconds))))
 
 
 def _mic_privacy_hint() -> str:
@@ -500,6 +531,8 @@ class AudioCapture(_CallbackDispatcher):
         on_level: LevelCallback | None = None,
         on_error: ErrorCallback | None = None,
         on_gap: GapCallback | None = None,
+        *,
+        block_seconds: float | None = None,
     ) -> None:
         if kind not in {"microphone", "system"}:
             raise ValueError("kind must be 'microphone' or 'system'")
@@ -512,6 +545,8 @@ class AudioCapture(_CallbackDispatcher):
         self._lock = Lock()
         self._capture_rate = _SAMPLE_RATE
         self._opened_device: int | None = None
+        self.block_seconds = bounded_block_seconds(block_seconds)
+        self._block_frames = capture_block_frames(self.block_seconds)
 
     def start(self) -> None:
         with self._lock:
@@ -640,7 +675,7 @@ class AudioCapture(_CallbackDispatcher):
                 "samplerate": rate,
                 "channels": channels,
                 "dtype": "float32",
-                "blocksize": max(1, int(round(_BLOCK_FRAMES * rate / _SAMPLE_RATE))),
+                "blocksize": max(1, int(round(self._block_frames * rate / _SAMPLE_RATE))),
                 "device": device,
                 "callback": self._microphone_callback,
             }
@@ -696,10 +731,10 @@ class AudioCapture(_CallbackDispatcher):
             with microphone.recorder(
                 samplerate=_SAMPLE_RATE,
                 channels=channels,
-                blocksize=_BLOCK_FRAMES,
+                blocksize=self._block_frames,
             ) as recorder:
                 while not self._stop.is_set():
-                    self._publish_audio(recorder.record(numframes=_BLOCK_FRAMES))
+                    self._publish_audio(recorder.record(numframes=self._block_frames))
         except Exception as exc:
             if not self._stop.is_set():
                 self._error(f"system loopback failed: {exc}")
@@ -758,18 +793,23 @@ class MixedCapture:
         on_level: LevelCallback | None = None,
         on_error: ErrorCallback | None = None,
         on_gap: GapCallback | None = None,
+        *,
+        block_seconds: float | None = None,
     ) -> None:
         self._on_audio = on_audio
         self._on_level = on_level
         self._on_error = on_error
         self._on_gap = on_gap
+        self.block_seconds = bounded_block_seconds(block_seconds)
         self._stop = Event()
-        self._mic_q: Queue[np.ndarray] = Queue(maxsize=8)
-        self._sys_q: Queue[np.ndarray] = Queue(maxsize=8)
+        queue_blocks = max(2, min(64, int(math.ceil(_MIX_QUEUE_SECONDS / self.block_seconds))))
+        self._mic_q: Queue[np.ndarray] = Queue(maxsize=queue_blocks)
+        self._sys_q: Queue[np.ndarray] = Queue(maxsize=queue_blocks)
         self._mixer: Thread | None = None
         self._mic = AudioCapture(
             kind="microphone",
             device=microphone_device,
+            block_seconds=self.block_seconds,
             on_audio=lambda audio: self._feed(self._mic_q, audio),
             on_error=lambda message: self._child_error("microphone", message),
             on_gap=lambda dropped: self._gap(dropped),
@@ -777,6 +817,7 @@ class MixedCapture:
         self._sys = AudioCapture(
             kind="system",
             device=loopback_device,
+            block_seconds=self.block_seconds,
             on_audio=lambda audio: self._feed(self._sys_q, audio),
             on_error=lambda message: self._child_error("system", message),
             on_gap=lambda dropped: self._gap(dropped),
@@ -862,21 +903,23 @@ class MixedCapture:
         mic_hold: np.ndarray | None = None
         sys_hold: np.ndarray | None = None
         waited = 0.0
+        wait_step = min(0.02, self.block_seconds)
+        wait_limit = max(0.08, self.block_seconds * 2.0)
         while not self._stop.is_set():
             if mic_hold is None:
-                mic_hold = self._take(self._mic_q, 0.02)
+                mic_hold = self._take(self._mic_q, wait_step)
             if sys_hold is None:
                 sys_hold = self._take(self._sys_q, 0.0)
             both = mic_hold is not None and sys_hold is not None
             one = (mic_hold is None) != (sys_hold is None)
             single = not self._mic.running or not self._sys.running
-            if both or (one and (single or waited >= 0.08)):
+            if both or (one and (single or waited >= wait_limit)):
                 self._publish(mix_audio_blocks(mic_hold, sys_hold))
                 mic_hold = sys_hold = None
                 waited = 0.0
                 continue
             if one:
-                waited += 0.02
+                waited += wait_step
             else:
                 waited = 0.0
 
@@ -889,6 +932,7 @@ def open_live_capture(
     on_level: LevelCallback | None = None,
     on_error: ErrorCallback | None = None,
     on_gap: GapCallback | None = None,
+    block_seconds: float | None = None,
 ) -> AudioCapture | MixedCapture:
     """Build the capture object Live should start for ``kind``."""
 
@@ -897,6 +941,7 @@ def open_live_capture(
         return MixedCapture(
             microphone_device=_coerce_device(settings.get("input_device")),
             loopback_device=_coerce_device(settings.get("loopback_device")),
+            block_seconds=block_seconds,
             **callbacks,
         )
     if kind not in {"microphone", "system"}:
@@ -904,7 +949,7 @@ def open_live_capture(
     device = _coerce_device(
         settings.get("input_device") if kind == "microphone" else settings.get("loopback_device")
     )
-    return AudioCapture(kind=kind, device=device, **callbacks)
+    return AudioCapture(kind=kind, device=device, block_seconds=block_seconds, **callbacks)
 
 
 class StreamCapture(_CallbackDispatcher):
@@ -917,9 +962,13 @@ class StreamCapture(_CallbackDispatcher):
         on_level: LevelCallback | None = None,
         on_error: ErrorCallback | None = None,
         on_gap: GapCallback | None = None,
+        *,
+        block_seconds: float | None = None,
     ) -> None:
         super().__init__(on_audio, on_level, on_error, on_gap)
         self.url = self._validate_url(url)
+        self.block_seconds = bounded_block_seconds(block_seconds)
+        self._block_frames = capture_block_frames(self.block_seconds)
         self._stop = Event()
         self._process: subprocess.Popen[bytes] | None = None
         self._thread: Thread | None = None
@@ -1008,7 +1057,7 @@ class StreamCapture(_CallbackDispatcher):
                     self._process = process
                 assert process.stdout is not None
                 carry = b""
-                bytes_per_block = _BLOCK_FRAMES * 2
+                bytes_per_block = self._block_frames * 2
                 while not self._stop.is_set():
                     chunk = process.stdout.read(bytes_per_block)
                     if not chunk:
@@ -1291,7 +1340,10 @@ def play_pcm(
 
 __all__ = [
     "AudioCapture",
+    "DEFAULT_BLOCK_SECONDS",
     "LIVE_SOURCES",
+    "MAX_BLOCK_SECONDS",
+    "MIN_BLOCK_SECONDS",
     "MixedCapture",
     "StreamCapture",
     "default_live_source",
@@ -1306,6 +1358,8 @@ __all__ = [
     "playback_device_for_loopback",
     "play_output_tone",
     "play_pcm",
+    "bounded_block_seconds",
+    "capture_block_frames",
     "resolve_microphone_candidates",
     "source_for_mode",
     "system_audio_hint",

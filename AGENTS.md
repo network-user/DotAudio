@@ -74,12 +74,15 @@ src/dotaudio/
  assets/ иконка приложения (ICO/PNG/SVG)
  branding.py идентичность Windows: иконка, AppUserModelID, тёмный заголовок
   capture.py, pipeline.py           захват и live-очередь
+  audio_preprocess.py                опциональное шумоподавление и high-pass
   engine.py                        локальный/удалённый ASR
   storage.py, transcripts.py        история и текстовый экспорт
   karaoke.py                        ASS и MP4-экспорт караоке
   hardware.py, cuda_runtime.py      железо, GPU любого вендора, сборки ускорения
   adapt.py                          план Whisper/Live под класс машины
   modelhub.py                      скачивание файлов моделей с докачкой
+  model_registry.py, translate.py   каталог локальных CTranslate2-переводов
+  diag.py, watch_folder.py         диагностика и стабильный watcher
   tools_ffmpeg.py                  портативный FFmpeg (Windows/Linux; macOS brew)
   llm.py                           каталог языковых моделей, llama.cpp и Ollama
   llm_worker.py                    subprocess llama.cpp (JSON-lines)
@@ -103,6 +106,12 @@ docs/
 - Различать stop с сохранением хвоста и cancel без автовставки.
 - Не допускать повторного завершения сессии и потери аудио без статуса.
 - Ограничивать очереди и кеш модели, измерять рост памяти.
+- Перед загрузкой Whisper проверять доступные RAM/VRAM и показывать indeterminate
+  progress для этапов, где backend не сообщает процент; не маскировать ожидание
+  условными 55%.
+- Поддерживать только проверяемый bounded-контракт для пользовательских моделей
+  перевода: локальные каталоги CTranslate2 с явной парой языков, без запуска
+  произвольного кода или подмены исходного текста.
 - В Live предварительный текст держать только в памяти; в SQLite писать один
   финальный сегмент, а устаревшие preview заменять свежим снимком.
 - В Live при отставании модели вытеснять неначатую фразу, не убивать сессию.

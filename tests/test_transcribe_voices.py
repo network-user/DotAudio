@@ -110,6 +110,31 @@ def test_engine_off_returns_text_without_speakers():
     assert stub._trans_state["stage"] == ""
 
 
+def test_nemo_receives_the_actual_asr_device_hint():
+    """После отката Whisper на CPU NeMo не должен снова выбирать CUDA."""
+
+    stub = _Stub("nemo")
+    seen = {}
+
+    def fake_voices(path, segments, audio=None, device=None):
+        del path, audio
+        seen["device"] = device
+        return ([{**segments[0], "role": 0}], "test diarizer")
+
+    stub._voices_nemo = fake_voices
+    rows, engine, note = _Stub._identify_voices(
+        stub,
+        "a.wav",
+        [{"text": "раз", "start": 0, "end": 1}],
+        device="cpu",
+    )
+
+    assert seen["device"] == "cpu"
+    assert engine == "nemo"
+    assert note == "test diarizer"
+    assert rows[0]["speaker"] == "Голос 1"
+
+
 def test_missing_runtime_keeps_the_transcript_and_names_the_reason():
     stub = _Stub("nemo")
 

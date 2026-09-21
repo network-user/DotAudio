@@ -16,6 +16,8 @@ Rectangle {
     property real progress: -1
     property string fileName: ""
     property string message: ""
+    property string actualDevice: ""
+    property real elapsed: 0
 
     // Фаза декоративной волны; крутится только при active.
     property real pulse: 0
@@ -150,6 +152,15 @@ Rectangle {
                 }
 
                 Label {
+                    visible: String(root.actualDevice || "") === "cuda"
+                             || String(root.actualDevice || "") === "cpu"
+                    text: String(root.actualDevice) === "cuda" ? "GPU" : "CPU"
+                    color: Theme.faint
+                    font.pixelSize: Theme.fsMicro
+                    font.family: Theme.monoFamily
+                }
+
+                Label {
                     visible: root.determinate
                     text: Math.round(Math.max(0, Math.min(1, root.progress)) * 100) + "%"
                     color: Theme.faint
@@ -175,6 +186,14 @@ Rectangle {
                 color: Theme.faint
                 font.pixelSize: Theme.fsMicro
                 elide: Text.ElideMiddle
+            }
+
+            Label {
+                visible: root.elapsed > 0
+                text: Math.floor(Number(root.elapsed)) + " s"
+                color: Theme.faint
+                font.pixelSize: Theme.fsMicro
+                font.family: Theme.monoFamily
             }
 
             Rectangle {

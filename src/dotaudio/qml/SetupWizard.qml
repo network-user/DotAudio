@@ -15,6 +15,7 @@ Item {
     readonly property string setupPhase: setupAlive ? String(setup.phase || "") : ""
     readonly property string setupMessage: setupAlive ? String(setup.message || "") : ""
     readonly property string setupError: setupAlive ? String(setup.error || "") : ""
+    readonly property var setupErrorInfo: (setupAlive && setup.errorInfo) ? setup.errorInfo : ({})
     readonly property real setupPercent: setupAlive ? Number(setup.overallPercent || 0) : 0
     readonly property var setupHw: (setupAlive && setup.hardware) ? setup.hardware : ({})
     readonly property var setupBrief: (setupAlive && setup.briefing) ? setup.briefing : ({})
@@ -547,6 +548,18 @@ Item {
                                 NumberAnimation { duration: Theme.baseMs }
                             }
                         }
+                    }
+                    Label {
+                        visible: root.setupError.length > 0 || Boolean(root.setupErrorInfo.message)
+                        Layout.fillWidth: true
+                        text: {
+                            var message = String(root.setupErrorInfo.message || root.setupError || "")
+                            var advice = root.setupErrorInfo.advice || []
+                            return message + (advice.length ? "\nСовет: " + String(advice[0]) : "")
+                        }
+                        color: Theme.rec
+                        font.pixelSize: Theme.fsSmall
+                        wrapMode: Text.Wrap
                     }
                 }
 

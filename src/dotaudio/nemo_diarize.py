@@ -809,6 +809,7 @@ def _diarize_wav(
     model: str,
     device: str,
     cancel: Event | None,
+    on_status: StatusCallback | None = None,
 ) -> list[Turn]:
     """Один проход CLI по уже отрезанному куску."""
 
@@ -818,14 +819,25 @@ def _diarize_wav(
         return []
     mapped = cli_device_arg(device)
     can_offline = seconds <= DIARIZE_OFFLINE_MAX_SECONDS
-    attempts: list[tuple[str, bool]] = [(mapped, can_offline)]
+    # Не оставляем пустой --device единственным fallback для CUDA. У NeMo
+    # пустое значение означает «выбрать автоматически», а автоматический
+    # выбор на той же машине снова может вернуть неисправную/переполненную
+    # видеокарту. Явный cpu гарантирует, что расшифровка не потеряет голоса.
+    device_flags: list[str] = [mapped]
+    if mapped.casefold() != "cpu":
+        device_flags.append("cpu")
+    # Совместимость со старыми сборками, которые не принимают явный cpu.
     if mapped:
-        # CPU-сборка отвергает cuda:0; часть сборок не принимает явный cpu.
-        attempts.append(("", can_offline))
+        device_flags.append("")
+    attempts: list[tuple[str, bool]] = []
+    modes = [can_offline]
     if can_offline:
-        attempts.append((mapped, False))
-        if mapped:
-            attempts.append(("", False))
+        modes.append(False)
+    for flag in device_flags:
+        for offline in modes:
+            attempt = (flag, offline)
+            if attempt not in attempts:
+                attempts.append(attempt)
 
     workdir = Path(tempfile.mkdtemp(prefix="dotaudio-nemo-"))
     source = workdir / "input.wav"
@@ -840,6 +852,15 @@ def _diarize_wav(
             if key in seen:
                 continue
             seen.add(key)
+            if (
+                flag == "cpu"
+                and mapped
+                and mapped.casefold() != "cpu"
+                and on_status is not None
+            ):
+                on_status(
+                    "Видеокарта не запустила NeMo, определяем голоса на процессоре…"
+                )
             if target.is_file():
                 target.unlink(missing_ok=True)
             command = _diarize_command(
@@ -915,7 +936,12 @@ def diarize_audio(
         piece = data[int(start * rate):int(end * rate)]
         try:
             local = _diarize_wav(
-                piece, cli=path, model=model, device=device, cancel=cancel
+                piece,
+                cli=path,
+                model=model,
+                device=device,
+                cancel=cancel,
+                on_status=on_status,
             )
         except RuntimeError as exc:
             last_error = exc

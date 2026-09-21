@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import replace
 from difflib import SequenceMatcher
@@ -14,9 +15,14 @@ import numpy as np
 
 from dotaudio.engine import Engine, RecognitionConfig
 from dotaudio.engine import stem as _stem
+from dotaudio.longform import short_window_plan
 
 SAMPLE_RATE = 16000
 LIVE_SPEECH_THRESHOLD = 0.0015
+MIN_SPEECH_BUFFER_SECONDS = 0.1
+MAX_SPEECH_BUFFER_SECONDS = 30.0
+MIN_SILENCE_SECONDS = 0.02
+MAX_SILENCE_SECONDS = 10.0
 
 # Live endpointing.  A phrase is allowed to run longer than it used to: the
 # rolling preview already shows the text, and Whisper reads a whole phrase far
@@ -91,6 +97,16 @@ def _preview_key(word: str) -> str:
 DICTATION_PREVIEW_MIN_SECONDS = 0.8
 DICTATION_PREVIEW_INTERVAL_SECONDS = 0.8
 DICTATION_PREVIEW_WINDOW_SECONDS = 1.8
+
+
+def _bounded_seconds(value, default, minimum, maximum):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    if not math.isfinite(number):
+        number = default
+    return min(maximum, max(minimum, number))
 
 
 class VoiceActivity:
@@ -202,17 +218,49 @@ class SpeechBuffer:
         threshold=0.004,
         hold_threshold=None,
         detector=None,
+        *,
+        pre_roll_seconds=0.25,
+        context_seconds=PHRASE_CONTEXT_SECONDS,
+        split_seconds=PHRASE_SPLIT_SECONDS,
     ):
-        self.limit = int(max_seconds * SAMPLE_RATE)
-        self.silence_limit = int(silence_seconds * SAMPLE_RATE)
+        max_seconds = _bounded_seconds(
+            max_seconds,
+            4.0,
+            MIN_SPEECH_BUFFER_SECONDS,
+            MAX_SPEECH_BUFFER_SECONDS,
+        )
+        silence_seconds = _bounded_seconds(
+            silence_seconds,
+            0.45,
+            MIN_SILENCE_SECONDS,
+            MAX_SILENCE_SECONDS,
+        )
+        pre_roll_seconds = _bounded_seconds(pre_roll_seconds, 0.25, 0.0, max_seconds)
+        context_seconds = _bounded_seconds(context_seconds, PHRASE_CONTEXT_SECONDS, 0.0, max_seconds)
+        split_seconds = _bounded_seconds(split_seconds, PHRASE_SPLIT_SECONDS, 0.01, max_seconds)
+        try:
+            threshold = max(0.0, float(threshold))
+        except (TypeError, ValueError):
+            threshold = 0.004
+        if not math.isfinite(threshold):
+            threshold = 0.004
+        self.limit = max(1, int(max_seconds * SAMPLE_RATE))
+        self.silence_limit = max(1, int(silence_seconds * SAMPLE_RATE))
         self.threshold = threshold
-        self.hold_threshold = threshold * 0.55 if hold_threshold is None else hold_threshold
+        if hold_threshold is None:
+            hold_threshold = threshold * 0.55
+        try:
+            hold_threshold = max(0.0, float(hold_threshold))
+        except (TypeError, ValueError):
+            hold_threshold = threshold * 0.55
+        self.hold_threshold = hold_threshold if math.isfinite(hold_threshold) else threshold * 0.55
         self.detector = detector
         # A phrase that reaches the length limit is cut back to the last pause
         # instead of in the middle of a word.  Without this the caption ends on
         # "без видеокар" and the next one opens with the leftover syllable.
-        self.split_limit = int(PHRASE_SPLIT_SECONDS * SAMPLE_RATE)
-        self.context_limit = int(PHRASE_CONTEXT_SECONDS * SAMPLE_RATE)
+        self.split_limit = max(1, int(split_seconds * SAMPLE_RATE))
+        self.context_limit = max(0, int(context_seconds * SAMPLE_RATE))
+        self.pre_roll_limit = max(0, int(pre_roll_seconds * SAMPLE_RATE))
         self.position = 0
         self.start = 0
         self.frames = []
@@ -245,7 +293,7 @@ class SpeechBuffer:
         if not self.frames and not speaking:
             self.pre.append(audio.copy())
             self.pre_size += len(audio)
-            while self.pre and self.pre_size > SAMPLE_RATE // 4:
+            while self.pre and self.pre_size > self.pre_roll_limit:
                 self.pre_size -= len(self.pre.popleft())
             self.position += len(audio)
             return None
@@ -283,7 +331,11 @@ class SpeechBuffer:
         """Carry the end of an emitted phrase forward as context."""
 
         self.lead, self.lead_end = self._context, self._context_end
-        self._context = audio[-self.context_limit :].copy()
+        self._context = (
+            audio[-self.context_limit :].copy()
+            if self.context_limit
+            else np.zeros(0, dtype=np.float32)
+        )
         self._context_end = start + len(audio) / SAMPLE_RATE
 
     def flush_at_limit(self):
@@ -355,6 +407,7 @@ class LiveSession:
         preview_min_seconds: float | None = None,
         preview_interval_seconds: float | None = None,
         preview_window_seconds: float | None = None,
+        preview_overlap_seconds: float | None = None,
         draft_engine: Engine | None = None,
     ):
         self.engine, self.config = engine, config
@@ -389,18 +442,43 @@ class LiveSession:
                 threshold=LIVE_SPEECH_THRESHOLD,
                 detector=detector,
             )
-            preview_min_seconds = preview_min_seconds or LIVE_PREVIEW_MIN_SECONDS
-            preview_interval_seconds = preview_interval_seconds or LIVE_PREVIEW_INTERVAL_SECONDS
-            preview_window_seconds = preview_window_seconds or LIVE_PREVIEW_WINDOW_SECONDS
             self.queue = Queue(maxsize=1)
+            default_preview_min = LIVE_PREVIEW_MIN_SECONDS
+            default_preview_interval = LIVE_PREVIEW_INTERVAL_SECONDS
+            default_preview_window = LIVE_PREVIEW_WINDOW_SECONDS
         else:
             self.buffer = SpeechBuffer(max_seconds=4.0, silence_seconds=0.45, threshold=0.004)
-            preview_min_seconds = preview_min_seconds or DICTATION_PREVIEW_MIN_SECONDS
-            preview_interval_seconds = (
-                preview_interval_seconds or DICTATION_PREVIEW_INTERVAL_SECONDS
-            )
-            preview_window_seconds = preview_window_seconds or DICTATION_PREVIEW_WINDOW_SECONDS
             self.queue = Queue(maxsize=2)
+            default_preview_min = DICTATION_PREVIEW_MIN_SECONDS
+            default_preview_interval = DICTATION_PREVIEW_INTERVAL_SECONDS
+            default_preview_window = DICTATION_PREVIEW_WINDOW_SECONDS
+        preview_window_seconds = (
+            default_preview_window if preview_window_seconds is None else preview_window_seconds
+        )
+        if preview_overlap_seconds is None:
+            preview_interval_seconds = (
+                default_preview_interval
+                if preview_interval_seconds is None
+                else preview_interval_seconds
+            )
+            window_plan = short_window_plan(
+                preview_window_seconds,
+                interval=preview_interval_seconds,
+            )
+        else:
+            window_plan = short_window_plan(
+                preview_window_seconds,
+                overlap=preview_overlap_seconds,
+            )
+        preview_min_seconds = _bounded_seconds(
+            default_preview_min if preview_min_seconds is None else preview_min_seconds,
+            default_preview_min,
+            0.05,
+            window_plan.window_seconds,
+        )
+        self.preview_window_seconds = window_plan.window_seconds
+        self.preview_overlap_seconds = window_plan.overlap_seconds
+        self.preview_interval_seconds = window_plan.step_seconds
         self.cancel = Event()
         self.closed = Event()
         self.failed = ""
@@ -412,9 +490,11 @@ class LiveSession:
         self._preview_generation = 0
         self._preview_invalidated_through = 0
         self._preview_min_samples = max(1, int(preview_min_seconds * SAMPLE_RATE))
-        self._preview_interval_samples = max(1, int(preview_interval_seconds * SAMPLE_RATE))
+        self._preview_interval_samples = max(
+            1, int(round(window_plan.step_seconds * SAMPLE_RATE))
+        )
         self._preview_window_samples = max(
-            self._preview_min_samples, int(preview_window_seconds * SAMPLE_RATE)
+            self._preview_min_samples, int(window_plan.window_seconds * SAMPLE_RATE)
         )
         self._last_preview_position = -self._preview_interval_samples
         # How long this machine actually needs per window.  Written by the

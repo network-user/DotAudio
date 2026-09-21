@@ -18,12 +18,21 @@ from urllib.parse import urlparse
 
 import httpx
 
+from dotaudio.model_registry import (
+    ModelDescriptor,
+    ModelRegistry,
+    ModelValidationError,
+    TranslationPair,
+    normalize_language_code,
+)
+
 # speech_mode → (language, task) for RecognitionConfig.
 # en_ru keeps ASR on English; the controller then runs local MT.
 SPEECH_MODES: dict[str, tuple[str, str]] = {
     "ru": ("ru", "transcribe"),
     "en": ("en", "transcribe"),
     "en_ru": ("en", "transcribe"),
+    "multilingual": ("auto", "transcribe"),
 }
 
 SPEECH_MODE_ORDER = ("ru", "en", "en_ru")
@@ -32,12 +41,14 @@ SPEECH_MODE_LABELS = {
     "ru": "Русский",
     "en": "English",
     "en_ru": "EN → RU",
+    "multilingual": "Другой язык",
 }
 
 SPEECH_MODE_HINTS = {
     "ru": "Распознавание русской речи как есть",
     "en": "Распознавание английской речи как есть",
     "en_ru": "Английская речь → русский текст (локальный перевод)",
+    "multilingual": "Whisper определяет выбранный язык; для перевода в русский добавьте свою MT-модель",
 }
 
 POST_TRANSLATE = {
@@ -50,6 +61,29 @@ OPUS_EN_RU_URL = "https://object.pouta.csc.fi/OPUS-MT-models/en-ru/opus-2020-02-
 OPUS_EN_RU_SIZE_BYTES = 298_000_000  # approximate; progress still works without exact size
 MT_KIND = "mt"
 MT_PAIR = "en-ru"
+BUILTIN_TRANSLATION_PAIR = TranslationPair(
+    source="en",
+    target="ru",
+    model_id="builtin-en-ru",
+    label="EN → RU (OPUS-MT)",
+    builtin=True,
+)
+
+
+def translation_pairs(registry: ModelRegistry | None = None) -> tuple[TranslationPair, ...]:
+    """Return the bounded built-in and user-registered translation pairs.
+
+    The built-in EN→RU path is always present.  User models extend the list;
+    they do not replace or mutate the existing speech modes.
+    """
+
+    pairs = [BUILTIN_TRANSLATION_PAIR]
+    if registry is not None:
+        pairs.extend(registry.translation_pairs())
+    return tuple(pairs)
+
+
+supported_translation_pairs = translation_pairs
 
 
 def normalize_speech_mode(value: object) -> str:
@@ -70,6 +104,8 @@ def speech_mode_hint(value: object) -> str:
 
 def next_speech_mode(current: object) -> str:
     mode = normalize_speech_mode(current)
+    if mode not in SPEECH_MODE_ORDER:
+        return SPEECH_MODE_ORDER[0]
     index = SPEECH_MODE_ORDER.index(mode)
     return SPEECH_MODE_ORDER[(index + 1) % len(SPEECH_MODE_ORDER)]
 
@@ -90,7 +126,7 @@ def speech_mode_from_language_task(language: object, task: object) -> str:
         return "en"
     if lang == "ru":
         return "ru"
-    return "ru"
+    return "multilingual"
 
 
 def needs_post_translate(mode: object) -> bool:
@@ -309,7 +345,12 @@ def _download_file(
 
 
 class Translator:
-    """Cached local EN→RU translator. Injectable ``translate_fn`` for tests."""
+    """Cached local translator with the built-in EN→RU compatibility path.
+
+    A custom pair is used only when its :class:`ModelDescriptor` is present in
+    a :class:`ModelRegistry` (or passed explicitly).  The descriptor is
+    validated as a CTranslate2 directory before any native engine is loaded.
+    """
 
     def __init__(
         self,
@@ -318,15 +359,29 @@ class Translator:
         translate_fn: Callable[[str, str, str], str] | None = None,
         # Legacy test hook from the MyMemory prototype.
         fetch: Callable[[str], dict] | None = None,
+        registry: ModelRegistry | None = None,
+        model_registry: ModelRegistry | None = None,
+        model_id: str | None = None,
+        model: ModelDescriptor | None = None,
     ) -> None:
         self._data_dir = Path(data_dir) if data_dir is not None else None
         self._translate_fn = translate_fn
         self._fetch = fetch
-        self._cache: dict[tuple[str, str, str], str] = {}
+        if registry is not None and model_registry is not None and registry is not model_registry:
+            raise ValueError("Укажите только один реестр переводческих моделей")
+        self._registry = registry or model_registry
+        self._model_id = str(model_id or "").strip() or None
+        if model is not None and not isinstance(model, ModelDescriptor):
+            raise TypeError("model должен быть ModelDescriptor")
+        if model is not None and self._model_id is not None and model.id != self._model_id:
+            raise ValueError("model и model_id указывают на разные модели")
+        self._model = model
+        self._cache: dict[tuple[str, str, str, str], str] = {}
         self._lock = threading.Lock()
         self._ct2 = None
         self._source_spm = None
         self._target_spm = None
+        self._loaded_model_key: tuple[str, str] | None = None
         self.last_error = ""
 
     @property
@@ -337,14 +392,97 @@ class Translator:
         self._data_dir = Path(data_dir) if data_dir is not None else None
         self.release()
 
+    @property
+    def registry(self) -> ModelRegistry | None:
+        return self._registry
+
+    @property
+    def model_id(self) -> str | None:
+        return self._model_id or (self._model.id if self._model is not None else None)
+
+    def set_model(self, model: ModelDescriptor | None) -> None:
+        if model is not None and not isinstance(model, ModelDescriptor):
+            raise TypeError("model должен быть ModelDescriptor")
+        self._model = model
+        self._model_id = model.id if model is not None else None
+        self.release()
+
+    def pairs(self) -> tuple[TranslationPair, ...]:
+        return translation_pairs(self._registry)
+
+    def _configured_model(self) -> ModelDescriptor | None:
+        if self._model is not None:
+            return self._model
+        if self._model_id is not None:
+            if self._registry is None:
+                raise ModelValidationError(
+                    "Для переводчика не задан реестр пользовательских моделей",
+                    code="registry_not_configured",
+                )
+            return self._registry.require(self._model_id)
+        return None
+
+    def _resolve_model(self, source: str, target: str) -> ModelDescriptor | None:
+        configured = self._configured_model()
+        if configured is not None:
+            pair = (configured.source_language, configured.target_language)
+            if pair != (source, target):
+                raise ModelValidationError(
+                    f"Модель {configured.id} не переводит {source} → {target}",
+                    code="model_pair_mismatch",
+                    problems=(f"Модель заявлена для {pair[0]} → {pair[1]}",),
+                )
+            return configured
+        if (source, target) == ("en", "ru"):
+            return None
+        if self._registry is not None:
+            custom = self._registry.resolve_pair(source, target)
+            if custom is not None:
+                return custom
+        raise ModelValidationError(
+            f"Для пары {source} → {target} нет зарегистрированной локальной модели",
+            code="translation_pair_not_found",
+            problems=(
+                "Добавьте проверенный CTranslate2-каталог в ModelRegistry и укажите его языки",
+            ),
+        )
+
     def ready(self) -> bool:
         if self._translate_fn is not None or self._fetch is not None:
             return True
+        try:
+            configured = self._configured_model()
+        except ModelValidationError:
+            return False
+        if configured is not None:
+            return bool(configured.validate())
         return model_ready(self._data_dir)
 
     def status(self) -> dict:
         if self._translate_fn is not None or self._fetch is not None:
             return {"ready": True, "phase": "ready", "message": "Тестовый переводчик"}
+        try:
+            configured = self._configured_model()
+        except ModelValidationError as exc:
+            return {
+                "ready": False,
+                "phase": "invalid",
+                "code": exc.code,
+                "message": str(exc),
+            }
+        if configured is not None:
+            report = configured.validate()
+            return {
+                **report.as_dict(),
+                "phase": "ready" if report.valid else "invalid",
+                "model": configured.id,
+                "pair": configured.pair.code,
+                "message": (
+                    "Пользовательская модель перевода готова"
+                    if report.valid
+                    else "Пользовательская модель не прошла проверку CTranslate2"
+                ),
+            }
         return model_status(self._data_dir)
 
     def clear(self) -> None:
@@ -358,8 +496,15 @@ class Translator:
             self._ct2 = None
             self._source_spm = None
             self._target_spm = None
+            self._loaded_model_key = None
 
     def ensure(self, on_progress=None, cancel: threading.Event | None = None) -> None:
+        configured = self._configured_model()
+        if configured is not None:
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError("подготовка пользовательской модели отменена")
+            configured.validate().raise_for_error()
+            return
         if self.ready():
             return
         if self._data_dir is None:
@@ -371,21 +516,35 @@ class Translator:
         cleaned = " ".join(str(text or "").split())
         if not cleaned:
             return ""
-        src = str(source or "").strip().lower()
-        dst = str(target or "").strip().lower()
+        try:
+            src = normalize_language_code(source)
+            dst = normalize_language_code(target)
+        except ModelValidationError as exc:
+            self.last_error = str(exc)
+            return cleaned
         if not src or not dst or src == dst:
             return cleaned
-        if (src, dst) != ("en", "ru"):
+        if (
+            (src, dst) != ("en", "ru")
+            and self._registry is None
+            and self._model is None
+            and self._model_id is None
+        ):
             self.last_error = "поддерживается только перевод EN→RU"
             return cleaned
-        key = (cleaned.casefold(), src, dst)
+        try:
+            descriptor = self._resolve_model(src, dst)
+        except ModelValidationError as exc:
+            self.last_error = str(exc)
+            return cleaned
+        key = (cleaned.casefold(), src, dst, descriptor.id if descriptor else "builtin-en-ru")
         with self._lock:
             hit = self._cache.get(key)
         if hit is not None:
             self.last_error = ""
             return hit
         try:
-            rendered = self._request(cleaned, src, dst)
+            rendered = self._request(cleaned, src, dst, descriptor)
         except Exception as exc:  # noqa: BLE001 - surface load/decode faults
             self.last_error = str(exc) or exc.__class__.__name__
             return cleaned
@@ -397,7 +556,13 @@ class Translator:
             self._cache[key] = rendered
         return rendered
 
-    def _request(self, text: str, source: str, target: str) -> str:
+    def _request(
+        self,
+        text: str,
+        source: str,
+        target: str,
+        descriptor: ModelDescriptor | None = None,
+    ) -> str:
         if self._translate_fn is not None:
             return str(self._translate_fn(text, source, target) or "").strip()
         if self._fetch is not None:
@@ -406,35 +571,65 @@ class Translator:
             if not isinstance(data, dict):
                 raise RuntimeError("переводчик вернул неожиданный ответ")
             return str(data.get("translatedText") or "").strip()
-        return self._translate_local(text)
+        return self._translate_local(text, descriptor)
 
-    def _load_engine(self) -> None:
-        if self._ct2 is not None:
+    def _load_engine(self, descriptor: ModelDescriptor | None = None) -> None:
+        model_key = (
+            (str(descriptor.path), descriptor.id)
+            if descriptor is not None
+            else (str(self._data_dir), "builtin-en-ru")
+        )
+        if self._ct2 is not None and self._loaded_model_key == model_key:
             return
-        if self._data_dir is None or not model_ready(self._data_dir):
+        if descriptor is not None:
+            descriptor.validate().raise_for_error()
+            model_path = descriptor.path
+            source_path = descriptor.tokenizer_path("source")
+            target_path = descriptor.tokenizer_path("target")
+        else:
+            if self._data_dir is None or not model_ready(self._data_dir):
+                raise RuntimeError("локальная модель перевода ещё не установлена")
+            model_path = ct2_dir(self._data_dir)
+            source_path = source_spm_path(self._data_dir)
+            target_path = target_spm_path(self._data_dir)
+        if self._ct2 is not None:
+            # ``_load_engine`` is called while ``_translate_local`` owns the
+            # lock; clear inline instead of acquiring the same lock again
+            # when a user switches translation pairs.
+            self._cache.clear()
+            self._ct2 = None
+            self._source_spm = None
+            self._target_spm = None
+            self._loaded_model_key = None
+        if descriptor is None and self._data_dir is None:
             raise RuntimeError("локальная модель перевода ещё не установлена")
         import ctranslate2
         import sentencepiece as spm
 
         source = spm.SentencePieceProcessor()
         target = spm.SentencePieceProcessor()
-        if not source.Load(str(source_spm_path(self._data_dir))):
+        if not source.Load(str(source_path)):
             raise RuntimeError("не удалось открыть source.spm")
-        if not target.Load(str(target_spm_path(self._data_dir))):
+        if not target.Load(str(target_path)):
             raise RuntimeError("не удалось открыть target.spm")
         self._source_spm = source
         self._target_spm = target
         self._ct2 = ctranslate2.Translator(
-            str(ct2_dir(self._data_dir)),
+            str(model_path),
             device="cpu",
             compute_type="int8",
             inter_threads=1,
             intra_threads=0,
         )
+        self._loaded_model_key = model_key
 
-    def _translate_local(self, text: str) -> str:
+    def _translate_local(
+        self,
+        text: str,
+        descriptor: ModelDescriptor | None = None,
+    ) -> str:
         with self._lock:
-            self._load_engine()
+            self._load_engine(descriptor)
             source = self._source_spm
             target = self._target_spm
             engine = self._ct2
@@ -475,3 +670,56 @@ def apply_post_translate(
     if "words" in updated:
         updated = {**updated, "words": []}
     return updated
+
+
+def apply_translation(
+    segment: dict,
+    source: str,
+    target: str,
+    *,
+    translator: Translator | None = None,
+) -> dict:
+    """Translate one segment with an explicitly selected local model pair.
+
+    Unlike :func:`apply_post_translate`, this helper is for user-registered
+    pairs and therefore does not infer a pair from a speech-mode name.
+    Original text and word timings are kept only when they remain meaningful;
+    translated words are not fabricated from source timings.
+    """
+
+    original = str(segment.get("text") or "").strip()
+    if not original:
+        return segment
+    rendered = translate_text(original, source, target, translator=translator)
+    if rendered == original:
+        return segment
+    updated = {**segment, "text": rendered, "source_text": original}
+    if "words" in updated:
+        updated["words"] = []
+    return updated
+
+
+__all__ = [
+    "BUILTIN_TRANSLATION_PAIR",
+    "POST_TRANSLATE",
+    "SPEECH_MODE_HINTS",
+    "SPEECH_MODE_LABELS",
+    "SPEECH_MODE_ORDER",
+    "SPEECH_MODES",
+    "Translator",
+    "apply_post_translate",
+    "apply_translation",
+    "language_task_for",
+    "model_ready",
+    "model_status",
+    "next_speech_mode",
+    "needs_post_translate",
+    "normalize_speech_mode",
+    "post_pair",
+    "speech_mode_from_language_task",
+    "speech_mode_hint",
+    "speech_mode_label",
+    "supported_translation_pairs",
+    "translate_text",
+    "translation_pairs",
+]

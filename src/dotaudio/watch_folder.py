@@ -34,6 +34,8 @@ class WatchFolder:
         self._path: Path | None = None
         self._seen: set[SeenKey] = set()
         self._pending_sizes: dict[str, int] = {}
+        self._pending_keys: dict[str, SeenKey] = {}
+        self._stable_polls: dict[str, int] = {}
         self._initial_scan = True
         self.set_path(path)
 
@@ -62,6 +64,8 @@ class WatchFolder:
                 self._path = Path(path)
             self._seen.clear()
             self._pending_sizes.clear()
+            self._pending_keys.clear()
+            self._stable_polls.clear()
             self._initial_scan = True
 
     def _run(self) -> None:
@@ -75,6 +79,8 @@ class WatchFolder:
             initial_scan = self._initial_scan
             seen = self._seen
             pending_sizes = self._pending_sizes
+            pending_keys = self._pending_keys
+            stable_polls = self._stable_polls
             suffixes = self._suffixes
             on_file = self._on_file
 
@@ -100,15 +106,25 @@ class WatchFolder:
             if initial_scan:
                 seen.add(key)
                 pending_sizes[path_key] = stat.st_size
+                pending_keys[path_key] = key
+                stable_polls[path_key] = 0
                 continue
 
             if key in seen:
                 pending_sizes[path_key] = stat.st_size
+                pending_keys[path_key] = key
+                stable_polls[path_key] = 0
                 continue
 
-            previous_size = pending_sizes.get(path_key)
-            if previous_size is None or previous_size != stat.st_size:
+            previous_key = pending_keys.get(path_key)
+            if previous_key is None or previous_key != key:
                 pending_sizes[path_key] = stat.st_size
+                pending_keys[path_key] = key
+                stable_polls[path_key] = 0
+                continue
+
+            stable_polls[path_key] = stable_polls.get(path_key, 0) + 1
+            if stable_polls[path_key] < 2:
                 continue
 
             seen.add(key)

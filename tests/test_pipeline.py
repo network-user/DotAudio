@@ -76,6 +76,37 @@ def test_speech_buffer_at_the_limit_falls_back_to_a_plain_cut() -> None:
     assert buffer.size == 0
 
 
+def test_speech_buffer_bounds_memory_and_exposes_safe_preroll() -> None:
+    buffer = SpeechBuffer(
+        max_seconds=10_000,
+        silence_seconds=10_000,
+        pre_roll_seconds=10_000,
+        context_seconds=10_000,
+    )
+
+    assert buffer.limit == int(30.0 * SAMPLE_RATE)
+    assert buffer.silence_limit == int(10.0 * SAMPLE_RATE)
+    assert buffer.pre_roll_limit == buffer.limit
+    assert buffer.context_limit == buffer.limit
+
+
+def test_live_session_can_configure_a_bounded_preview_overlap() -> None:
+    session = LiveSession(
+        _Engine(),
+        RecognitionConfig(),
+        lambda _segment: None,
+        lambda _status: None,
+        lambda _error, _cancelled: None,
+        catch_up=True,
+        preview_window_seconds=2.0,
+        preview_overlap_seconds=100.0,
+    )
+
+    assert session.preview_window_seconds == 2.0
+    assert session.preview_overlap_seconds < session.preview_window_seconds
+    assert session.preview_interval_seconds >= 0.05
+
+
 class _Capture:
     def __init__(self) -> None:
         self.started = False

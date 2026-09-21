@@ -8,8 +8,12 @@ import numpy as np
 import pytest
 
 from dotaudio.capture import (
+    MAX_BLOCK_SECONDS,
+    MIN_BLOCK_SECONDS,
     AudioCapture,
     StreamCapture,
+    bounded_block_seconds,
+    capture_block_frames,
     describe_capture_error,
     list_input_devices,
     list_loopback_devices,
@@ -129,6 +133,30 @@ def test_resample_to_target_halves_length() -> None:
     source = np.linspace(-0.5, 0.5, 32, dtype=np.float32)
     out = _resample_to_target(source, 32000, 16000)
     assert 14 <= out.size <= 18
+
+
+def test_capture_block_settings_are_bounded():
+    assert bounded_block_seconds(-1) == MIN_BLOCK_SECONDS
+    assert bounded_block_seconds(10_000) == MAX_BLOCK_SECONDS
+    assert capture_block_frames(0.05) == 800
+    with pytest.raises(ValueError):
+        capture_block_frames(0.05, sample_rate=0)
+
+
+def test_audio_capture_uses_the_requested_bounded_block_size():
+    capture = AudioCapture(block_seconds=0.05)
+
+    assert capture.block_seconds == 0.05
+    assert capture._block_frames == 800
+
+
+def test_mixed_capture_keeps_a_bounded_queue_for_short_blocks():
+    from dotaudio.capture import MixedCapture
+
+    capture = MixedCapture(block_seconds=0.02)
+
+    assert capture._mic_q.maxsize >= 2
+    assert capture._mic_q.maxsize == capture._sys_q.maxsize
 
 
 def test_list_input_devices_drops_dead_wdm_only_ghosts(monkeypatch) -> None:

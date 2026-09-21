@@ -14,8 +14,9 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Property, QObject, QTimer, QUrl, Signal, Slot
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog
 
+from dotaudio.audio_preprocess import PreprocessConfig, preprocess_audio
 from dotaudio.capture import (
     AudioCapture,
     StreamCapture,
@@ -65,6 +66,7 @@ from dotaudio.longform import (
     is_long_form,
     want_word_timestamps,
 )
+from dotaudio.model_registry import ModelRegistry, ModelValidationError
 from dotaudio.monitor_clips import PcmRing, WavStream, extract_match_clip
 from dotaudio.pipeline import (
     LIVE_SPEECH_THRESHOLD,
@@ -112,6 +114,7 @@ from dotaudio.transcripts import (
 from dotaudio.translate import (
     Translator,
     apply_post_translate,
+    apply_translation,
     language_task_for,
     needs_post_translate,
     next_speech_mode,
@@ -149,12 +152,22 @@ MODEL_CATALOG = {
     "turbo":    {"params": "809 млн", "download_mb": 1620, "ram_gb": 6,  "load": 4},
 }
 
+for _model_name, _vram_gb in {
+    "tiny": 1.0,
+    "base": 1.5,
+    "small": 2.5,
+    "medium": 5.0,
+    "large-v3": 10.0,
+    "turbo": 7.5,
+}.items():
+    MODEL_CATALOG[_model_name]["vram_gb"] = _vram_gb
+
 DEFAULTS = {
     "model": "small", "device": "auto", "language": "ru", "task": "transcribe",
     # Режимы речи для Live / диктовки / транскрибации. language+task
     # остаются полями RecognitionConfig и синхронизируются с speech_mode.
     # en_ru - Whisper language=en + локальный OPUS-MT EN→RU (см. translate.py).
-    "speech_mode": "ru",
+    "speech_mode": "ru", "translation_model_id": "",
     "backend": "local", "server_url": "http://127.0.0.1:8765", "source": "microphone",
     # Windows: system loopback. Linux/macOS: microphone until a monitor/BlackHole exists.
     "live_source": default_live_source(),
@@ -171,6 +184,13 @@ DEFAULTS = {
     # коротком окне, а на CPU/GPU добавляет задержку. Диктовка и медиа
     # этот флаг не читают (у них свой profile.beam).
     "live_greedy_finals": True,
+    "live_preview_window_seconds": 1.8,
+    "live_preview_interval_seconds": 0.22,
+    # Opt-in because aggressive filtering can harm a clean microphone or
+    # music. The same settings are used for file and Live recognition.
+    "noise_reduction": False,
+    "noise_reduction_strength": 0.75,
+    "noise_highpass_hz": 0.0,
     # Модель черновиков Live. "auto" - лёгкая модель на черновик, когда
     # финал считает тяжёлая: замер на этой машине показал, что medium сам
     # отстаёт от речи на 125-328 мс, а с черновиком small отставание
@@ -548,6 +568,29 @@ def model_fit(model: str, hardware: dict) -> dict:
     spec = MODEL_CATALOG.get(model)
     if spec is None:
         return {"state": "unknown", "note": ""}
+    # When the probe has live free-memory telemetry, prefer it over the old
+    # total-RAM heuristic.  Keep the legacy path for partial/test snapshots
+    # that intentionally contain only the stable fields.
+    if any(
+        key in hardware
+        for key in (
+            "ram_available_gb",
+            "ramAvailableGb",
+            "cudaVramFreeGb",
+            "gpuVramFreeGb",
+            "gpus",
+        )
+    ):
+        from dotaudio.adapt import assess_whisper_model_fit
+
+        device = "cuda" if int(hardware.get("cuda_devices") or 0) > 0 else "cpu"
+        fit = assess_whisper_model_fit(model, hardware, device=device)
+        if fit.get("state") == "insufficient":
+            return {
+                "state": "tight",
+                "note": str(fit.get("reason") or "Недостаточно доступной памяти."),
+                "memory": fit,
+            }
     ram = hardware.get("ram_gb")
     threads = int(hardware.get("threads") or 0)
     cuda = int(hardware.get("cuda_devices") or 0)
@@ -631,9 +674,11 @@ class Controller(QObject):
     updateProgress = Signal("QVariantMap")
     updateFinished = Signal("QVariantMap")
     hardwareArrived = Signal(object)
+    translationModelsChanged = Signal()
 
     def __init__(self, data_dir: Path, desktop):
         super().__init__()
+        self._data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
         self._file_log = FileLog(data_dir / "dotaudio.log")
         self._file_log.write("info", "Запуск DotAudio")
@@ -649,12 +694,35 @@ class Controller(QObject):
         self._vosk_engine: VoskEngine | None = None
         self._vosk_size: str = ""
         self._settings = {**DEFAULTS, **self.store.get_settings()}
-        self._translator = Translator(data_dir=data_dir)
+        self._translation_registry_error = ""
+        self._translation_reports: dict[str, dict] = {}
+        try:
+            self._translation_registry = ModelRegistry(
+                self._data_dir / "models" / "translation"
+            )
+        except ModelValidationError as exc:
+            # A broken user registry must not prevent ASR from starting.  It
+            # is surfaced through the model catalog and can be repaired by
+            # re-importing a valid model.
+            self._translation_registry_error = str(exc)
+            self._translation_registry = ModelRegistry(
+                self._data_dir / "models" / "translation", load=False
+            )
+        self._translator = Translator(
+            data_dir=data_dir,
+            registry=self._translation_registry,
+        )
         self._translate_notice_shown = False
         self._translate_preparing = False
         self._translate_cancel = threading.Event()
         self._translate_state = dict(self._translator.status())
         self._sync_speech_mode_settings(persist=False)
+        self._sync_translation_model(persist=False)
+        threading.Thread(
+            target=self._refresh_translation_reports,
+            name="dotaudio-translation-probe",
+            daemon=True,
+        ).start()
         saved_bindings = {
             "dictate": resolve_hotkey(str(self._settings["dictate_hotkey"])),
             "island": resolve_hotkey(str(self._settings["island_hotkey"])),
@@ -713,7 +781,8 @@ class Controller(QObject):
             "error": "", "status": "", "speakers": [], "diarization": False,
             "engine": "", "engineNote": "", "duration": 0.0,
             "segments": [], "sessionId": "", "progress": 0.0,
-            "origin": "", "trace": [],
+            "origin": "", "trace": [], "statusCode": "", "component": "",
+            "requestedDevice": "", "actualDevice": "", "elapsed": 0.0,
         }
         self._doctor = {
             "phase": "idle",
@@ -726,6 +795,7 @@ class Controller(QObject):
         }
         self._doctor_fix_pending = False
         self._trans_cancel = threading.Event()
+        self._trans_started_at = 0.0
         # sessionId с воркера до доставки QueuedConnection от transcribeTick.
         self._trans_result_session_id = ""
         self._trans_edit_undo: list[list[dict]] = []
@@ -1222,9 +1292,9 @@ class Controller(QObject):
         self._model_prepare_error = ""
         self._model_preparing = True
         self._gpu_setup = {
-            "phase": "model",
-            "percent": 55.0,
-            "message": f"Готовим модель {model} на видеокарте…",
+            "phase": "model_loading",
+            "percent": -1.0,
+            "message": f"Загружаем модель {model} в видеопамять…",
             "busy": True,
             "error": "",
             "restartRequired": False,
@@ -1255,9 +1325,34 @@ class Controller(QObject):
                         }
                     )
 
+                def status(value):
+                    self.statusArrived.emit(value)
+                    if value == "loading_model":
+                        self.gpuSetupProgress.emit(
+                            {
+                                "phase": "model_loading",
+                                "percent": -1.0,
+                                "message": f"Загружаем модель {model} в видеопамять…",
+                                "busy": True,
+                                "error": "",
+                                "restartRequired": False,
+                            }
+                        )
+                    elif value == "model_ready":
+                        self.gpuSetupProgress.emit(
+                            {
+                                "phase": "model",
+                                "percent": 100.0,
+                                "message": f"Модель {model} отвечает на GPU.",
+                                "busy": True,
+                                "error": "",
+                                "restartRequired": False,
+                            }
+                        )
+
                 device = self.engine.prepare(
                     config,
-                    lambda status: self.statusArrived.emit(status),
+                    status,
                     progress,
                 )
                 if self._prepare_cancel.is_set():
@@ -1278,7 +1373,7 @@ class Controller(QObject):
                         self.statusArrived.emit("gpu_unavailable_falling_back_cpu")
                         fallback_device = self.engine.prepare(
                             replace(config, device="cpu"),
-                            lambda status: self.statusArrived.emit(status),
+                            status,
                             progress,
                         )
                 except Exception:  # noqa: BLE001
@@ -1672,7 +1767,143 @@ class Controller(QObject):
 
     @Property(bool, notify=changed)
     def translateModelReady(self):
+        descriptor = getattr(self, "_translation_descriptor", lambda: None)()
+        if descriptor is not None:
+            return bool(
+                (getattr(self, "_translation_reports", {}).get(descriptor.id) or {}).get(
+                    "valid"
+                )
+            )
         return bool(self._translate_state.get("ready"))
+
+    @Property("QVariantList", notify=translationModelsChanged)
+    def translationModels(self):
+        """Registered local CTranslate2 translation models for the UI."""
+
+        registry = getattr(self, "_translation_registry", None)
+        if registry is None:
+            return []
+        rows = []
+        for descriptor in registry.list():
+            report = self._translation_reports.get(descriptor.id) or {
+                "valid": False,
+                "errors": ["Проверка модели ещё выполняется."],
+            }
+            rows.append(
+                {
+                    **descriptor.to_dict(),
+                    "pair": descriptor.pair.code,
+                    "ready": bool(report.get("valid")),
+                    "validation": list(report.get("errors") or []),
+                }
+            )
+        return rows
+
+    def _refresh_translation_reports(self) -> None:
+        registry = getattr(self, "_translation_registry", None)
+        if registry is None:
+            return
+        reports: dict[str, dict] = {}
+        for descriptor in registry.list():
+            try:
+                reports[descriptor.id] = descriptor.validate().as_dict()
+            except Exception as exc:  # noqa: BLE001
+                reports[descriptor.id] = {
+                    "valid": False,
+                    "errors": [str(exc) or exc.__class__.__name__],
+                }
+        self._translation_reports = reports
+        self.translationModelsChanged.emit()
+
+    @Property("QVariantMap", notify=translationModelsChanged)
+    def translationModelCatalogState(self):
+        registry = getattr(self, "_translation_registry", None)
+        return {
+            "selected": str(self._settings.get("translation_model_id") or ""),
+            "count": len(registry.list()) if registry is not None else 0,
+            "error": str(getattr(self, "_translation_registry_error", "") or ""),
+        }
+
+    @Slot(str, str, str, str)
+    def registerTranslationModel(
+        self,
+        path: str,
+        model_id: str,
+        source_language: str,
+        target_language: str,
+    ) -> None:
+        """Validate and persist a user-owned CTranslate2 translation model."""
+
+        registry = getattr(self, "_translation_registry", None)
+        if registry is None:
+            self._notice = "Каталог пользовательских моделей недоступен."
+            self.changed.emit()
+            return
+        try:
+            descriptor = registry.register_local(
+                Path(str(path)).expanduser(),
+                model_id=str(model_id),
+                source_language=str(source_language),
+                target_language=str(target_language),
+                label=str(model_id),
+            )
+        except (ModelValidationError, OSError, ValueError) as exc:
+            self._notice = f"Модель не добавлена: {exc}"
+            self._record_log("warning", self._notice)
+            self.changed.emit()
+            return
+        self._translation_registry_error = ""
+        self._settings["translation_model_id"] = descriptor.id
+        self._sync_translation_model(persist=False)
+        self.store.save_settings(self._settings)
+        self._translator.clear()
+        self._translate_state = {
+            "ready": False,
+            "phase": "checking",
+            "message": "Проверяем пользовательскую модель перевода…",
+        }
+        self._notice = f"Добавлена модель перевода: {descriptor.label} ({descriptor.pair.code})."
+        self._record_log("success", self._notice)
+        self.translationModelsChanged.emit()
+        threading.Thread(
+            target=self._refresh_translation_reports,
+            name="dotaudio-translation-probe",
+            daemon=True,
+        ).start()
+        self.changed.emit()
+
+    @Slot()
+    def importTranslationModel(self) -> None:
+        """Open a small guided import flow for a local CTranslate2 folder."""
+
+        path = QFileDialog.getExistingDirectory(
+            None,
+            "Выберите папку CTranslate2-модели перевода",
+            str(self._data_dir / "models" / "translation"),
+        )
+        if not path:
+            return
+        folder = Path(path)
+        default_id = re.sub(r"[^a-z0-9._-]+", "-", folder.name.casefold()).strip("-") or "custom-translation"
+        model_id, accepted = QInputDialog.getText(
+            None,
+            "Идентификатор модели",
+            "Латинский id:",
+            text=default_id,
+        )
+        if not accepted:
+            return
+        source, accepted = QInputDialog.getText(
+            None, "Язык исходной речи", "Код языка (например en или zh):", text="en"
+        )
+        if not accepted:
+            return
+        target, accepted = QInputDialog.getText(
+            None, "Язык результата", "Код языка (например ru):", text="ru"
+        )
+        if not accepted:
+            return
+        self.registerTranslationModel(path, model_id, source, target)
 
     @Slot()
     def prepareTranslateModel(self):
@@ -1742,6 +1973,14 @@ class Controller(QObject):
     def _sync_speech_mode_settings(self, *, persist: bool = True) -> None:
         """Keep speech_mode, language and task aligned after load or edit."""
 
+        if str(self._settings.get("translation_model_id") or "").strip():
+            descriptor = self._translation_descriptor()
+            if descriptor is not None:
+                self._settings["language"] = descriptor.source_language
+                self._settings["task"] = "transcribe"
+                if persist:
+                    self.store.save_settings(self._settings)
+                return
         raw = self.store.get_settings() if hasattr(self, "store") else {}
         saved_mode = raw.get("speech_mode") if isinstance(raw, dict) else None
         if saved_mode not in ("ru", "en", "en_ru", "ru_en"):
@@ -1750,15 +1989,69 @@ class Controller(QObject):
             )
         else:
             mode = normalize_speech_mode(self._settings.get("speech_mode"))
-        language, task = language_task_for(mode)
+        if mode == "multilingual":
+            language = str(self._settings.get("language") or "auto")
+            task = "transcribe"
+        else:
+            language, task = language_task_for(mode)
         self._settings["speech_mode"] = mode
         self._settings["language"] = language
         self._settings["task"] = task
         if persist:
             self.store.save_settings(self._settings)
 
+    def _translation_descriptor(self):
+        registry = getattr(self, "_translation_registry", None)
+        model_id = str(self._settings.get("translation_model_id") or "").strip()
+        if registry is None or not model_id:
+            return None
+        return registry.get(model_id)
+
+    def _sync_translation_model(self, *, persist: bool = True) -> None:
+        """Apply the selected custom pair without making it a hidden default."""
+
+        descriptor = self._translation_descriptor()
+        if descriptor is None and str(self._settings.get("translation_model_id") or "").strip():
+            self._settings["translation_model_id"] = ""
+            self._translation_registry_error = (
+                "Выбранная пользовательская модель перевода больше не зарегистрирована."
+            )
+        translator = getattr(self, "_translator", None)
+        if translator is not None:
+            translator.set_model(descriptor)
+        if descriptor is not None:
+            self._settings["language"] = descriptor.source_language
+            self._settings["task"] = "transcribe"
+        if persist and hasattr(self, "store"):
+            self.store.save_settings(self._settings)
+
     def _translate_segment(self, segment: dict) -> dict:
-        """Post-ASR EN→RU on the worker thread when speech_mode needs it."""
+        """Post-ASR translation on the worker thread when it is enabled."""
+
+        descriptor = self._translation_descriptor()
+        if descriptor is not None:
+            if not self._translator.ready():
+                if not self._translate_notice_shown:
+                    self._translate_notice_shown = True
+                    self.logArrived.emit(
+                        "warning",
+                        "Пользовательская модель перевода не прошла проверку; показан исходный текст.",
+                    )
+                return segment
+            updated = apply_translation(
+                segment,
+                descriptor.source_language,
+                descriptor.target_language,
+                translator=self._translator,
+            )
+            error = self._translator.last_error
+            if error and not self._translate_notice_shown:
+                self._translate_notice_shown = True
+                self.logArrived.emit(
+                    "warning",
+                    f"Пользовательский перевод не удался, показан исходный текст: {error}",
+                )
+            return updated
 
         mode = self._settings.get("speech_mode")
         if not needs_post_translate(mode):
@@ -1905,9 +2198,14 @@ class Controller(QObject):
             return
         choices = {
             "model": ("tiny", "base", "small", "medium", "large-v3", "turbo"),
-            "device": ("auto", "cpu", "cuda"), "language": ("auto", "ru", "en", "de", "es", "fr", "zh"),
+            "device": ("auto", "cpu", "cuda"),
+            "language": (
+                "auto", "ru", "en", "de", "es", "fr", "zh", "ja", "ko",
+                "it", "pt", "pl", "uk", "tr", "ar", "hi", "nl", "cs",
+                "sv", "da", "fi", "no", "el", "he", "id", "vi", "th",
+            ),
             "task": ("transcribe", "translate"), "backend": ("local", "remote"),
-            "speech_mode": ("ru", "en", "en_ru"),
+            "speech_mode": ("ru", "en", "multilingual", "en_ru"),
             "source": ("microphone", "system"), "live_source": ("microphone", "system", "mixed"),
             "live_sensitivity": ("speech", "everything"),
             "live_draft_model": ("auto", "off", "tiny", "base", "small"),
@@ -1923,6 +2221,12 @@ class Controller(QObject):
         }
         if name in choices and value not in choices[name]:
             return
+        if name == "translation_model_id":
+            raw_model_id = str(value or "").strip()
+            registry = getattr(self, "_translation_registry", None)
+            if raw_model_id and (registry is None or registry.get(raw_model_id) is None):
+                return
+            value = raw_model_id
         if name == "backend" and value == "remote":
             # Внешний ASR только по явному opt-in: иначе аудио не покидает машину.
             import os
@@ -1947,8 +2251,28 @@ class Controller(QObject):
             "live_greedy_finals", "gpu_hint_dismissed", "setup_completed",
             "watch_folder_enabled", "history_semantic",
             "update_check_enabled", "update_auto_prompt",
+            "noise_reduction",
         ):
             value = bool(value)
+        if name in (
+            "live_preview_window_seconds",
+            "live_preview_interval_seconds",
+            "noise_reduction_strength",
+            "noise_highpass_hz",
+        ):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return
+            limits = {
+                "live_preview_window_seconds": (0.4, 8.0),
+                "live_preview_interval_seconds": (0.05, 4.0),
+                "noise_reduction_strength": (0.0, 1.0),
+                "noise_highpass_hz": (0.0, 7200.0),
+            }
+            lower, upper = limits[name]
+            if not lower <= value <= upper:
+                return
         if name in ("caption_x", "caption_y", "caption_screen"):
             try:
                 value = int(value)
@@ -1960,6 +2284,7 @@ class Controller(QObject):
         )
         self._settings[name] = value
         if name == "speech_mode":
+            self._settings["translation_model_id"] = ""
             language, task = language_task_for(value)
             self._settings["language"] = language
             self._settings["task"] = task
@@ -1967,13 +2292,30 @@ class Controller(QObject):
             self._translator.clear()
             if value == "en_ru" and not self._translator.ready():
                 QTimer.singleShot(0, self.prepareTranslateModel)
-        elif name in ("language", "task"):
-            # Старый UI и тесты ещё пишут language/task напрямую.
-            # en_ru из пары language+task не восстанавливается - остаётся en.
-            self._settings["speech_mode"] = speech_mode_from_language_task(
-                self._settings.get("language"), self._settings.get("task")
-            )
+        elif name == "translation_model_id":
+            self._sync_translation_model(persist=False)
             self._translate_notice_shown = False
+            self._translator.clear()
+            descriptor = self._translation_descriptor()
+            if descriptor is not None:
+                report = getattr(self, "_translation_reports", {}).get(descriptor.id) or {}
+                self._translate_state = {
+                    "ready": bool(report.get("valid")),
+                    "phase": "ready" if report.get("valid") else "checking",
+                    "message": (
+                        "Пользовательская модель перевода готова."
+                        if report.get("valid")
+                        else "Проверяем пользовательскую модель перевода…"
+                    ),
+                }
+        elif name in ("language", "task"):
+            if self._translation_descriptor() is None:
+                # Старый UI и тесты ещё пишут language/task напрямую.
+                # en_ru из пары language+task не восстанавливается - остаётся en.
+                self._settings["speech_mode"] = speech_mode_from_language_task(
+                    self._settings.get("language"), self._settings.get("task")
+                )
+                self._translate_notice_shown = False
         if name == "live_source":
             self._settings["source"] = value if value in ("microphone", "system") else "system"
         elif name == "source":
@@ -2081,9 +2423,17 @@ class Controller(QObject):
     def _config(self, media_mode=False, live_stream=False):
         values = {key: self._settings[key] for key in
                   ("model", "device", "language", "task", "backend", "server_url", "profile")}
-        language, task = language_task_for(self._settings.get("speech_mode"))
-        values["language"] = language
-        values["task"] = task
+        descriptor = getattr(self, "_translation_descriptor", lambda: None)()
+        if descriptor is not None:
+            values["language"] = descriptor.source_language
+            values["task"] = "transcribe"
+        elif normalize_speech_mode(self._settings.get("speech_mode")) == "multilingual":
+            values["language"] = str(self._settings.get("language") or "auto")
+            values["task"] = "transcribe"
+        else:
+            language, task = language_task_for(self._settings.get("speech_mode"))
+            values["language"] = language
+            values["task"] = task
         if live_stream:
             values["live_sensitivity"] = str(self._settings["live_sensitivity"])
             # Live: greedy всегда. Beam профиля оставляем файлам и диктовке;
@@ -2102,6 +2452,13 @@ class Controller(QObject):
                 for entry in self.dictionary
                 if isinstance(entry, dict) and str(entry.get("term", "")).strip()
             )
+        values["noise_reduction"] = bool(self._settings.get("noise_reduction"))
+        values["noise_reduction_strength"] = float(
+            self._settings.get("noise_reduction_strength") or 0.75
+        )
+        values["noise_highpass_hz"] = float(
+            self._settings.get("noise_highpass_hz") or 0.0
+        )
         return RecognitionConfig(
             **values, media_mode=bool(media_mode), live_stream=bool(live_stream)
         )
@@ -2404,6 +2761,27 @@ class Controller(QObject):
         )
         tone = "error" if is_error else "info"
         self._trans_state["status"] = label
+        self._trans_state["statusCode"] = str(raw)
+        if self._trans_state.get("phase") == "working":
+            self._trans_state["elapsed"] = max(
+                0.0,
+                time.monotonic()
+                - float(getattr(self, "_trans_started_at", 0.0) or 0.0),
+            )
+        component_by_status = {
+            "loading_model": "model",
+            "reading_audio": "audio",
+            "transcribing_cpu": "asr",
+            "transcribing_cuda": "asr",
+            "uploading": "asr",
+            "gpu_unavailable_falling_back_cpu": "asr",
+        }
+        if str(raw) in component_by_status:
+            self._trans_state["component"] = component_by_status[str(raw)]
+        if str(raw) == "transcribing_cpu":
+            self._trans_state["actualDevice"] = "cpu"
+        elif str(raw) == "transcribing_cuda":
+            self._trans_state["actualDevice"] = "cuda"
         if is_error:
             self._trans_state["error"] = label
         self._append_trans_trace(tone, label)
@@ -3383,6 +3761,16 @@ class Controller(QObject):
                 lambda error, cancelled, sid=sid: self.jobFinished.emit(sid, error, cancelled),
                 on_partial=_emit_partial if mode in ("live", "dictation") else None,
                 catch_up=(mode == "live"),
+                preview_window_seconds=(
+                    float(self._settings.get("live_preview_window_seconds") or 1.8)
+                    if mode == "live"
+                    else None
+                ),
+                preview_interval_seconds=(
+                    float(self._settings.get("live_preview_interval_seconds") or 0.22)
+                    if mode == "live"
+                    else None
+                ),
                 draft_engine=(
                     self._live_draft_engine(config)
                     if mode == "live" and not use_vosk
@@ -5063,11 +5451,14 @@ class Controller(QObject):
         self._trans_cancel.clear()
         model = str(self._settings.get("model") or "small")
         device = str(self._settings.get("device") or "auto")
+        self._trans_started_at = time.monotonic()
         state = self._trans_state
         state.update({"phase": "working", "stage": "asr", "error": "", "status": "",
                       "trace": [], "segments": [],
                       "speakers": [], "diarization": False, "engine": "", "engineNote": "",
-                      "sessionId": "", "progress": -1.0})
+                      "sessionId": "", "progress": -1.0, "statusCode": "",
+                      "component": "model", "requestedDevice": device,
+                      "actualDevice": "", "elapsed": 0.0})
         self._trans_result_session_id = ""
         self._record_log("info", f"Транскрибация (локально): {Path(path).name}")
         self.transcribeChanged.emit()
@@ -5126,15 +5517,34 @@ class Controller(QObject):
 
         if isinstance(payload, dict):
             self._trans_state.update(payload)
+            if self._trans_state.get("phase") == "working":
+                self._trans_state["elapsed"] = max(
+                    0.0,
+                    time.monotonic()
+                    - float(getattr(self, "_trans_started_at", 0.0) or 0.0),
+                )
+            stage = str(payload.get("stage") or "")
+            if stage:
+                self._trans_state["component"] = "voices" if stage == "voices" else "asr"
+            if payload.get("actualDevice"):
+                self._trans_state["actualDevice"] = str(payload["actualDevice"])
             if payload.get("phase") == "done":
                 model = str(self._settings.get("model") or "small")
                 self._adopt_runtime_device(self.engine.last_device(model))
+                self._trans_state["elapsed"] = max(
+                    0.0,
+                    time.monotonic()
+                    - float(getattr(self, "_trans_started_at", 0.0) or 0.0),
+                )
         self.transcribeChanged.emit()
 
     def _trans_stage(self, stage: str) -> None:
         """Показать, чем занят проход: словами или голосами."""
 
-        payload: dict = {"stage": stage}
+        payload: dict = {
+            "stage": stage,
+            "component": "voices" if stage == "voices" else "asr",
+        }
         # ASR закончен, голоса ещё без доли: оставляем indeterminate.
         if stage == "voices":
             payload["progress"] = -1.0
@@ -5208,7 +5618,8 @@ class Controller(QObject):
         collected: list[dict] = []
         audio = None
         diarize = str(self._settings.get("diarize_engine") or "off")
-        if diarize != "off":
+        needs_clean_audio = bool(self._settings.get("noise_reduction"))
+        if diarize != "off" or needs_clean_audio:
             try:
                 from dotaudio.speaker_id import decode_audio
 
@@ -5225,6 +5636,23 @@ class Controller(QObject):
                     )
             except Exception:  # noqa: BLE001
                 audio = None
+        if audio is not None and needs_clean_audio:
+            try:
+                audio = preprocess_audio(
+                    audio,
+                    PreprocessConfig(
+                        enabled=True,
+                        reduction_strength=float(
+                            self._settings.get("noise_reduction_strength") or 0.75
+                        ),
+                        highpass_hz=float(
+                            self._settings.get("noise_highpass_hz") or 0.0
+                        ),
+                    ),
+                )
+                self.transcribeStatus.emit("Аудио очищено от стационарного шума.")
+            except Exception as exc:  # noqa: BLE001
+                self._record_log("warning", f"Шумоподавление отключено для файла: {exc}")
         source = audio if audio is not None else path
         gate = TickGate() if long_session else None
 
@@ -5300,7 +5728,44 @@ class Controller(QObject):
                 "duration": duration,
                 "stage": "asr",
             })
-        return self._identify_voices(path, collected, audio=audio)
+        # Whisper can silently settle on CPU after a CUDA load/decode error.
+        # NeMo is a separate process, so passing the saved preference here
+        # would make it try the same broken GPU again. Use the actual device
+        # that handled ASR as the initial diarization hint.
+        runtime_device = str(config.device or "auto")
+        last_device = getattr(self.engine, "last_device", None)
+        if callable(last_device):
+            try:
+                runtime_device = str(last_device(config.model) or runtime_device)
+            except Exception:  # noqa: BLE001
+                pass
+        self.transcribeTick.emit({
+            "component": "asr",
+            "actualDevice": runtime_device,
+        })
+        if diarize == "nemo" and runtime_device.casefold() == "cuda":
+            # The Whisper instance otherwise remains resident in VRAM while
+            # the NeMo child process loads Sortformer. Releasing only the
+            # in-process object avoids an avoidable CUDA OOM; model files stay
+            # cached on disk and will be reused on the next transcription.
+            release = getattr(self.engine, "release_cached_model", None)
+            if callable(release):
+                try:
+                    if release():
+                        self.transcribeStatus.emit(
+                            "Освобождаем видеопамять перед определением голосов…"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    self._record_log(
+                        "warning",
+                        f"Не удалось освободить видеопамять перед NeMo: {exc}",
+                    )
+        return self._identify_voices(
+            path,
+            collected,
+            audio=audio,
+            device=runtime_device,
+        )
 
     def _transcribe_local(self, path: str) -> str:
         rows, engine, note = self._recognize_file(path)
@@ -5410,6 +5875,7 @@ class Controller(QObject):
         path: str,
         segments: list[dict],
         audio=None,
+        device: str | None = None,
     ) -> tuple[list[dict], str, str]:
         """Определить говорящих выбранным движком.
 
@@ -5423,11 +5889,17 @@ class Controller(QObject):
             return self._label_speakers(segments), "", ""
         self._trans_stage("voices")
         try:
-            rows, note = (
-                self._voices_nemo(path, segments, audio=audio)
-                if engine == "nemo"
-                else self._voices_ecapa(path, segments, audio=audio)
-            )
+            if engine == "nemo":
+                # Keep the call without an extra keyword for older/plugin
+                # test doubles; the real implementation accepts the hint.
+                if device:
+                    rows, note = self._voices_nemo(
+                        path, segments, audio=audio, device=device
+                    )
+                else:
+                    rows, note = self._voices_nemo(path, segments, audio=audio)
+            else:
+                rows, note = self._voices_ecapa(path, segments, audio=audio)
         except Exception as exc:  # noqa: BLE001
             if self._trans_cancel.is_set():
                 return self._label_speakers(segments), "", ""
@@ -5438,7 +5910,13 @@ class Controller(QObject):
         self.transcribeStatus.emit("Готово: текст и говорящие.")
         return self._label_speakers(rows), engine, note
 
-    def _voices_nemo(self, path: str, segments: list[dict], audio=None) -> tuple[list[dict], str]:
+    def _voices_nemo(
+        self,
+        path: str,
+        segments: list[dict],
+        audio=None,
+        device: str | None = None,
+    ) -> tuple[list[dict], str]:
         """Разметка дорожки моделью NVIDIA Sortformer через нативный рантайм."""
 
         from dotaudio.nemo_diarize import MAX_SPEAKERS, diarize_audio
@@ -5449,7 +5927,7 @@ class Controller(QObject):
         # процессор, диаризация не должна втихую занимать видеокарту.
         turns = diarize_audio(
             samples,
-            device=str(self._settings.get("device") or "auto"),
+            device=str(device or self._settings.get("device") or "auto"),
             cancel=self._trans_cancel,
             on_status=self.transcribeStatus.emit,
             on_chunk=self._on_voice_chunk,

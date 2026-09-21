@@ -4,8 +4,10 @@
   <img src="https://img.shields.io/badge/Python-3.12--3.13-3776AB?style=flat" alt="Python 3.12-3.13" />
   <img src="https://img.shields.io/badge/Platform-Windows_|_Linux_|_macOS-555?style=flat" alt="Windows Linux macOS" />
   <img src="https://img.shields.io/badge/Category-Desktop_ASR-555?style=flat" alt="Desktop ASR" />
-  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-5657-lightgrey?style=flat" alt="5657 lines of code" /><!-- loc:end -->
+  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-47175-lightgrey?style=flat" alt="47175 lines of code" /><!-- loc:end -->
 </p>
+
+<img src="docs/cover.svg" width="720" alt="DotAudio: речь и субтитры" />
 
 <!-- audit:start -->
 <p>
@@ -14,11 +16,11 @@
 </p>
 <!-- audit:end -->
 
-<img src="docs/cover.svg" width="720" alt="DotAudio: речь и субтитры" />
-
-Desktop-приложение к статье о Whisper. Оно распознаёт русскую речь локально
+Desktop-приложение к статье о Whisper. Оно распознаёт речь локально
 через faster-whisper, показывает живые субтитры, помогает с диктовкой и
 превращает аудио или видео в редактируемую расшифровку и караоке-субтитры.
+Язык распознавания, устройство и модель выбираются явно; для перевода
+используются локальные модели CTranslate2.
 Первая и наиболее полная платформа - Windows; Ubuntu и macOS поддерживаются
 установщиком и ядром (микрофон, медиа, история, мастер загрузок).
 
@@ -137,7 +139,9 @@ python3.12 -m venv .venv
 - Live-субтитры - главный режим: отдельное always-on-top окно, предварительный
   текст по короткому окну текущей фразы и финализация в истории. Если модель
   отстаёт, неначатая фраза вытесняется новой, сессия не останавливается.
-  Русский язык выбран по умолчанию; Whisper Translate даёт английские субтитры.
+  Язык распознавания выбирается явно или определяется Whisper автоматически;
+  режим `EN → RU` использует локальную OPUS-MT-модель, а пользовательские
+  пары перевода подключаются из проверенных каталогов CTranslate2.
 - Живой текст растёт словами: подтверждённый префикс остаётся на месте,
   уточняемый хвост приглушён и тоньше, перенос строки и сдвиг слов
   анимируются, предыдущая фраза уходит в строку истории. Одна и та же сцена
@@ -179,6 +183,15 @@ python3.12 -m venv .venv
   видеокарта и её память. Каталог показывает, что поместится целиком в
   видеопамять, а что будет считаться на процессоре. Видеокарты перечисляются по
   вендору - NVIDIA, AMD, Intel, - а не по одному признаку «есть ли CUDA».
+- Предварительная оценка RAM/VRAM перед загрузкой Whisper, автоматический выбор
+  безопасного compute type и явный fallback на CPU или другой доступный GPU.
+  Пока модель инициализируется, UI показывает неопределённый прогресс, а не
+  зависание на условных 55 %.
+- Опциональная обработка аудио: стационарное шумоподавление, high-pass и
+  настраиваемое короткое окно Live. Все тяжёлые операции выполняются вне GUI.
+- При транскрибации с голосами Whisper и NeMo работают в согласованном
+  runtime-device; перед diarization освобождается кеш ASR, а при ошибке GPU
+  выполняется CPU fallback с сохранением обычной расшифровки.
 
 ## Компоненты
 
@@ -187,11 +200,15 @@ src/dotaudio/
   app.py, controller.py, desktop.py   # запуск, связка QML и системное окно
   capture.py -> pipeline.py -> engine.py
                                       # захват, очередь и faster-whisper
+  audio_preprocess.py                 # опциональное шумоподавление и high-pass
   storage.py, transcripts.py          # SQLite, миграции и экспорт расшифровок
   karaoke.py                          # word timestamps, ASS и MP4
   speaker_id.py, nemo_diarize.py      # голоса: разметка дорожки и разбор фраз
   hardware.py, cuda_runtime.py        # опрос устройства и сборки ускорения
-  modelhub.py, tools_ffmpeg.py        # модели и портативный FFmpeg
+  adapt.py, modelhub.py                # preflight памяти и модели с докачкой
+  model_registry.py, translate.py      # локальные модели перевода и пары языков
+  diag.py, setup_controller.py         # диагностика и мастер подготовки
+  watch_folder.py, tools_ffmpeg.py    # стабильный watcher и портативный FFmpeg
   updater.py, process_priority.py     # git-обновления и приоритет (Windows)
   llm.py, assistant.py                # каталог языковых моделей и разбор записи
   assistant_controller.py             # мост ассистента: воркеры и сигналы
@@ -209,6 +226,19 @@ tests/
 docs/
 ```
 
+## Архитектура
+
+```text
+audio source ──> capture ──> bounded pipeline ──> engine (Whisper)
+                                      │                    │
+                                      └──> live preview    ├──> transcript/storage
+                                                           ├──> optional translate
+                                                           └──> NeMo diarization
+
+hardware/adapt/modelhub ──> preflight ──> model cache ──> actual runtime device
+controller ──(Qt signals)─> QML; workers never touch QML objects directly
+```
+
 Распознавание и запись выполняются вне GUI-потока. Черновой Live-текст хранится
 только в памяти, а SQLite получает подтверждённые сегменты. В live-режиме не
 запрашиваются word timestamps, чтобы уменьшить задержку. В медиа-режиме они
@@ -219,9 +249,11 @@ docs/
 Windows:
 
 ```powershell
-$env:PYTHONPATH = "src"
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev,server]"
+.\.venv\Scripts\dotaudio.exe
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\ruff.exe check src tests
+.\.venv\Scripts\python.exe -m ruff check src tests
 $env:QT_QPA_PLATFORM = "offscreen"
 .\.venv\Scripts\python.exe -m dotaudio --smoke-test --data-dir .local-check
 ```
@@ -229,18 +261,26 @@ $env:QT_QPA_PLATFORM = "offscreen"
 Linux / macOS:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest -q
-.venv/bin/ruff check src tests
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev,server]'
+.venv/bin/dotaudio
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check src tests
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m dotaudio --smoke-test --data-dir .local-check
 ```
 
-Последняя проверка на машине разработки (Windows): связанные с портом тесты
-зелёные; полный прогон около 505 passed / 11 skipped при известных падениях
-четырёх тестов `test_engine.py` из-за поля `confidence`. `ruff check src tests`
-без ошибок. Реальные микрофон, системный звук, GPU и FFmpeg зависят от
-конкретного компьютера и проверяются на нём вручную. Ubuntu и macOS в этой
-сессии не прогонялись end-to-end - установщик и ветки кода добавлены, ручной
-чеклист на целевых машинах ещё впереди.
+Последняя проверка на машине разработки (Windows): `552 passed, 11 skipped`
+без `tests/test_updater.py`; полный прогон даёт `555 passed, 11 skipped, 5
+errors`, потому что в окружении отсутствует Git helper `git-upload-pack` для
+fixture bare remote. `ruff check src tests` и QML smoke-test проходят. Реальные
+микрофон, системный звук, GPU и FFmpeg зависят от конкретного компьютера и
+проверяются на нём вручную. Ubuntu и macOS в этой сессии не прогонялись
+end-to-end - установщик и ветки кода добавлены, ручной чеклист на целевых
+машинах ещё впереди.
+
+LoC-бейдж пересчитан fallback-методом: непустые строки без однострочных
+комментариев в `src/`, `tests/` и `deploy/`; пакет `code-counter-ntwusr` в
+изолированном окружении недоступен.
 
 ## Стек
 
@@ -256,6 +296,7 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m dotaudio --smoke-test --data-dir .
 
 ## Документы
 
+- [План закрытия обратной связи](docs/FEEDBACK_PLAN.md)
 - [Описание продукта](docs/PRODUCT.md)
 - [Архитектура](docs/ARCHITECTURE.md)
 - [Исследование решений](docs/RESEARCH.md)

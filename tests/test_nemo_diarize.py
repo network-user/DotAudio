@@ -270,6 +270,47 @@ def test_device_choice_reaches_the_runtime(monkeypatch, device, expected):
     assert "--offline" in seen[0]
 
 
+def test_cuda_failure_retries_diarization_on_explicit_cpu(monkeypatch):
+    """Сломанная/занятая CUDA не должна оставлять транскрибацию без голосов."""
+
+    seen: list[list[str]] = []
+    statuses: list[str] = []
+    monkeypatch.setattr(nemo_diarize, "executable", lambda: "nemo-speech")
+    monkeypatch.setattr(nemo_diarize, "ensure_model", lambda *a, **k: None)
+
+    def fake_run(command, timeout, cancel=None):
+        del timeout, cancel
+        seen.append(command)
+        device_flag = ""
+        if "--device" in command:
+            device_flag = command[command.index("--device") + 1]
+        if device_flag == "cuda:0":
+            return subprocess.CompletedProcess(
+                command, 1, "", "CUDA out of memory while loading Sortformer"
+            )
+        target = command[command.index("--output") + 1]
+        with open(target, "w", encoding="utf-8") as out:
+            out.write('{"segments": [{"start": 0, "end": 1, "speaker": 1}]}')
+        return _completed()
+
+    monkeypatch.setattr(nemo_diarize, "_run", fake_run)
+    turns = diarize_audio(
+        np.zeros(16000, dtype=np.float32),
+        device="cuda",
+        on_status=statuses.append,
+    )
+
+    assert len(turns) == 1
+    flags = [
+        command[command.index("--device") + 1]
+        for command in seen
+        if "--device" in command
+    ]
+    assert flags[0] == "cuda:0"
+    assert "cpu" in flags
+    assert any("процессоре" in status for status in statuses)
+
+
 def test_diarize_splits_long_audio_into_windows(monkeypatch):
     """Час нельзя отдать Sortformer целиком: каждый кусок - отдельный CLI."""
 

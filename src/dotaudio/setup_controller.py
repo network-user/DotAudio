@@ -15,6 +15,7 @@ from PySide6.QtCore import Property, QObject, QTimer, Signal, Slot
 from dotaudio import modelhub
 from dotaudio import setup as plan
 from dotaudio.controller import hardware_summary
+from dotaudio.diag import classify_setup_error, normalise_setup_progress
 from dotaudio.engine import Engine
 from dotaudio.llm import get_model
 
@@ -81,6 +82,12 @@ class SetupController(QObject):
         self._overall = 0.0
         self._message = ""
         self._error = ""
+        self._error_info: dict = {
+            "active": False,
+            "code": "",
+            "advice": [],
+            "actions": [],
+        }
         self._busy = False
         self._cancel = threading.Event()
         self._worker: threading.Thread | None = None
@@ -135,6 +142,10 @@ class SetupController(QObject):
     def error(self) -> str:
         return self._error
 
+    @Property("QVariantMap", notify=changed)
+    def errorInfo(self) -> dict:
+        return dict(self._error_info)
+
     @Property(bool, notify=changed)
     def busy(self) -> bool:
         return self._busy
@@ -159,6 +170,12 @@ class SetupController(QObject):
         self._phase = "scan"
         self._busy = True
         self._error = ""
+        self._error_info = {
+            "active": False,
+            "code": "",
+            "advice": [],
+            "actions": [],
+        }
         self._message = "Смотрим, что есть на этом компьютере…"
         self._overall = 0.0
         self._steps = []
@@ -234,6 +251,12 @@ class SetupController(QObject):
             self._busy = False
             self._message = ""
             self._error = ""
+            self._error_info = {
+                "active": False,
+                "code": "",
+                "advice": [],
+                "actions": [],
+            }
             self.changed.emit()
             self.progressChanged.emit()
             try:
@@ -279,6 +302,12 @@ class SetupController(QObject):
         self._phase = "run"
         self._busy = True
         self._error = ""
+        self._error_info = {
+            "active": False,
+            "code": "",
+            "advice": [],
+            "actions": [],
+        }
         self._overall = self._compute_overall()
         self._message = "Готовим окружение…"
         self.changed.emit()
@@ -508,7 +537,16 @@ class SetupController(QObject):
     # -- прогресс UI -------------------------------------------------------
 
     def _on_step_progress(self, step_id: str, percent: float, message: str) -> None:
-        self._progress_pending = (str(step_id), float(percent), str(message or ""))
+        payload = normalise_setup_progress(
+            {"percent": percent, "message": message},
+            step_id=str(step_id),
+        )
+        safe_percent = payload.get("percent")
+        self._progress_pending = (
+            str(step_id),
+            float(safe_percent if safe_percent is not None else 0.0),
+            str(payload.get("message") or ""),
+        )
         if not self._progress_ui.isActive():
             self._progress_ui.start()
 
@@ -544,6 +582,12 @@ class SetupController(QObject):
             break
         if error and not ok:
             self._error = error
+            self._error_info = classify_setup_error(
+                error,
+                phase="run",
+                step_id=str(step_id),
+                cancelled=self._cancel.is_set(),
+            )
         self._overall = self._compute_overall()
         self.progressChanged.emit()
         self.changed.emit()
@@ -583,11 +627,23 @@ class SetupController(QObject):
             self._phase = "done"
             self._message = "Всё готово к работе"
             self._error = ""
+            self._error_info = {
+                "active": False,
+                "code": "",
+                "advice": [],
+                "actions": [],
+            }
             self._mark_completed()
         else:
             self._phase = "done"
             self._message = error or "Настройка завершилась с ошибками"
             self._error = error or self._error
+            if self._error:
+                self._error_info = classify_setup_error(
+                    self._error,
+                    phase="run",
+                    cancelled=self._cancel.is_set(),
+                )
             self._mark_completed()
         self.changed.emit()
         self.progressChanged.emit()

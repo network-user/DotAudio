@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from math import ceil
 from typing import Any
 
 PROFILE_FOR_MODEL = {
@@ -31,6 +32,236 @@ WEAK_CPU_THREADS = 4
 STRONG_CPU_THREADS = 8
 # RTX 3060 Laptop обычно 6 ГБ: medium влезает при CUDA float16.
 COMFORTABLE_VRAM_GB = 6.0
+
+# These are conservative *load budgets*, not speed benchmarks.  The model
+# catalogue in the UI describes the same families by download size and total
+# RAM; this table adds headroom for the native runtime and temporary buffers so
+# a model is rejected before CTranslate2 starts an avoidable CUDA allocation.
+WHISPER_MODEL_DISK_MB = {
+    "tiny": 75,
+    "base": 142,
+    "small": 483,
+    "medium": 1530,
+    "large-v3": 3100,
+    "turbo": 1620,
+}
+WHISPER_MODEL_RAM_MB = {
+    "tiny": 1536,
+    "base": 2048,
+    "small": 3072,
+    "medium": 6144,
+    "large-v3": 12288,
+    "turbo": 8192,
+}
+WHISPER_MODEL_VRAM_MB = {
+    "tiny": 1024,
+    "base": 1536,
+    "small": 2560,
+    "medium": 5120,
+    "large-v3": 10240,
+    "turbo": 7680,
+}
+
+_COMPUTE_MEMORY_MULTIPLIER = {
+    "float16": 1.0,
+    "int8": 0.78,
+    "int8_float16": 0.9,
+    "int8_float32": 1.0,
+    "float32": 1.8,
+}
+
+
+def normalise_whisper_model(model: str) -> str:
+    """Return the built-in model key, preserving custom model paths."""
+
+    value = str(model or "").strip().casefold()
+    if value in {"large-v3-turbo", "faster-whisper-large-v3-turbo"}:
+        return "turbo"
+    if value.startswith("faster-whisper-"):
+        value = value.removeprefix("faster-whisper-")
+    return value
+
+
+def _number(mapping: dict, *keys: str) -> float | None:
+    for key in keys:
+        value = mapping.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _gpu_budget_gb(hardware: dict) -> float | None:
+    """Prefer current free VRAM; fall back to total VRAM when it is unknown."""
+
+    direct_free = _number(
+        hardware,
+        "cudaVramFreeGb",
+        "gpuVramFreeGb",
+        "vram_free_gb",
+    )
+    if direct_free is not None:
+        return max(0.0, direct_free)
+    direct_total = _number(
+        hardware,
+        "cudaVramGb",
+        "gpuVramGb",
+        "vram_gb",
+    )
+    if direct_total is not None:
+        return max(0.0, direct_total)
+
+    candidates: list[float] = []
+    for gpu in hardware.get("gpus") or ():
+        if not isinstance(gpu, dict):
+            continue
+        vendor = str(gpu.get("vendor") or "").casefold()
+        name = str(gpu.get("name") or "").casefold()
+        if vendor not in {"nvidia", ""} and "nvidia" not in name:
+            continue
+        free = _number(gpu, "vramFreeMb", "vram_free_mb")
+        total = _number(gpu, "vramMb", "vram_mb")
+        value = free if free is not None else total
+        if value is not None:
+            candidates.append(max(0.0, value) / 1024.0)
+    return max(candidates) if candidates else None
+
+
+def whisper_memory_requirements(
+    model: str,
+    *,
+    device: str = "cpu",
+    compute_type: str = "int8",
+) -> dict[str, Any]:
+    """Return conservative memory requirements for a built-in Whisper model.
+
+    Unknown names (including custom local models) intentionally return
+    ``known=False``.  The engine must still try those models and let their
+    backend decide; inventing a budget for an arbitrary model would be less
+    safe than reporting that the estimate is unavailable.
+    """
+
+    name = normalise_whisper_model(model)
+    disk_mb = WHISPER_MODEL_DISK_MB.get(name)
+    ram_mb = WHISPER_MODEL_RAM_MB.get(name)
+    vram_mb = WHISPER_MODEL_VRAM_MB.get(name)
+    if disk_mb is None or ram_mb is None or vram_mb is None:
+        return {
+            "known": False,
+            "model": name,
+            "device": device,
+            "compute_type": compute_type,
+            "disk_mb": None,
+            "ram_mb": None,
+            "vram_mb": None,
+        }
+
+    multiplier = _COMPUTE_MEMORY_MULTIPLIER.get(compute_type, 1.0)
+    if device == "cuda":
+        vram_mb = ceil(vram_mb * multiplier)
+        # CUDA still needs host-side metadata and staging buffers.
+        ram_mb = ceil(ram_mb * 0.75)
+    else:
+        ram_mb = ceil(ram_mb * multiplier)
+        vram_mb = 0
+    return {
+        "known": True,
+        "model": name,
+        "device": device,
+        "compute_type": compute_type,
+        "disk_mb": disk_mb,
+        "ram_mb": ram_mb,
+        "vram_mb": vram_mb,
+    }
+
+
+def assess_whisper_model_fit(
+    model: str,
+    hardware: dict,
+    *,
+    device: str = "cpu",
+    compute_type: str = "int8",
+) -> dict[str, Any]:
+    """Assess whether a model has enough *currently available* memory.
+
+    ``state=unknown`` is deliberately non-blocking: missing telemetry should
+    not make a custom model unusable.  ``insufficient`` is only returned when
+    the relevant available-memory value is known and below the conservative
+    budget.
+    """
+
+    requirement = whisper_memory_requirements(
+        model, device=device, compute_type=compute_type
+    )
+    if not requirement["known"]:
+        return {
+            **requirement,
+            "state": "unknown",
+            "available_mb": None,
+            "headroom_mb": None,
+            "reason": "Нет безопасной оценки для пользовательской модели.",
+        }
+
+    available_ram_gb = _number(
+        hardware, "ram_available_gb", "ramAvailableGb", "available_ram_gb"
+    )
+    available_ram_mb = (
+        None if available_ram_gb is None else max(0.0, available_ram_gb * 1024)
+    )
+    available_vram_gb = _gpu_budget_gb(hardware)
+    available_vram_mb = (
+        None if available_vram_gb is None else max(0.0, available_vram_gb * 1024)
+    )
+
+    if device == "cuda":
+        available_mb = available_vram_mb
+        required_mb = float(requirement["vram_mb"])
+        resource_name = "VRAM"
+    else:
+        available_mb = available_ram_mb
+        required_mb = float(requirement["ram_mb"])
+        resource_name = "ОЗУ"
+
+    if available_mb is None:
+        state = "unknown"
+        headroom_mb = None
+        reason = f"Свободная {resource_name} не определена; проверка будет выполнена движком."
+    else:
+        headroom_mb = available_mb - required_mb
+        state = "fit" if headroom_mb >= 0 else "insufficient"
+        reason = (
+            f"Нужно около {required_mb / 1024:.1f} ГБ {resource_name}, "
+            f"доступно {available_mb / 1024:.1f} ГБ."
+        )
+
+    ram_state = "unknown"
+    if available_ram_mb is not None:
+        ram_state = (
+            "fit"
+            if available_ram_mb >= float(requirement["ram_mb"])
+            else "insufficient"
+        )
+    if ram_state == "insufficient":
+        state = "insufficient"
+        reason += " Недостаточно доступного ОЗУ для безопасной загрузки."
+
+    return {
+        **requirement,
+        "state": state,
+        "available_mb": None if available_mb is None else round(available_mb),
+        "available_ram_mb": None
+        if available_ram_mb is None
+        else round(available_ram_mb),
+        "available_vram_mb": None
+        if available_vram_mb is None
+        else round(available_vram_mb),
+        "headroom_mb": None if headroom_mb is None else round(headroom_mb),
+        "ram_state": ram_state,
+        "reason": reason,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,8 +322,17 @@ def classify_tier(hardware: dict) -> str:
     cuda = int(hardware.get("cuda_devices") or 0)
     advice = str(hardware.get("computeAdvice") or "")
     threads = int(hardware.get("threads") or 0)
-    vram = _gpu_vram_gb(hardware)
+    # A card can have plenty of total VRAM but almost none free because of a
+    # browser, game, or another local model.  Prefer the live free value when
+    # it is available; the old total-only behaviour remains the fallback.
+    vram = _gpu_budget_gb(hardware)
     nvidia = _has_nvidia(hardware)
+    available_ram = _number(
+        hardware, "ram_available_gb", "ramAvailableGb", "available_ram_gb"
+    )
+
+    if available_ram is not None and available_ram < 1.5:
+        return "cpu_minimal"
 
     if cuda > 0 or advice == "ready":
         if vram is not None and vram >= COMFORTABLE_VRAM_GB:
@@ -262,10 +502,13 @@ __all__ = [
     "STRONG_CPU_THREADS",
     "WEAK_CPU_THREADS",
     "WhisperPlan",
+    "assess_whisper_model_fit",
     "classify_tier",
     "integrated_whisper_hint",
     "live_cpu_threads",
+    "normalise_whisper_model",
     "plan_whisper",
     "recommend_device",
     "recommended_whisper",
+    "whisper_memory_requirements",
 ]

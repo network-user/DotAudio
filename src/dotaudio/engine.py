@@ -73,7 +73,7 @@ LIVE_LANGUAGE_CONFIDENCE = 0.7
 # Тогда тот же GPU берём int8, а не валим всю автонастройку.
 CUDA_COMPUTE_TYPES = ("float16", "int8", "int8_float16", "float32")
 CPU_COMPUTE_TYPES = ("int8", "int8_float32", "float32")
-_MODEL_LOAD_ERRORS = (RuntimeError, OSError, ValueError)
+_MODEL_LOAD_ERRORS = (RuntimeError, OSError, ValueError, MemoryError)
 
 # Файлы модели, нужные faster-whisper: тот же набор, что качает его
 # download_model. Прогресс считается по фактическим байтам этих файлов.
@@ -91,6 +91,23 @@ REPO_ALIASES = {"turbo": "large-v3-turbo"}
 
 class DownloadCancelled(RuntimeError):
     """Загрузка модели остановлена по просьбе пользователя."""
+
+
+class ModelPreflightError(RuntimeError):
+    """The observed memory budget is too small for a safe model load."""
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        device: str,
+        required_mb: int | None = None,
+        available_mb: int | None = None,
+    ) -> None:
+        super().__init__(detail)
+        self.device = device
+        self.required_mb = required_mb
+        self.available_mb = available_mb
 
 
 class DownloadTracker:
@@ -275,6 +292,12 @@ class RecognitionConfig:
     # the sentence instead of starting a new one.  Live only; bounded by
     # LIVE_CONTEXT_CHARS from the end.
     live_context: str = ""
+    # Optional stationary-noise cleanup for numpy sources.  It is applied
+    # outside the decoder and therefore remains disabled unless the user opts
+    # in from Settings.
+    noise_reduction: bool = False
+    noise_reduction_strength: float = 0.75
+    noise_highpass_hz: float = 0.0
 
 
 class Engine:
@@ -386,13 +409,13 @@ class Engine:
         if self._cancelled(cancel):
             self._status(on_status, "cancelled")
             raise DownloadCancelled("model prepare cancelled")
-        model, device = self._model_for(config.model, config.device, on_status)
+        model, device = self._model_for(
+            config.model, config.device, on_status, cancel=cancel
+        )
         if config.live_stream:
-            self._status(
-                on_status,
-                "warming_gpu" if device == "cuda" else "warming_model",
+            warm_error = self._warm_live_decoder(
+                model, config, device, cancel=cancel
             )
-            warm_error = self._warm_live_decoder(model, config, device)
             if warm_error is not None:
                 if (
                     self._should_fallback_cpu(config.device, warm_error)
@@ -400,8 +423,12 @@ class Engine:
                 ):
                     self._status(on_status, "gpu_unavailable_falling_back_cpu")
                     self._drop_model(config.model, "cuda")
-                    model, device = self._model_for(config.model, "cpu", on_status)
-                    cpu_error = self._warm_live_decoder(model, config, device)
+                    model, device = self._model_for(
+                        config.model, "cpu", on_status, cancel=cancel
+                    )
+                    cpu_error = self._warm_live_decoder(
+                        model, config, device, cancel=cancel
+                    )
                     if cpu_error is not None:
                         raise cpu_error
                 else:
@@ -442,13 +469,20 @@ class Engine:
         )
         self._status(on_status, "loading_model")
         try:
-            model, device = self._model_for(live_config.model, live_config.device, on_status)
+            model, device = self._model_for(
+                live_config.model,
+                live_config.device,
+                on_status,
+                cancel=cancel,
+            )
             if self._cancelled(cancel):
                 payload.update(
                     code="cancelled", device=device, detail="Проверка отменена."
                 )
                 return payload
-            warm = self._warm_live_decoder(model, live_config, device)
+            warm = self._warm_live_decoder(
+                model, live_config, device, cancel=cancel
+            )
             if (
                 warm is not None
                 and device == "cuda"
@@ -456,8 +490,12 @@ class Engine:
             ):
                 self._status(on_status, "gpu_unavailable_falling_back_cpu")
                 self._drop_model(config.model, "cuda")
-                model, device = self._model_for(config.model, "cpu", on_status)
-                warm = self._warm_live_decoder(model, live_config, device)
+                model, device = self._model_for(
+                    config.model, "cpu", on_status, cancel=cancel
+                )
+                warm = self._warm_live_decoder(
+                    model, live_config, device, cancel=cancel
+                )
             if warm is not None:
                 raise warm
         except Exception as exc:  # noqa: BLE001
@@ -509,6 +547,11 @@ class Engine:
         return cancel is not None and cancel.is_set()
 
     @staticmethod
+    def _raise_if_cancelled(cancel: Event | None) -> None:
+        if Engine._cancelled(cancel):
+            raise DownloadCancelled("model operation cancelled")
+
+    @staticmethod
     def _status(callback: StatusCallback | None, value: str) -> None:
         if callback is None:
             return
@@ -543,6 +586,11 @@ class Engine:
             return self._run_local(
                 source, config, config.device, cancel, on_segment, on_status
             )
+        except DownloadCancelled:
+            if self._cancelled(cancel):
+                self._status(on_status, "cancelled")
+                return []
+            raise
         except _MODEL_LOAD_ERRORS as exc:
             if not self._should_fallback_cpu(config.device, exc):
                 raise
@@ -562,13 +610,28 @@ class Engine:
         on_status: StatusCallback | None,
     ) -> list[Segment]:
         model, actual_device = self._model_for(
-            config.model, requested_device, on_status
+            config.model,
+            requested_device,
+            on_status,
+            cancel=cancel,
         )
         if requested_device == "cuda" and actual_device == "cpu":
             self._status(on_status, "gpu_unavailable_falling_back_cpu")
         if self._cancelled(cancel):
             self._status(on_status, "cancelled")
             return []
+
+        if config.noise_reduction and isinstance(source, np.ndarray):
+            from dotaudio.audio_preprocess import PreprocessConfig, preprocess_audio
+
+            source = preprocess_audio(
+                source,
+                PreprocessConfig(
+                    enabled=True,
+                    reduction_strength=config.noise_reduction_strength,
+                    highpass_hz=config.noise_highpass_hz,
+                ),
+            )
 
         if (config.live_preview or config.live_stream) and isinstance(source, np.ndarray):
             live = self._run_live_window(
@@ -971,7 +1034,9 @@ class Engine:
         model_name: str,
         requested_device: str,
         on_status: StatusCallback | None = None,
+        cancel: Event | None = None,
     ) -> tuple[Any, str]:
+        self._raise_if_cancelled(cancel)
         if requested_device == "auto":
             # Reuse the device that successfully handled the previous call.
             # In particular, after a CUDA runtime failure _run_local loads the
@@ -996,7 +1061,15 @@ class Engine:
         last_error: BaseException | None = None
         for device in candidates:
             try:
-                return self._get_or_load_model(model_name, device, on_status), device
+                return (
+                    self._get_or_load_model(
+                        model_name,
+                        device,
+                        on_status,
+                        cancel=cancel,
+                    ),
+                    device,
+                )
             except _MODEL_LOAD_ERRORS as exc:
                 last_error = exc
                 if device == "cuda" and self._should_fallback_cpu(
@@ -1014,7 +1087,11 @@ class Engine:
             return (model_name, requested_device) in self._models
 
     def _warm_live_decoder(
-        self, model: Any, config: RecognitionConfig, device: str
+        self,
+        model: Any,
+        config: RecognitionConfig,
+        device: str,
+        cancel: Event | None = None,
     ) -> BaseException | None:
         """Прогреть тот же путь, которым идёт Live, а не полный Whisper.transcribe.
 
@@ -1023,6 +1100,8 @@ class Engine:
         Тишина ~0,5 с достаточна, чтобы собрать mel и один generate.
         """
 
+        if self._cancelled(cancel):
+            return DownloadCancelled("model warmup cancelled")
         silence = np.zeros(8000, dtype=np.float32)
         try:
             # Без внешнего inference_lock: ``_run_live_window`` берёт его сам.
@@ -1045,6 +1124,8 @@ class Engine:
                     condition_on_previous_text=False,
                 )
                 list(segments)
+            if self._cancelled(cancel):
+                return DownloadCancelled("model warmup cancelled")
         except Exception as exc:
             return exc
         return None
@@ -1113,7 +1194,9 @@ class Engine:
         model_name: str,
         device: str,
         on_status: StatusCallback | None = None,
+        cancel: Event | None = None,
     ) -> Any:
+        self._raise_if_cancelled(cancel)
         key = (model_name, device)
         with self._model_lock:
             cached = self._models.get(key)
@@ -1130,6 +1213,7 @@ class Engine:
             register_cuda_dll_directories()
             get_arbiter().acquire("asr")
         with self._load_lock:
+            self._raise_if_cancelled(cancel)
             with self._model_lock:
                 cached = self._models.get(key)
                 if cached is not None:
@@ -1141,8 +1225,16 @@ class Engine:
             loaded = None
             used_type = ""
             for compute_type in self._compute_types_for(model_name, device):
-                if device == "cuda":
-                    self._status(on_status, f"loading_cuda_{compute_type}")
+                self._raise_if_cancelled(cancel)
+                try:
+                    self._preflight_model(model_name, device, compute_type)
+                except ModelPreflightError as exc:
+                    last_error = exc
+                    # A lower-memory CUDA compute type may still fit.  Keep
+                    # trying it before falling back to the CPU path.
+                    if device == "cuda":
+                        continue
+                    raise
                 try:
                     loaded = WhisperModel(
                         model_name,
@@ -1169,6 +1261,50 @@ class Engine:
                 if used_type:
                     self._compute_ok[key] = used_type
                 return loaded
+
+    @staticmethod
+    def _preflight_model(
+        model_name: str,
+        device: str,
+        compute_type: str,
+    ) -> None:
+        """Reject only a measured, clearly insufficient memory budget.
+
+        Hardware probing is intentionally best effort.  A missing telemetry
+        source must never make a custom model unusable; only the explicit
+        ``insufficient`` result blocks a native allocation.
+        """
+
+        from dotaudio.adapt import assess_whisper_model_fit
+        from dotaudio.hardware import probe
+
+        if device not in {"cpu", "cuda"}:
+            return
+        try:
+            hardware = probe(include_optional=False).as_dict()
+            fit = assess_whisper_model_fit(
+                model_name,
+                hardware,
+                device=device,
+                compute_type=compute_type,
+            )
+        except Exception:
+            return
+        if fit.get("state") != "insufficient":
+            return
+        available = fit.get("available_mb")
+        required = fit.get("ram_mb" if device == "cpu" else "vram_mb")
+        resource = "ОЗУ" if device == "cpu" else "видеопамяти"
+        detail = str(
+            fit.get("reason")
+            or f"Недостаточно {resource} для модели {model_name}."
+        )
+        raise ModelPreflightError(
+            detail,
+            device=device,
+            required_mb=int(required) if required is not None else None,
+            available_mb=int(available) if available is not None else None,
+        )
 
     def _drop_model(self, model_name: str, device: str) -> None:
         with self._model_lock:
@@ -1199,6 +1335,8 @@ class Engine:
 
     @staticmethod
     def _is_cuda_error(error: BaseException) -> bool:
+        if isinstance(error, ModelPreflightError):
+            return error.device == "cuda"
         text = f"{type(error).__name__}: {error}".lower()
         if Engine._is_compute_type_error(error):
             return True
@@ -1376,4 +1514,10 @@ class Engine:
         }
 
 
-__all__ = ["DownloadCancelled", "Engine", "RecognitionConfig", "Segment"]
+__all__ = [
+    "DownloadCancelled",
+    "Engine",
+    "ModelPreflightError",
+    "RecognitionConfig",
+    "Segment",
+]

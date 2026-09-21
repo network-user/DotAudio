@@ -259,6 +259,7 @@ Item {
                         }
                     }
                     Rectangle {
+                        id: gpuProgressBar
                         visible: bridge.gpuSetup.busy || (Number(bridge.gpuSetup.percent) > 0 && String(bridge.gpuSetup.phase) !== "idle")
                         Layout.fillWidth: true
                         height: 6
@@ -269,13 +270,40 @@ Item {
                             height: parent.height
                             radius: 3
                             color: Theme.text
+                            visible: Number(bridge.gpuSetup.percent) >= 0
                             Behavior on width { NumberAnimation { duration: Theme.baseMs } }
+                        }
+                        Rectangle {
+                            id: gpuIndeterminate
+                            width: parent.width * 0.24
+                            height: parent.height
+                            radius: 3
+                            color: Theme.text
+                            visible: bridge.gpuSetup.busy && Number(bridge.gpuSetup.percent) < 0
+                            SequentialAnimation on x {
+                                running: gpuIndeterminate.visible
+                                loops: Animation.Infinite
+                                NumberAnimation {
+                                    from: 0
+                                    to: Math.max(0, gpuProgressBar.width - gpuIndeterminate.width)
+                                    duration: 900
+                                    easing.type: Easing.InOutQuad
+                                }
+                                NumberAnimation {
+                                    from: Math.max(0, gpuProgressBar.width - gpuIndeterminate.width)
+                                    to: 0
+                                    duration: 900
+                                    easing.type: Easing.InOutQuad
+                                }
+                            }
                         }
                     }
                     Label {
                         visible: bridge.gpuSetup.busy || String(bridge.gpuSetup.error || "").length > 0
                         Layout.fillWidth: true
                         text: {
+                            if (bridge.gpuSetup.busy && Number(bridge.gpuSetup.percent) < 0)
+                                return "Инициализация · процент загрузки недоступен · " + String(bridge.gpuSetup.message || "")
                             if (bridge.gpuSetup.busy)
                                 return Math.round(Number(bridge.gpuSetup.percent || 0)) + "% · " + String(bridge.gpuSetup.message || "")
                             return String(bridge.gpuSetup.error || bridge.gpuSetup.message || "")
@@ -373,6 +401,13 @@ Item {
                             onClicked: bridge.setSetting("speech_mode", "en")
                         }
                         PillButton {
+                            text: "Другой язык"
+                            primary: String(bridge.settings.speech_mode) === "multilingual"
+                            onClicked: bridge.setSetting("speech_mode", "multilingual")
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Whisper поддерживает много языков; выберите код ниже или оставьте автоопределение"
+                        }
+                        PillButton {
                             text: "EN → RU"
                             primary: String(bridge.settings.speech_mode) === "en_ru"
                             onClicked: bridge.setSetting("speech_mode", "en_ru")
@@ -380,6 +415,39 @@ Item {
                             ToolTip.text: "Английская речь → русский текст, всё на этом компьютере"
                         }
                         Item { Layout.fillWidth: true }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: String(bridge.settings.speech_mode) === "multilingual"
+                        Label { text: "Язык распознавания"; color: Theme.muted; font.pixelSize: Theme.fsSmall }
+                        Dropdown {
+                            id: languageChooser
+                            Layout.fillWidth: true
+                            model: [
+                                { name: "Автоопределение", id: "auto" },
+                                { name: "Русский", id: "ru" },
+                                { name: "English", id: "en" },
+                                { name: "中文", id: "zh" },
+                                { name: "日本語", id: "ja" },
+                                { name: "한국어", id: "ko" },
+                                { name: "Deutsch", id: "de" },
+                                { name: "Español", id: "es" },
+                                { name: "Français", id: "fr" },
+                                { name: "Italiano", id: "it" },
+                                { name: "Português", id: "pt" },
+                                { name: "Українська", id: "uk" },
+                                { name: "العربية", id: "ar" },
+                                { name: "हिन्दी", id: "hi" }
+                            ]
+                            textRole: "name"
+                            currentIndex: {
+                                var selected = String(bridge.settings.language || "auto")
+                                for (var i = 0; i < model.length; i++)
+                                    if (String(model[i].id) === selected) return i
+                                return 0
+                            }
+                            onActivated: function(index) { bridge.setSetting("language", String(languageChooser.model[index].id)) }
+                        }
                     }
                     RowLayout {
                         Layout.fillWidth: true
@@ -405,11 +473,50 @@ Item {
                             visible: String(bridge.translateModelState.phase || "") === "download"
                                      || String(bridge.translateModelState.phase || "") === "extract"
                                      || String(bridge.translateModelState.phase || "") === "convert"
-                            onClicked: bridge.cancelTranslateModel()
+                         onClicked: bridge.cancelTranslateModel()
+                         }
+                     }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.gapSm
+                        Text {
+                            Layout.fillWidth: true
+                            text: "Свои модели: CTranslate2, язык источника → язык результата"
+                            color: Theme.faint
+                            font.pixelSize: Theme.fsSmall
+                            wrapMode: Text.Wrap
+                        }
+                        PillButton {
+                            text: "Импортировать модель"
+                            compact: true
+                            onClicked: bridge.importTranslationModel()
                         }
                     }
-                }
-            }
+                    Repeater {
+                        model: bridge.translationModels || []
+                        delegate: RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.gapSm
+                            Label {
+                                Layout.fillWidth: true
+                                text: "• " + String(modelData.label || modelData.id || "")
+                                      + " · " + String(modelData.pair || "")
+                                      + (modelData.ready ? " · готова" : " · нужна проверка")
+                                color: modelData.ready ? Theme.muted : Theme.rec
+                                font.pixelSize: Theme.fsSmall
+                                elide: Text.ElideRight
+                            }
+                            PillButton {
+                                compact: true
+                                text: String(bridge.settings.translation_model_id || "") === String(modelData.id)
+                                      ? "Выбрана" : "Выбрать"
+                                enabled: Boolean(modelData.ready)
+                                onClicked: bridge.setSetting("translation_model_id", String(modelData.id))
+                            }
+                        }
+                    }
+                 }
+             }
             Rectangle {
                 Layout.fillWidth: true
                 implicitHeight: deviceBox.implicitHeight + 2 * Theme.padCard
@@ -581,6 +688,49 @@ Item {
                         font.pixelSize: Theme.fsSmall
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
+                    }
+                }
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: audioBox.implicitHeight + 2 * Theme.padCard
+                radius: Theme.radiusLg
+                color: Theme.surface
+                border.width: 1
+                border.color: Theme.border
+                ColumnLayout {
+                    id: audioBox
+                    anchors.fill: parent
+                    anchors.margins: Theme.padCard
+                    spacing: Theme.gapSm
+                    Label { text: "Обработка аудио"; color: Theme.text; font.pixelSize: Theme.fsTitle; font.weight: Font.DemiBold }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "Для постоянного фонового шума можно включить мягкое спектральное подавление. Исходная запись не меняется."
+                        color: Theme.muted
+                        font.pixelSize: Theme.fsSmall
+                        wrapMode: Text.Wrap
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { Layout.fillWidth: true; text: "Подавление стационарного шума"; color: Theme.text; font.pixelSize: Theme.fsLabel }
+                        ToggleSwitch {
+                            checked: Boolean(bridge.settings.noise_reduction)
+                            onToggled: bridge.setSetting("noise_reduction", checked)
+                        }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: Boolean(bridge.settings.noise_reduction)
+                        Label { Layout.fillWidth: true; text: "Сила фильтра: " + Math.round(Number(bridge.settings.noise_reduction_strength || 0.75) * 100) + "%"; color: Theme.muted; font.pixelSize: Theme.fsSmall }
+                        PillButton { text: "Мягче"; compact: true; onClicked: bridge.setSetting("noise_reduction_strength", 0.45) }
+                        PillButton { text: "Сильнее"; compact: true; onClicked: bridge.setSetting("noise_reduction_strength", 0.85) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { Layout.fillWidth: true; text: "Live-окно: " + Number(bridge.settings.live_preview_window_seconds || 1.8).toFixed(1) + " с"; color: Theme.muted; font.pixelSize: Theme.fsSmall }
+                        PillButton { text: "Короче"; compact: true; onClicked: bridge.setSetting("live_preview_window_seconds", Math.max(0.4, Number(bridge.settings.live_preview_window_seconds || 1.8) - 0.2)) }
+                        PillButton { text: "Длиннее"; compact: true; onClicked: bridge.setSetting("live_preview_window_seconds", Math.min(8.0, Number(bridge.settings.live_preview_window_seconds || 1.8) + 0.2)) }
                     }
                 }
             }

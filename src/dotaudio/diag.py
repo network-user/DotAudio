@@ -7,12 +7,331 @@
 
 from __future__ import annotations
 
+import math
 import threading
 from datetime import datetime
 from pathlib import Path
 
 LOG_MAX_BYTES = 2_000_000
 TRACE_LIMIT = 40
+
+
+def _empty_setup_error() -> dict:
+    """Пустая ошибка в стабильном формате для первого запуска и QML."""
+
+    return {
+        "active": False,
+        "code": "",
+        "title": "",
+        "message": "",
+        "detail": "",
+        "phase": "",
+        "stepId": "",
+        "severity": "info",
+        "advice": [],
+        "actions": [],
+        "retryable": False,
+        "recoverable": False,
+    }
+
+
+def normalise_setup_progress(
+    info: dict | None = None,
+    *,
+    step_id: str = "",
+    default_message: str = "",
+) -> dict:
+    """Привести callback прогресса к bounded-контракту первого запуска.
+
+    Процент считается достоверным только если его сообщил источник или если
+    известны обе границы скачивания. Для этапов загрузки/прогрева, где
+    библиотека не знает размер работы, возвращается ``determinate=False`` и
+    ``percent=None`` — интерфейс обязан показать indeterminate-состояние.
+    """
+
+    raw = dict(info or {})
+    message = str(raw.get("message") or default_message or "")
+    phase = str(raw.get("phase") or step_id or "")
+
+    def number(value, default=None):
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return default
+        return result if math.isfinite(result) else default
+
+    received = number(raw.get("bytes"), None)
+    total = number(raw.get("total"), None)
+    if received is not None:
+        received = max(0, int(received))
+    if total is not None:
+        total = max(0, int(total))
+
+    percent = number(raw.get("percent"), None)
+    if percent is not None and 0 <= percent <= 100:
+        percent = max(0.0, min(100.0, percent))
+    else:
+        percent = None
+
+    ratio = number(raw.get("ratio"), None)
+    if ratio is None and received is not None and total and total > 0:
+        ratio = received / total
+    if ratio is not None:
+        ratio = max(0.0, min(1.0, ratio))
+    if percent is None and ratio is not None and total and total > 0:
+        percent = ratio * 100.0
+
+    explicit_determinate = raw.get("determinate")
+    if explicit_determinate is None:
+        determinate = percent is not None and not bool(raw.get("indeterminate"))
+    else:
+        determinate = bool(explicit_determinate)
+    if not determinate:
+        percent = None
+
+    eta = number(raw.get("etaSeconds"), None)
+    if eta is not None:
+        eta = max(0, int(eta))
+
+    result = {
+        "stepId": str(raw.get("stepId") or step_id or ""),
+        "phase": phase,
+        "message": message,
+        "determinate": bool(determinate),
+        "indeterminate": not bool(determinate),
+        "percent": round(percent, 2) if percent is not None else None,
+        "bytes": received,
+        "totalBytes": total,
+        "ratio": round(ratio, 6) if ratio is not None else None,
+        "etaSeconds": eta,
+    }
+    for key in ("component", "source", "status"):
+        if raw.get(key) not in (None, ""):
+            result[key] = str(raw[key])
+    if raw.get("advice"):
+        result["advice"] = [str(item) for item in raw["advice"] if str(item).strip()]
+    return result
+
+
+def classify_setup_error(
+    error: BaseException | str,
+    *,
+    phase: str = "",
+    step_id: str = "",
+    cancelled: bool = False,
+) -> dict:
+    """Сделать из исключения первого запуска понятную ошибку и совет.
+
+    Поля намеренно плоские и сериализуемые: их можно передать через Qt
+    ``QVariantMap``, записать в отчёт и показать без знания конкретного
+    backend. ``detail`` сохраняет техническую причину, а ``message`` и
+    ``advice`` предназначены для пользователя.
+    """
+
+    if isinstance(error, BaseException):
+        detail = str(error).strip() or type(error).__name__
+        raw = f"{type(error).__name__}: {detail}"
+    else:
+        detail = str(error or "").strip()
+        raw = detail
+    low = raw.casefold()
+    if "modelpreflighterror" in low or "insufficient" in low or "недостаточно" in low:
+        return (
+            "Для выбранной модели сейчас не хватает доступной памяти. Выберите модель меньше, "
+            "закройте приложения, использующие GPU, или переключитесь на процессор. "
+            f"{detail}"
+        )
+    result = _empty_setup_error()
+    result.update(
+        {
+            "active": True,
+            "phase": str(phase or ""),
+            "stepId": str(step_id or ""),
+            "detail": detail[:1200],
+        }
+    )
+
+    is_cancelled = cancelled or any(
+        token in low for token in ("cancel", "cancelled", "отмен", "останов")
+    )
+    if is_cancelled:
+        result.update(
+            {
+                "code": "cancelled",
+                "title": "Подготовка остановлена",
+                "message": "Подготовка остановлена. Скачанные файлы можно использовать при следующем запуске.",
+                "severity": "info",
+                "advice": ["Нажмите «Повторить», чтобы продолжить с уже скачанного места."],
+                "actions": ["retry", "close"],
+                "retryable": True,
+                "recoverable": True,
+            }
+        )
+        return result
+
+    if any(token in low for token in ("out of memory", "oom", "std::bad_alloc", "не хват", "memory")):
+        result.update(
+            {
+                "code": "out_of_memory",
+                "title": "Не хватило памяти",
+                "message": "Модель не поместилась в доступную память видеокарты или процессора.",
+                "severity": "error",
+                "advice": [
+                    "Выберите tiny, base или small.",
+                    "Закройте приложения, которые используют видеопамять.",
+                    "Если ошибка повторится, выберите «Процессор»." ,
+                ],
+                "actions": ["smaller_model", "cpu", "retry"],
+                "retryable": True,
+                "recoverable": True,
+            }
+        )
+        return result
+
+    if any(token in low for token in ("cuda", "cublas", "cudnn", "cudart", "nvrtc", "nvidia", "видеокарт")):
+        result.update(
+            {
+                "code": "cuda_unavailable",
+                "title": "Видеокарта не запустила компонент",
+                "message": "CUDA или драйвер не позволили подготовить модель на видеокарте.",
+                "severity": "error",
+                "advice": [
+                    "Повторите подготовку после обновления драйвера NVIDIA.",
+                    "Можно продолжить на процессоре с моделью меньшего размера.",
+                    "Проверьте подробности в отчёте диагностики.",
+                ],
+                "actions": ["cpu", "retry", "report"],
+                "retryable": True,
+                "recoverable": True,
+            }
+        )
+        return result
+
+    if any(token in low for token in ("timed out", "timeout", "завис", "не ответил", "hang")):
+        result.update(
+            {
+                "code": "timeout",
+                "title": "Этап выполняется слишком долго",
+                "message": "Компонент не ответил в ожидаемое время и был остановлен.",
+                "severity": "error",
+                "advice": [
+                    "Повторите этап с моделью меньшего размера.",
+                    "Если проблема связана с GPU, выберите «Процессор».",
+                    "Сохраните отчёт, если зависание повторяется.",
+                ],
+                "actions": ["smaller_model", "cpu", "retry", "report"],
+                "retryable": True,
+                "recoverable": True,
+            }
+        )
+        return result
+
+    if any(token in low for token in ("huggingface", "hf_hub", "401", "403", "resolve", "getaddrinfo", "connection", "network", "сеть")):
+        result.update(
+            {
+                "code": "network_unavailable",
+                "title": "Не удалось скачать компонент",
+                "message": "Для первой загрузки нужен доступ к интернету; незавершённую загрузку можно продолжить позже.",
+                "severity": "error",
+                "advice": [
+                    "Проверьте соединение и доступ к Hugging Face/GitHub.",
+                    "Повторите попытку — загрузки поддерживают докачку, если backend её предоставляет.",
+                ],
+                "actions": ["retry", "report"],
+                "retryable": True,
+                "recoverable": True,
+            }
+        )
+        return result
+
+    if any(token in low for token in ("permission", "access is denied", "доступ", "denied")):
+        result.update(
+            {
+                "code": "permission_denied",
+                "title": "Нет доступа к каталогу данных",
+                "message": "Приложение не может записать модель или runtime в выбранную папку.",
+                "severity": "error",
+                "advice": [
+                    "Проверьте права на каталог данных DotAudio.",
+                    "Освободите папку от блокировки антивирусом и повторите попытку.",
+                ],
+                "actions": ["retry", "report"],
+                "retryable": True,
+                "recoverable": True,
+            }
+        )
+        return result
+
+    if any(token in low for token in ("no space", "disk full", "enospc", "места на диске")):
+        result.update(
+            {
+                "code": "disk_full",
+                "title": "Недостаточно места на диске",
+                "message": "Для выбранных компонентов не хватает свободного места.",
+                "severity": "error",
+                "advice": [
+                    "Освободите место и повторите подготовку.",
+                    "В брифинге можно отключить необязательные компоненты.",
+                ],
+                "actions": ["retry", "report"],
+                "retryable": True,
+                "recoverable": True,
+            }
+        )
+        return result
+
+    if any(token in low for token in ("nemo", "sortformer", "diariz", "голос")):
+        result.update(
+            {
+                "code": "diarization_unavailable",
+                "title": "Не удалось подготовить определение голосов",
+                "message": "Распознавание текста можно использовать без разметки голосов.",
+                "severity": "warning",
+                "advice": [
+                    "Повторите установку NeMo на CPU или освободите VRAM.",
+                    "Если проблема останется, отключите определение голосов.",
+                ],
+                "actions": ["cpu", "retry", "continue_without_diarization"],
+                "retryable": True,
+                "recoverable": True,
+            }
+        )
+        return result
+
+    if any(token in low for token in ("no module", "modulenotfound", "not found", "не найден", "не установлен")):
+        result.update(
+            {
+                "code": "missing_dependency",
+                "title": "Не найден обязательный компонент",
+                "message": "Подготовка не смогла найти нужную библиотеку или файл.",
+                "severity": "error",
+                "advice": [
+                    "Запустите подготовку ещё раз, чтобы восстановить компонент.",
+                    "Если ошибка повторяется, приложите отчёт диагностики.",
+                ],
+                "actions": ["retry", "report"],
+                "retryable": True,
+                "recoverable": True,
+            }
+        )
+        return result
+
+    result.update(
+        {
+            "code": "setup_failed",
+            "title": "Подготовка не завершилась",
+            "message": "Компонент не удалось подготовить. Подробность сохранена в отчёте.",
+            "severity": "error",
+            "advice": [
+                "Повторите этот этап.",
+                "Если ошибка повторяется, скопируйте отчёт диагностики.",
+            ],
+            "actions": ["retry", "report"],
+            "retryable": True,
+            "recoverable": True,
+        }
+    )
+    return result
 
 JOB_MODE_LABELS = {
     "live": "Live",

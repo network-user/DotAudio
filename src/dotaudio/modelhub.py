@@ -25,6 +25,51 @@ CHUNK_BYTES = 1024 * 1024
 PROGRESS_STEP_BYTES = 2 * 1024 * 1024
 
 
+class UnsafeModelPath(ValueError):
+    """A model cache path would escape its configured root or use a link."""
+
+
+def safe_join(root: Path, relative: str | os.PathLike[str], *, label: str = "path") -> Path:
+    """Join a relative model path without following an escape or symlink.
+
+    Model identifiers and tokenizer names are data supplied by a user or a
+    downloaded JSON record.  The helper keeps them below ``root`` and rejects
+    existing symlink components so later writes/removals cannot be redirected
+    outside the cache.
+    """
+
+    base = Path(root).expanduser().resolve(strict=False)
+    try:
+        text = os.fspath(relative)
+    except TypeError as exc:
+        raise UnsafeModelPath(f"{label}: путь должен быть строкой") from exc
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="strict")
+    text = str(text)
+    if not text.strip() or "\x00" in text:
+        raise UnsafeModelPath(f"{label}: путь пустой или содержит NUL")
+    candidate = Path(text)
+    if candidate.is_absolute() or candidate.drive:
+        raise UnsafeModelPath(f"{label}: абсолютные пути запрещены")
+    if any(part in {".", ".."} for part in candidate.parts):
+        raise UnsafeModelPath(f"{label}: переходы . и .. запрещены")
+    if any(":" in part for part in candidate.parts):
+        raise UnsafeModelPath(f"{label}: двоеточие в компоненте пути запрещено")
+
+    joined = base / candidate
+    current = joined
+    while current != base and current != current.parent:
+        if current.is_symlink():
+            raise UnsafeModelPath(f"{label}: символические ссылки запрещены")
+        current = current.parent
+    resolved = joined.resolve(strict=False)
+    try:
+        resolved.relative_to(base)
+    except ValueError as exc:
+        raise UnsafeModelPath(f"{label}: путь выходит за пределы каталога модели") from exc
+    return joined
+
+
 class DownloadCancelled(RuntimeError):
     """Загрузка остановлена по просьбе пользователя."""
 
@@ -54,7 +99,15 @@ def local_path(root: Path, entry: ModelFile) -> Path:
     """Куда ложится файл. Имя репозитория входит в путь, чтобы одинаковые
     имена файлов из разных репозиториев не затирали друг друга."""
 
-    return Path(root) / entry.repo.replace("/", "__") / entry.filename
+    repository = str(entry.repo or "").strip()
+    if not repository or any(part in {"", ".", ".."} for part in repository.split("/")):
+        raise UnsafeModelPath("repository: ожидается непустой путь репозитория без переходов")
+    repository_root = safe_join(
+        Path(root),
+        repository.replace("/", "__"),
+        label="repository",
+    )
+    return safe_join(repository_root, entry.filename, label="filename")
 
 
 def partial_path(root: Path, entry: ModelFile) -> Path:

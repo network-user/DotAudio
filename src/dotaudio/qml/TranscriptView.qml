@@ -23,6 +23,8 @@ Rectangle {
         var raw = bridge.transcribeState.progress
         return raw === undefined || raw === null ? -1 : Number(raw)
     }
+    property string actualDevice: String(bridge.transcribeState.actualDevice || "")
+    property real elapsed: Number(bridge.transcribeState.elapsed || 0)
     property bool busyPhase: phase === "working"
     property var segs: bridge.transcribeSegments
     property var speakers: bridge.transcribeState.speakers || []
@@ -764,6 +766,8 @@ Rectangle {
                             progress: view.progress
                             fileName: view.file
                             message: view.runStatus || view.busyMessage()
+                            actualDevice: view.actualDevice
+                            elapsed: view.elapsed
                         }
                         Rectangle {
                             Layout.fillWidth: true

@@ -20,6 +20,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 VENDOR_NVIDIA = "nvidia"
 VENDOR_AMD = "amd"
@@ -123,6 +124,12 @@ class GpuDevice:
             return None
         return round(self.vram_mb / 1024, 1)
 
+    @property
+    def vram_free_gb(self) -> float | None:
+        if self.vram_free_mb is None:
+            return None
+        return round(max(0, self.vram_free_mb) / 1024, 1)
+
     def as_dict(self) -> dict:
         return {
             "index": self.index,
@@ -132,6 +139,7 @@ class GpuDevice:
             "vramMb": self.vram_mb,
             "vramGb": self.vram_gb,
             "vramFreeMb": self.vram_free_mb,
+            "vramFreeGb": self.vram_free_gb,
             "driver": self.driver,
             "compute": self.compute,
             "integrated": self.integrated,
@@ -145,6 +153,7 @@ class HardwareProfile:
 
     threads: int = 0
     ram_gb: float | None = None
+    ram_available_gb: float | None = None
     gpus: tuple[GpuDevice, ...] = ()
     platform: str = ""
     # Сколько CUDA-устройств видит именно CTranslate2 (движок Whisper). Это
@@ -172,6 +181,26 @@ class HardwareProfile:
         return None if gpu is None else gpu.vram_mb
 
     @property
+    def cuda_gpu(self) -> GpuDevice | None:
+        """NVIDIA adapter with the largest currently usable VRAM budget."""
+
+        candidates = [
+            gpu
+            for gpu in self.gpus
+            if gpu.vendor == VENDOR_NVIDIA and not gpu.integrated
+        ]
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda gpu: (
+                gpu.vram_free_mb if gpu.vram_free_mb is not None else -1,
+                gpu.vram_mb or 0,
+                -gpu.index,
+            ),
+        )
+
+    @property
     def has_dedicated_gpu(self) -> bool:
         return any(not gpu.integrated for gpu in self.gpus)
 
@@ -186,6 +215,8 @@ class HardwareProfile:
         return {
             "threads": self.threads,
             "ram_gb": self.ram_gb,
+            "ram_available_gb": self.ram_available_gb,
+            "ramAvailableGb": self.ram_available_gb,
             "cuda_devices": self.cuda_runtime_devices,
             "compute_label": (
                 "Видеокарта (CUDA)" if self.cuda_runtime_devices > 0 else "Процессор (CPU)"
@@ -194,6 +225,14 @@ class HardwareProfile:
             "gpuName": "" if gpu is None else gpu.name,
             "gpuVendor": "" if gpu is None else gpu.vendor,
             "gpuVramGb": None if gpu is None else gpu.vram_gb,
+            "gpuVramFreeGb": None if gpu is None else gpu.vram_free_gb,
+            "gpuVramFreeMb": None if gpu is None else gpu.vram_free_mb,
+            "cudaGpuName": "" if self.cuda_gpu is None else self.cuda_gpu.name,
+            "cudaGpuIndex": None if self.cuda_gpu is None else self.cuda_gpu.index,
+            "cudaVramGb": None if self.cuda_gpu is None else self.cuda_gpu.vram_gb,
+            "cudaVramFreeGb": (
+                None if self.cuda_gpu is None else self.cuda_gpu.vram_free_gb
+            ),
             "gpuLabel": gpu_label(gpu),
             "hasDedicatedGpu": self.has_dedicated_gpu,
             "llamaGpuOffload": self.llama_gpu_offload,
@@ -210,7 +249,7 @@ def gpu_label(gpu: GpuDevice | None) -> str:
     vram = gpu.vram_gb
     if vram is None:
         return gpu.name
-        return f"{gpu.name}, {vram:g} ГБ"
+    return f"{gpu.name}, {vram:g} ГБ"
 
 
 # CTranslate2 требует «efficient» FP16: Turing (7.0) и новее.
@@ -300,6 +339,54 @@ def physical_memory_gb() -> float | None:
         return round(kb.value / (1024 * 1024), 1)
     except (OSError, AttributeError):
         return None
+
+
+def available_memory_gb() -> float | None:
+    """Best-effort currently available physical memory for model preflight."""
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            class MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(MemoryStatusEx)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return None
+            return round(status.ullAvailPhys / (1024**3), 1)
+        except (OSError, AttributeError, TypeError):
+            return None
+
+    try:
+        pages = os.sysconf("SC_AVPHYS_PAGES")
+        size = os.sysconf("SC_PAGE_SIZE")
+        return round(pages * size / (1024**3), 1)
+    except (AttributeError, ValueError, OSError):
+        pass
+
+    # macOS and restricted containers may not expose sysconf's available-page
+    # key.  /proc is a cheap fallback where it exists.
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                value = line.split()[1]
+                return round(float(value) / (1024 * 1024), 1)
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
 
 
 def ctranslate2_cuda_devices() -> int:
@@ -524,7 +611,11 @@ def list_gpus() -> tuple[GpuDevice, ...]:
     return _merge_gpus(nvidia_gpus(), _registry_display_adapters())
 
 
-def probe(refresh: bool = False) -> HardwareProfile:
+def probe(
+    refresh: bool = False,
+    *,
+    include_optional: bool = True,
+) -> HardwareProfile:
     """Сводка устройства; повторный вызов отдаёт свежий кеш.
 
     Опрос запускает внешний процесс и читает реестр, поэтому его нельзя
@@ -554,10 +645,13 @@ def probe(refresh: bool = False) -> HardwareProfile:
     profile = HardwareProfile(
         threads=os.cpu_count() or 0,
         ram_gb=physical_memory_gb(),
+        ram_available_gb=available_memory_gb(),
         gpus=gpus,
         platform=sys.platform,
         cuda_runtime_devices=cuda_runtime,
-        llama_gpu_offload=llama_gpu_offload_supported(),
+        llama_gpu_offload=(
+            llama_gpu_offload_supported() if include_optional else None
+        ),
         notes=tuple(notes),
     )
     with _probe_lock:

@@ -7,7 +7,10 @@ from dotaudio.longform import (
     PEAKS_DECODE_MAX_SECONDS,
     WORD_TIMESTAMPS_MAX_SECONDS,
     TickGate,
+    bounded_window_parameters,
     is_long_form,
+    short_window_bounds,
+    short_window_plan,
     want_word_timestamps,
     window_bounds,
 )
@@ -36,6 +39,35 @@ def test_window_bounds_cover_an_hour_with_overlap():
 def test_short_clip_is_a_single_window():
     assert window_bounds(90, window=480, overlap=24) == [(0.0, 90.0)]
     assert window_bounds(0) == []
+
+
+def test_window_bounds_recover_from_non_finite_inputs():
+    assert window_bounds(float("nan"), window=10, overlap=2) == []
+    bounds = window_bounds(3, window=float("nan"), overlap=float("nan"))
+    assert bounds == [(0.0, 3.0)]
+
+
+def test_short_window_plan_never_stalls_on_excessive_overlap():
+    plan = short_window_plan(2.0, overlap=100.0)
+
+    assert plan.window_seconds == 2.0
+    assert plan.step_seconds >= 0.05
+    assert plan.overlap_seconds < plan.window_seconds
+
+
+def test_short_window_plan_accepts_a_forward_interval():
+    plan = short_window_plan(2.0, interval=0.2)
+
+    assert plan == type(plan)(2.0, 1.8, 0.2)
+    bounds = short_window_bounds(2.5, 2.0, interval=0.2)
+    assert bounds[0] == (0.0, 2.0)
+    assert bounds[-1][1] == 2.5
+
+
+def test_bounded_window_parameters_caps_overlap_and_keeps_a_step():
+    plan = bounded_window_parameters(10, 100, min_step=0.5)
+
+    assert plan.step_seconds >= 0.5
 
 
 def test_tick_gate_lets_the_first_update_through():
