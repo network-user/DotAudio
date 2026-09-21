@@ -17,4 +17,4 @@ jobs:
           python -m pip install -e ".[dev,server]"
           python -m pip install pip-audit
       - name: pip-audit
-        run: python -m pip-audit --progress-spinner off
+        run: python -m pip_audit --progress-spinner off
