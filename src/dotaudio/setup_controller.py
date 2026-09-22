@@ -30,6 +30,7 @@ def _empty_briefing() -> dict:
         "whisperReady": False,
         "profile": "balanced",
         "device": "auto",
+        "deviceIndex": None,
         "deviceLabel": "Авто",
         "useGpu": False,
         "cudaNeeded": False,
@@ -91,7 +92,9 @@ class SetupController(QObject):
         self._busy = False
         self._cancel = threading.Event()
         self._worker: threading.Thread | None = None
-        self._progress_pending: tuple[str, float, str] | None = None
+        # Percent -1 is the internal sentinel for an honest indeterminate
+        # stage; it is never rendered as a fake 0/55/100 value.
+        self._progress_pending: tuple[str, float, str, bool] | None = None
         self._whisper_device = ""
 
         self.scanFinished.connect(self._on_scan_finished)
@@ -133,6 +136,14 @@ class SetupController(QObject):
     @Property(float, notify=progressChanged)
     def overallPercent(self) -> float:
         return float(self._overall)
+
+    @Property(bool, notify=progressChanged)
+    def overallIndeterminate(self) -> bool:
+        return any(
+            str(step.get("status") or "") == "active"
+            and bool(step.get("indeterminate"))
+            for step in self._steps
+        )
 
     @Property(str, notify=progressChanged)
     def message(self) -> str:
@@ -295,6 +306,8 @@ class SetupController(QObject):
                 **step,
                 "status": "done" if step["id"] == "settings" else "pending",
                 "percent": 100.0 if step["id"] == "settings" else 0.0,
+                "determinate": step["id"] == "settings",
+                "indeterminate": False,
                 "message": "Готово" if step["id"] == "settings" else "",
             }
             for step in raw_steps
@@ -326,7 +339,7 @@ class SetupController(QObject):
                     last_error = "Настройка остановлена"
                     break
                 step_id = str(step["id"])
-                self.stepProgress.emit(step_id, 0.0, str(step.get("detail") or ""))
+                self.stepProgress.emit(step_id, -1.0, str(step.get("detail") or ""))
                 try:
                     if step_id == "cuda":
                         self._run_cuda(cancel)
@@ -360,6 +373,7 @@ class SetupController(QObject):
         # переписать medium на small (см. PROFILE_FOR_MODEL).
         self.controller.setSetting("profile", profile)
         self.controller.setSetting("model", model)
+        self.controller.setSetting("device_index", briefing.get("deviceIndex"))
         self.controller.setSetting("device", device)
         self.controller.setSetting(
             "live_greedy_finals", bool(briefing.get("liveGreedyFinals"))
@@ -375,7 +389,8 @@ class SetupController(QObject):
         from dotaudio.hardware import reset_cache
 
         def progress(info):
-            raw = float((info or {}).get("percent") or 0.0)
+            raw_value = (info or {}).get("percent")
+            raw = float(raw_value) if raw_value is not None else -1.0
             message = str((info or {}).get("message") or "CUDA…")
             self.stepProgress.emit("cuda", raw, message)
 
@@ -407,9 +422,11 @@ class SetupController(QObject):
         language = "ru"
         task = "transcribe"
         profile = str(briefing.get("profile") or "balanced")
+        device_index = briefing.get("deviceIndex")
         config = RecognitionConfig(
             model=model,
             device=device,
+            device_index=device_index,
             language=language,
             task=task,
             backend="local",
@@ -418,7 +435,11 @@ class SetupController(QObject):
         )
 
         def progress(info):
-            raw = float((info or {}).get("percent") or 0.0)
+            raw_value = (info or {}).get("percent")
+            try:
+                raw = float(raw_value) if raw_value is not None else -1.0
+            except (TypeError, ValueError):
+                raw = -1.0
             message = str((info or {}).get("message") or f"Модель {model}…")
             self.stepProgress.emit("whisper", raw, message)
             try:
@@ -428,19 +449,37 @@ class SetupController(QObject):
 
         if cancel.is_set():
             raise RuntimeError("Подготовка Whisper отменена")
+        def status(value: str) -> None:
+            messages = {
+                "checking_model_files": "Проверяем файлы Whisper в кэше…",
+                "loading_model": "Готовим Whisper к загрузке…",
+                "allocating_model": "Загружаем Whisper в память видеокарты… процент недоступен",
+                "gpu_unavailable_falling_back_cpu": "CUDA не ответила, пробуем процессор…",
+            }
+            if value in messages:
+                self.stepProgress.emit("whisper", -1.0, messages[value])
+            try:
+                self.controller.statusArrived.emit(value)
+            except RuntimeError:
+                pass
         try:
-            device_used = self.controller.engine.prepare(config, None, progress)
+            device_used = self.controller.engine.prepare(
+                config, status, progress, cancel=cancel
+            )
         except Exception as exc:  # noqa: BLE001
             if device != "cuda":
                 raise RuntimeError(explain_transcribe_error(exc)) from exc
             self.stepProgress.emit(
                 "whisper",
-                0.0,
+                -1.0,
                 "Видеокарта не приняла модель, пробуем процессор…",
             )
             try:
                 device_used = self.controller.engine.prepare(
-                    replace(config, device="cpu"), None, progress
+                    replace(config, device="cpu", device_index=None),
+                    status,
+                    progress,
+                    cancel=cancel,
                 )
             except Exception as cpu_exc:  # noqa: BLE001
                 raise RuntimeError(explain_transcribe_error(cpu_exc)) from cpu_exc
@@ -455,7 +494,8 @@ class SetupController(QObject):
         prefer_cuda = bool(briefing.get("nemoPreferCuda"))
 
         def progress(info):
-            raw = float((info or {}).get("percent") or 0.0)
+            raw_value = (info or {}).get("percent")
+            raw = float(raw_value) if raw_value is not None else -1.0
             # Установка рантайма - до 55%, pull модели - вторая половина.
             message = str((info or {}).get("message") or "NeMo…")
             self.stepProgress.emit("nemo", min(55.0, raw * 0.55), message)
@@ -522,7 +562,8 @@ class SetupController(QObject):
         from dotaudio.tools_ffmpeg import FfmpegCancelled, ensure_ffmpeg
 
         def progress(info):
-            raw = float((info or {}).get("percent") or 0.0)
+            raw_value = (info or {}).get("percent")
+            raw = float(raw_value) if raw_value is not None else -1.0
             message = str((info or {}).get("message") or "FFmpeg…")
             self.stepProgress.emit("ffmpeg", raw, message)
 
@@ -542,10 +583,12 @@ class SetupController(QObject):
             step_id=str(step_id),
         )
         safe_percent = payload.get("percent")
+        determinate = bool(payload.get("determinate"))
         self._progress_pending = (
             str(step_id),
-            float(safe_percent if safe_percent is not None else 0.0),
+            float(safe_percent if safe_percent is not None else -1.0),
             str(payload.get("message") or ""),
+            determinate,
         )
         if not self._progress_ui.isActive():
             self._progress_ui.start()
@@ -555,12 +598,16 @@ class SetupController(QObject):
         self._progress_pending = None
         if not pending:
             return
-        step_id, percent, message = pending
+        step_id, percent, message, determinate = pending
         found = False
         for step in self._steps:
             if step.get("id") == step_id:
                 step["status"] = "active"
-                step["percent"] = max(0.0, min(100.0, percent))
+                step["determinate"] = bool(determinate and percent >= 0)
+                step["indeterminate"] = not step["determinate"]
+                step["percent"] = (
+                    max(0.0, min(100.0, percent)) if step["determinate"] else -1.0
+                )
                 step["message"] = message
                 found = True
             elif step.get("status") == "active" and step.get("id") != step_id:
@@ -576,7 +623,11 @@ class SetupController(QObject):
             if step.get("id") != step_id:
                 continue
             step["status"] = "done" if ok else "error"
-            step["percent"] = 100.0 if ok else float(step.get("percent") or 0.0)
+            step["determinate"] = True
+            step["indeterminate"] = False
+            step["percent"] = 100.0 if ok else max(
+                0.0, float(step.get("percent") or 0.0)
+            )
             if error:
                 step["message"] = error
             break
@@ -603,7 +654,9 @@ class SetupController(QObject):
             if status == "done":
                 done += weight
             elif status == "active":
-                done += weight * (float(step.get("percent") or 0.0) / 100.0)
+                percent = float(step.get("percent") or 0.0)
+                if percent >= 0 and bool(step.get("determinate", True)):
+                    done += weight * (percent / 100.0)
             elif status == "error":
                 done += weight * (float(step.get("percent") or 0.0) / 100.0)
         return max(0.0, min(100.0, 100.0 * done / total_w))

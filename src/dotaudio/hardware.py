@@ -280,6 +280,9 @@ class HardwareValidationResult:
     recommendations: tuple[str, ...] = ()
     fallback_device: str | None = None
     telemetry: tuple[str, ...] = ()
+    # Actual CUDA adapter used by the selected path.  CPU fallbacks keep this
+    # empty because no GPU allocation is planned.
+    device_index: int | None = None
 
     @property
     def can_run(self) -> bool:
@@ -326,6 +329,8 @@ class HardwareValidationResult:
             "fallback_device": self.fallback_device,
             "fallbackDevice": self.fallback_device,
             "telemetry": telemetry,
+            "device_index": self.device_index,
+            "deviceIndex": self.device_index,
             "can_run": self.can_run,
             "canRun": self.can_run,
         }
@@ -450,7 +455,40 @@ def _validation_available_ram(snapshot: Mapping[str, Any]) -> float | None:
     )
 
 
-def _validation_available_vram(snapshot: Mapping[str, Any]) -> float | None:
+def _validation_gpu_index(gpu: Any) -> int | None:
+    value = _validation_number(_validation_gpu_value(gpu, "index"))
+    if value is None or int(value) != value:
+        return None
+    return int(value)
+
+
+def _validation_gpu_free_vram(gpu: Any) -> float | None:
+    free_gb = _validation_number(
+        _validation_gpu_value(gpu, "vramFreeGb", "vram_free_gb")
+    )
+    if free_gb is not None:
+        return free_gb
+    free_mb = _validation_number(
+        _validation_gpu_value(gpu, "vramFreeMb", "vram_free_mb")
+    )
+    return None if free_mb is None else free_mb / 1024.0
+
+
+def _validation_available_vram(
+    snapshot: Mapping[str, Any],
+    device_index: int | None = None,
+) -> float | None:
+    # Once the user picked an adapter, never use the aggregate/best-GPU
+    # telemetry: that can approve a load for GPU 1 using GPU 0's free VRAM.
+    if device_index is not None:
+        for gpu in _validation_gpu_items(snapshot):
+            if (
+                _validation_gpu_index(gpu) == device_index
+                and _validation_gpu_is_nvidia(gpu)
+            ):
+                return _validation_gpu_free_vram(gpu)
+        return None
+
     direct = _validation_first_number(
         snapshot,
         "cudaVramFreeGb",
@@ -475,17 +513,9 @@ def _validation_available_vram(snapshot: Mapping[str, Any]) -> float | None:
     for gpu in _validation_gpu_items(snapshot):
         if not _validation_gpu_is_nvidia(gpu):
             continue
-        free_gb = _validation_number(
-            _validation_gpu_value(gpu, "vramFreeGb", "vram_free_gb")
-        )
+        free_gb = _validation_gpu_free_vram(gpu)
         if free_gb is not None:
             candidates.append(free_gb)
-            continue
-        free_mb = _validation_number(
-            _validation_gpu_value(gpu, "vramFreeMb", "vram_free_mb")
-        )
-        if free_mb is not None:
-            candidates.append(free_mb / 1024.0)
     return max(candidates) if candidates else None
 
 
@@ -519,6 +549,18 @@ def _validation_device(value: str | None) -> str:
     return normalized
 
 
+def _validation_device_index(value: int | str | None) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        index = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("device_index must be a non-negative integer") from exc
+    if index < 0:
+        raise ValueError("device_index must be a non-negative integer")
+    return index
+
+
 def _validation_compute_type(value: str | None, device: str) -> str:
     normalized = "auto" if value is None else str(value).strip().casefold()
     if not normalized or normalized == "auto":
@@ -541,6 +583,7 @@ def _validation_path(
     device: str,
     compute_type: str,
     cuda_runtime: bool | None,
+    device_index: int | None = None,
 ) -> dict[str, Any]:
     requirements = model_memory_requirements(
         model,
@@ -548,7 +591,7 @@ def _validation_path(
         compute_type=compute_type,
     )
     available_ram = _validation_available_ram(snapshot)
-    available_vram = _validation_available_vram(snapshot)
+    available_vram = _validation_available_vram(snapshot, device_index)
     required_ram = (
         None
         if requirements.get("ram_mb") is None
@@ -567,6 +610,7 @@ def _validation_path(
         "available_vram_gb": available_vram,
         "required_ram_gb": required_ram,
         "required_vram_gb": required_vram,
+        "device_index": device_index if device == "cuda" else None,
     }
 
     if not requirements.get("known"):
@@ -725,6 +769,7 @@ def _validation_result(
         recommendations=merged_recommendations,
         fallback_device=fallback_device,
         telemetry=telemetry,
+        device_index=path.get("device_index"),
     )
 
 
@@ -734,6 +779,7 @@ def build_hardware_validation(
     *,
     device: str = "auto",
     compute_type: str = "auto",
+    device_index: int | str | None = None,
 ) -> HardwareValidationResult:
     """Build a no-inference readiness result from supplied hardware facts.
 
@@ -745,6 +791,7 @@ def build_hardware_validation(
 
     snapshot = _validation_snapshot(hardware)
     requested_device = _validation_device(device)
+    requested_device_index = _validation_device_index(device_index)
     cuda_runtime = _validation_cuda_runtime(snapshot)
     nvidia_presence = _validation_nvidia_presence(snapshot)
 
@@ -767,6 +814,7 @@ def build_hardware_validation(
         device=candidate,
         compute_type=candidate_compute_type,
         cuda_runtime=cuda_runtime,
+        device_index=(requested_device_index if candidate == "cuda" else None),
     )
 
     if (
@@ -876,6 +924,7 @@ def validate_hardware(
     *,
     device: str = "auto",
     compute_type: str = "auto",
+    device_index: int | str | None = None,
 ) -> HardwareValidationResult:
     """Alias with an action-oriented name for CLI/UI callers."""
 
@@ -884,6 +933,7 @@ def validate_hardware(
         hardware,
         device=device,
         compute_type=compute_type,
+        device_index=device_index,
     )
 
 
@@ -935,7 +985,10 @@ def parse_compute_cap(value: str) -> float | None:
         return None
 
 
-def gpu_allows_efficient_float16(hardware: dict | None = None) -> bool | None:
+def gpu_allows_efficient_float16(
+    hardware: dict | None = None,
+    device_index: int | None = None,
+) -> bool | None:
     """True - float16 можно. False - сразу int8. None - неизвестно."""
 
     if not hardware:
@@ -952,6 +1005,18 @@ def gpu_allows_efficient_float16(hardware: dict | None = None) -> bool | None:
         )
 
     pool = [gpu for gpu in gpus if _nvidia(gpu)] or gpus
+    if device_index is not None:
+        selected = []
+        for gpu in pool:
+            try:
+                index = int(gpu.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if index == device_index:
+                selected.append(gpu)
+        if not selected:
+            return None
+        pool = selected
     best = max(pool, key=lambda gpu: float(gpu.get("vramMb") or gpu.get("vram_mb") or 0))
     cap = parse_compute_cap(str(best.get("compute") or ""))
     if cap is not None:
@@ -1242,13 +1307,59 @@ def _merge_gpus(primary: list[GpuDevice], extra: list[GpuDevice]) -> tuple[GpuDe
 
     merged = list(primary)
     known = {gpu.name.casefold() for gpu in merged}
+    used_indexes = {gpu.index for gpu in merged}
+    next_index = max(used_indexes, default=-1) + 1
     for gpu in extra:
         low = gpu.name.casefold()
         if any(low == name or low in name or name in low for name in known):
             continue
-        merged.append(gpu)
+        # Registry/Display adapters are not guaranteed to use the same ordinal
+        # as nvidia-smi.  Keep nvidia-smi's CUDA indexes stable and assign
+        # non-CUDA extras after them instead of renumbering every adapter.
+        index = gpu.index if gpu.index not in used_indexes else next_index
+        while index in used_indexes:
+            index += 1
+        merged.append(replace(gpu, index=index))
+        used_indexes.add(index)
+        next_index = max(next_index, index + 1)
         known.add(low)
-    return tuple(replace(gpu, index=position) for position, gpu in enumerate(merged))
+    return tuple(merged)
+
+
+def _add_missing_cuda_devices(
+    gpus: list[GpuDevice],
+    runtime_devices: int,
+) -> list[GpuDevice]:
+    """Represent CUDA ordinals even when nvidia-smi is unavailable.
+
+    CTranslate2 is the runtime that will receive ``device_index``.  A machine
+    can therefore have a usable CUDA device while the vendor utility is not
+    installed or is blocked by policy.  The synthetic entry keeps that fact
+    selectable in the UI without inventing VRAM numbers.
+    """
+
+    if runtime_devices <= 0:
+        return gpus
+    result = list(gpus)
+    nvidia = [gpu for gpu in result if gpu.vendor == VENDOR_NVIDIA]
+    known_indexes = {gpu.index for gpu in nvidia}
+    next_index = max((gpu.index for gpu in result), default=-1) + 1
+    for index in range(runtime_devices):
+        if index in known_indexes:
+            continue
+        while next_index in {gpu.index for gpu in result}:
+            next_index += 1
+        result.append(
+            GpuDevice(
+                index=index,
+                name=f"NVIDIA GPU {index + 1}",
+                vendor=VENDOR_NVIDIA,
+                source="ctranslate2",
+            )
+        )
+        known_indexes.add(index)
+        next_index += 1
+    return result
 
 
 def list_gpus() -> tuple[GpuDevice, ...]:
@@ -1284,6 +1395,7 @@ def probe(
     gpus = list_gpus()
     notes: list[str] = []
     cuda_runtime = ctranslate2_cuda_devices()
+    gpus = _add_missing_cuda_devices(gpus, cuda_runtime)
     if cuda_runtime == 0 and any(gpu.vendor == VENDOR_NVIDIA for gpu in gpus):
         notes.append(
             "Карта NVIDIA есть, но CTranslate2 её не видит: Whisper пойдёт на процессоре."

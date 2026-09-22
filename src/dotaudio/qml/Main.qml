@@ -101,7 +101,7 @@ ApplicationWindow {
                     model: [
                         {key:"model", title:"Модель", choices:["tiny","base","small","medium","large-v3","turbo"]},
                         {key:"device", title:"Устройство", choices:["auto","cpu","cuda"]},
-                        {key:"speech_mode", title:"Язык/перевод", choices:["ru","en","en_ru"]},
+                        {key:"speech_mode", title:"Язык/перевод", choices:["ru","en","multilingual","en_ru"]},
                         {key:"live_source", title:"Источник Live", choices:["microphone","system","mixed"]},
                         {key:"backend", title:"Обработка", choices:["local","remote"]}
                     ]

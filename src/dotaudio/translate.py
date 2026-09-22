@@ -35,7 +35,9 @@ SPEECH_MODES: dict[str, tuple[str, str]] = {
     "multilingual": ("auto", "transcribe"),
 }
 
-SPEECH_MODE_ORDER = ("ru", "en", "en_ru")
+# The quick-cycle action must expose multilingual Whisper too; previously it
+# was reachable only from the detailed Settings page.
+SPEECH_MODE_ORDER = ("ru", "en", "multilingual", "en_ru")
 
 SPEECH_MODE_LABELS = {
     "ru": "Русский",

@@ -602,6 +602,24 @@ def test_live_config_asks_for_a_draft_model_outside_dictation() -> None:
     assert dictation.live_draft_model == ""
 
 
+def test_model_prompt_is_bounded_and_combined_with_dictionary() -> None:
+    controller = Controller.__new__(Controller)
+    controller._jobs = {}
+    controller._settings = {
+        key: DEFAULTS[key]
+        for key in (
+            "model", "device", "language", "task", "backend", "server_url",
+            "profile", "model_prompt",
+        )
+    }
+    controller._settings["dictionary"] = [{"term": "DotAudio", "misheard": ""}]
+    controller._settings["model_prompt"] = "  названия   компаний  "
+
+    config = Controller._config(controller)
+
+    assert config.initial_prompt == "названия компаний; DotAudio"
+
+
 def test_sensitivity_label_and_toggle_round_trip() -> None:
     # Настоящий класс без __init__: методу toggle нужен self.setSetting.
     controller = Controller.__new__(Controller)
@@ -643,6 +661,11 @@ def test_speech_mode_sets_language_task_and_config() -> None:
     assert DEFAULTS["speech_mode"] == "ru"
     Controller.setSetting(controller, "speech_mode", "en")
     assert controller._settings["language"] == "en"
+    assert controller._settings["task"] == "transcribe"
+
+    Controller.cycleSpeechMode(controller)
+    assert controller._settings["speech_mode"] == "multilingual"
+    assert controller._settings["language"] == "auto"
     assert controller._settings["task"] == "transcribe"
 
     Controller.cycleSpeechMode(controller)

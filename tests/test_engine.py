@@ -252,6 +252,72 @@ def test_cuda_remembers_working_compute_type(monkeypatch) -> None:
     assert engine.last_device(config.model) == "cuda"
 
 
+def test_explicit_cuda_device_index_reaches_backend_and_cache(monkeypatch) -> None:
+    calls: list[int | None] = []
+
+    class FakeModel:
+        def transcribe(self, _source, **_kwargs):
+            return iter([_Segment(0, 1, "ready")]), object()
+
+    def model(_name, *, device, compute_type, cpu_threads, device_index=None):
+        del cpu_threads
+        assert device == "cuda"
+        assert compute_type in {"float16", "int8_float16", "int8"}
+        calls.append(device_index)
+        return FakeModel()
+
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=model)
+    )
+    monkeypatch.setattr(Engine, "_preflight_model", staticmethod(lambda *_a, **_k: None))
+    engine = Engine()
+    selected = RecognitionConfig(device="cuda", device_index=1)
+
+    engine.transcribe(np.zeros(1600), selected)
+    engine.transcribe(np.zeros(1600), selected)
+    engine.transcribe(np.zeros(1600), RecognitionConfig(device="cuda", device_index=0))
+
+    assert calls == [1, 0]
+
+
+def test_cuda_float16_capability_is_scoped_to_selected_device() -> None:
+    engine = Engine()
+    engine.cuda_float16 = False
+    engine._cuda_float16_by_device.update({0: False, 1: True})
+
+    assert engine._compute_types_for("small", "cuda", 0)[0] == "int8"
+    assert engine._compute_types_for("small", "cuda", 1)[0] == "float16"
+    assert engine._compute_types_for("small", "cuda")[0] == "int8"
+
+
+def test_auto_device_passes_measured_cuda_index_to_backend(monkeypatch) -> None:
+    calls: list[int | None] = []
+
+    class FakeModel:
+        def transcribe(self, _source, **_kwargs):
+            return iter([_Segment(0, 1, "ready")]), object()
+
+    def model(_name, *, device, compute_type, cpu_threads, device_index=None):
+        del compute_type, cpu_threads
+        assert device == "cuda"
+        calls.append(device_index)
+        return FakeModel()
+
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=model)
+    )
+    monkeypatch.setattr(
+        Engine, "_auto_cuda_index", staticmethod(lambda: 1)
+    )
+    monkeypatch.setattr(Engine, "_preflight_model", staticmethod(lambda *_a, **_k: None))
+    engine = Engine()
+    engine._cuda_float16_by_device[1] = True
+
+    engine.transcribe(np.zeros(1600), RecognitionConfig(device="auto"))
+
+    assert calls == [1]
+
+
 def test_auto_device_reuses_cpu_after_cuda_runtime_failure(monkeypatch) -> None:
     created: list[str] = []
 

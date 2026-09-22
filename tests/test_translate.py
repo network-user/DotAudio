@@ -24,7 +24,8 @@ def test_speech_mode_cycle_and_labels():
     assert normalize_speech_mode("ru_en") == "en"
     assert normalize_speech_mode("nope") == "ru"
     assert next_speech_mode("ru") == "en"
-    assert next_speech_mode("en") == "en_ru"
+    assert next_speech_mode("en") == "multilingual"
+    assert next_speech_mode("multilingual") == "en_ru"
     assert next_speech_mode("en_ru") == "ru"
     assert speech_mode_label("en_ru") == "EN → RU"
     assert language_task_for("en_ru") == ("en", "transcribe")

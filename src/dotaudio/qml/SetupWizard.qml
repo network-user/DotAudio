@@ -17,6 +17,7 @@ Item {
     readonly property string setupError: setupAlive ? String(setup.error || "") : ""
     readonly property var setupErrorInfo: (setupAlive && setup.errorInfo) ? setup.errorInfo : ({})
     readonly property real setupPercent: setupAlive ? Number(setup.overallPercent || 0) : 0
+    readonly property bool setupIndeterminate: setupAlive && Boolean(setup.overallIndeterminate)
     readonly property var setupHw: (setupAlive && setup.hardware) ? setup.hardware : ({})
     readonly property var setupBrief: (setupAlive && setup.briefing) ? setup.briefing : ({})
     readonly property var setupSteps: (setupAlive && setup.steps) ? setup.steps : []
@@ -518,7 +519,7 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         Label {
-                            text: Math.round(root.setupPercent) + "%"
+                            text: root.setupIndeterminate ? "—" : (Math.round(root.setupPercent) + "%")
                             color: Theme.text
                             font.pixelSize: Theme.fsHero
                             font.weight: Font.DemiBold
@@ -546,6 +547,20 @@ Item {
                             Behavior on width {
                                 enabled: !root.reduceMotion
                                 NumberAnimation { duration: Theme.baseMs }
+                            }
+                        }
+                        Rectangle {
+                            id: setupSweep
+                            visible: root.setupIndeterminate
+                            width: parent.width * 0.24
+                            height: parent.height
+                            radius: 4
+                            color: Theme.text
+                            SequentialAnimation on x {
+                                running: setupSweep.visible && !root.reduceMotion
+                                loops: Animation.Infinite
+                                NumberAnimation { from: -setupSweep.width; to: Math.max(0, setupSweep.parent.width - setupSweep.width); duration: 1000; easing.type: Easing.InOutQuad }
+                                NumberAnimation { from: Math.max(0, setupSweep.parent.width - setupSweep.width); to: -setupSweep.width; duration: 1000; easing.type: Easing.InOutQuad }
                             }
                         }
                     }
@@ -604,7 +619,9 @@ Item {
                                 }
                                 Label {
                                     visible: modelData.status === "active" || modelData.status === "done"
-                                    text: Math.round(Number(modelData.percent || 0)) + "%"
+                                    text: Boolean(modelData.indeterminate)
+                                          ? "—"
+                                          : (Math.round(Number(modelData.percent || 0)) + "%")
                                     color: Theme.faint
                                     font.pixelSize: Theme.fsSmall
                                     font.family: Theme.monoFamily
@@ -624,6 +641,7 @@ Item {
                                 radius: 2
                                 color: Theme.fill
                                 Rectangle {
+                                    visible: !Boolean(modelData.indeterminate)
                                     width: parent.width * Math.max(0, Math.min(1, Number(modelData.percent || 0) / 100))
                                     height: parent.height
                                     radius: 2
@@ -631,6 +649,20 @@ Item {
                                     Behavior on width {
                                         enabled: !root.reduceMotion
                                         NumberAnimation { duration: Theme.fastMs }
+                                    }
+                                }
+                                Rectangle {
+                                    id: stepSweep
+                                    visible: Boolean(modelData.indeterminate)
+                                    width: parent.width * 0.24
+                                    height: parent.height
+                                    radius: 2
+                                    color: Theme.text
+                                    SequentialAnimation on x {
+                                        running: stepSweep.visible && !root.reduceMotion
+                                        loops: Animation.Infinite
+                                        NumberAnimation { from: -stepSweep.width; to: Math.max(0, stepSweep.parent.width - stepSweep.width); duration: 900; easing.type: Easing.InOutQuad }
+                                        NumberAnimation { from: Math.max(0, stepSweep.parent.width - stepSweep.width); to: -stepSweep.width; duration: 900; easing.type: Easing.InOutQuad }
                                     }
                                 }
                             }

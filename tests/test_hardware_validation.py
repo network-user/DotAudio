@@ -41,6 +41,45 @@ def test_hardware_validation_reports_ready_for_known_fit() -> None:
     assert result.as_dict()["availableVramGb"] == 7.0
 
 
+def test_hardware_validation_uses_the_selected_gpu_not_the_best_gpu() -> None:
+    snapshot = {
+        "ram_available_gb": 16.0,
+        "cuda_devices": 2,
+        "gpus": [
+            {
+                "index": 0,
+                "name": "NVIDIA GTX 1050 Ti",
+                "vendor": "nvidia",
+                "vramMb": 4096,
+                "vramFreeGb": 0.5,
+                "integrated": False,
+            },
+            {
+                "index": 1,
+                "name": "NVIDIA RTX 4060",
+                "vendor": "nvidia",
+                "vramMb": 8192,
+                "vramFreeGb": 7.0,
+                "integrated": False,
+            },
+        ],
+    }
+
+    selected_small = validate_hardware(
+        "medium", snapshot, device="cuda", device_index=0
+    )
+    selected_large = validate_hardware(
+        "medium", snapshot, device="cuda", device_index=1
+    )
+
+    assert selected_small.state == "fallback"
+    assert selected_small.available_vram_gb == 0.5
+    assert selected_small.device_index is None
+    assert selected_large.state == "ready"
+    assert selected_large.available_vram_gb == 7.0
+    assert selected_large.device_index == 1
+
+
 def test_hardware_validation_falls_back_to_cpu_when_vram_is_insufficient() -> None:
     result = validate_hardware(
         "medium",

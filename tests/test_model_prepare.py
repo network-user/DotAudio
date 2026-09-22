@@ -20,7 +20,7 @@ def test_prepare_uses_local_model_cache_and_reports_ready(monkeypatch) -> None:
     events: list[str] = []
     device = Engine().prepare(RecognitionConfig(model="tiny", device="cpu"), events.append)
     assert device == "cpu"
-    assert events == ["loading_model", "model_ready"]
+    assert events == ["checking_model_files", "allocating_model", "model_ready"]
     assert loaded == [("tiny", "cpu", "int8")]
 
 
@@ -110,8 +110,10 @@ def test_prepare_live_falls_back_to_cpu_when_cuda_warmup_fails(monkeypatch) -> N
     assert device == "cpu"
     assert created == ["cuda", "cpu"]
     assert events == [
-        "loading_model",
+        "checking_model_files",
+        "allocating_model",
         "gpu_unavailable_falling_back_cpu",
+        "allocating_model",
         "model_ready",
     ]
 

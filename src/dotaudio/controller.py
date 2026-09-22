@@ -164,12 +164,16 @@ for _model_name, _vram_gb in {
     MODEL_CATALOG[_model_name]["vram_gb"] = _vram_gb
 
 DEFAULTS = {
-    "model": "small", "device": "auto", "language": "ru", "task": "transcribe",
+    "model": "small", "device": "auto", "device_index": None,
+    "language": "ru", "task": "transcribe",
     # Режимы речи для Live / диктовки / транскрибации. language+task
     # остаются полями RecognitionConfig и синхронизируются с speech_mode.
     # en_ru - Whisper language=en + локальный OPUS-MT EN→RU (см. translate.py).
     "speech_mode": "ru", "translation_model_id": "",
     "backend": "local", "server_url": "http://127.0.0.1:8765", "source": "microphone",
+    # Ограниченная подсказка Whisper: это контекст/термины, а не инструкция
+    # переписать результат. Вводится явно и никогда не отправляется remote.
+    "model_prompt": "",
     # Windows: system loopback. Linux/macOS: microphone until a monitor/BlackHole exists.
     "live_source": default_live_source(),
     "input_device": "", "auto_paste": True, "keywords": "Whisper, искусственный интеллект",
@@ -401,7 +405,9 @@ QUIT_HOTKEY_OPTIONS = {
 }
 
 STATUS_LABELS = {
+    "checking_model_files": "Проверяем файлы модели в кэше…",
     "loading_model": "Загружаем выбранную модель…",
+    "allocating_model": "Загружаем модель в память видеокарты… Процент недоступен",
     "reading_audio": "Читаем звук файла. Первая фраза появится после этого шага.",
     "transcribing_cpu": "Распознаём на процессоре…",
     "transcribing_cuda": "Распознаём на видеокарте…",
@@ -559,7 +565,12 @@ def hardware_summary(*, refresh: bool = False) -> dict:
     return summary
 
 
-def model_fit(model: str, hardware: dict) -> dict:
+def model_fit(
+    model: str,
+    hardware: dict,
+    *,
+    device_index: int | None = None,
+) -> dict:
     """Подходит ли модель этому устройству, по факту памяти и CPU.
 
     Оценка памяти - факт (сравнение с реальным ОЗУ). Оценка скорости -
@@ -585,7 +596,12 @@ def model_fit(model: str, hardware: dict) -> dict:
         from dotaudio.adapt import assess_whisper_model_fit
 
         device = "cuda" if int(hardware.get("cuda_devices") or 0) > 0 else "cpu"
-        fit = assess_whisper_model_fit(model, hardware, device=device)
+        fit = assess_whisper_model_fit(
+            model,
+            hardware,
+            device=device,
+            device_index=device_index,
+        )
         if fit.get("state") == "insufficient":
             return {
                 "state": "tight",
@@ -1111,7 +1127,11 @@ class Controller(QObject):
     def modelFit(self, model):
         """Пригодность модели этому устройству; читается вместе с hardware."""
 
-        return model_fit(str(model), self._hardware)
+        return model_fit(
+            str(model),
+            self._hardware,
+            device_index=self._settings.get("device_index"),
+        )
 
     def _probe_hardware(self) -> None:
         """Фоновая проба железа: обновляет сводку и рекомендацию."""
@@ -1194,6 +1214,27 @@ class Controller(QObject):
             self.setupGpu()
             return
         self.setSetting("device", value)
+
+    @Slot(int)
+    def selectGpuDevice(self, index: int) -> None:
+        """Pin Whisper to one CUDA ordinal exposed by the hardware probe."""
+
+        try:
+            selected = int(index)
+        except (TypeError, ValueError):
+            return
+        if selected < 0:
+            self.selectComputeDevice("auto")
+            return
+        if self._jobs or self._model_preparing or self._gpu_setup.get("busy"):
+            self._notice = "Дождитесь окончания текущей операции перед сменой GPU."
+            self.changed.emit()
+            return
+        self.setSetting("device_index", selected)
+        # An ordinal is meaningful only for CUDA.  setupGpu() is a no-op
+        # installation check when the runtime is already available and will
+        # still perform the normal model preflight before allocation.
+        self.setSetting("device", "cuda")
 
     @Slot()
     def setupGpu(self):
@@ -1359,8 +1400,11 @@ class Controller(QObject):
         }
         self._model_state = {
             "phase": "downloading",
+            "stage": "checking",
             "model": model,
             "message": "Проверяем кэш и готовим модель на GPU…",
+            "determinate": False,
+            "percent": -1.0,
         }
         self._record_log("info", f"Подготовка модели {model} на CUDA.")
         self.changed.emit()
@@ -1390,12 +1434,20 @@ class Controller(QObject):
 
                 def status(value):
                     self.statusArrived.emit(value)
-                    if value == "loading_model":
+                    if value in {"checking_model_files", "loading_model", "allocating_model"}:
                         self.gpuSetupProgress.emit(
                             {
-                                "phase": "model_loading",
+                                "phase": (
+                                    "model_loading"
+                                    if value != "checking_model_files"
+                                    else "model_check"
+                                ),
                                 "percent": -1.0,
-                                "message": f"Загружаем модель {model} в видеопамять…",
+                                "message": (
+                                    "Проверяем файлы модели…"
+                                    if value == "checking_model_files"
+                                    else f"Загружаем модель {model} в видеопамять…"
+                                ),
                                 "busy": True,
                                 "error": "",
                                 "restartRequired": False,
@@ -2290,6 +2342,16 @@ class Controller(QObject):
             if raw_model_id and (registry is None or registry.get(raw_model_id) is None):
                 return
             value = raw_model_id
+        if name == "device_index":
+            if value is None or str(value).strip() in {"", "-1", "None"}:
+                value = None
+            else:
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    return
+                if value < 0:
+                    return
         if name == "backend" and value == "remote":
             # Внешний ASR только по явному opt-in: иначе аудио не покидает машину.
             import os
@@ -2307,6 +2369,8 @@ class Controller(QObject):
                 )
             except ValueError:
                 return
+        if name == "model_prompt":
+            value = " ".join(str(value or "").split())[:700]
         if name in (
             "caption_overlay", "auto_paste", "dictate_hold", "island_click_through",
             "island_snap", "caption_autohide", "caption_locked", "reduce_motion",
@@ -2346,6 +2410,11 @@ class Controller(QObject):
             and self._settings.get(name) != value
         )
         self._settings[name] = value
+        if name == "device" and value != "cuda":
+            # Auto/CPU means «do not pin to a previous adapter».  Leaving the
+            # index behind made the next explicit CUDA selection unexpectedly
+            # reuse an old multi-GPU choice.
+            self._settings["device_index"] = None
         if name == "speech_mode":
             self._settings["translation_model_id"] = ""
             language, task = language_task_for(value)
@@ -2414,7 +2483,7 @@ class Controller(QObject):
             self._record_log("info", f"Выбрана модель: {value}")
         elif name in (
             "device", "backend", "source", "live_source", "language", "task",
-            "speech_mode", "live_sensitivity",
+            "speech_mode", "live_sensitivity", "device_index",
         ):
             self._record_log("info", f"Настройка {name}: {value}")
         # Смена Live-движка или модели - сразу греем в фоне, чтобы кнопка
@@ -2486,6 +2555,9 @@ class Controller(QObject):
     def _config(self, media_mode=False, live_stream=False):
         values = {key: self._settings[key] for key in
                   ("model", "device", "language", "task", "backend", "server_url", "profile")}
+        # Older settings files and focused unit-test fixtures may not contain
+        # the optional GPU ordinal yet.
+        values["device_index"] = self._settings.get("device_index")
         descriptor = getattr(self, "_translation_descriptor", lambda: None)()
         if descriptor is not None:
             values["language"] = descriptor.source_language
@@ -2510,11 +2582,17 @@ class Controller(QObject):
         if str(values.get("backend") or "local") == "remote":
             values["initial_prompt"] = ""
         else:
-            values["initial_prompt"] = "; ".join(
+            prompt_parts = [
+                " ".join(str(self._settings.get("model_prompt") or "").split())
+            ]
+            prompt_parts.extend(
                 str(entry.get("term", "")).strip()
-                for entry in self.dictionary
+                for entry in self._settings.get("dictionary", [])
                 if isinstance(entry, dict) and str(entry.get("term", "")).strip()
             )
+            values["initial_prompt"] = "; ".join(
+                item for item in prompt_parts if item
+            )[:700]
         values["noise_reduction"] = bool(self._settings.get("noise_reduction"))
         values["noise_reduction_strength"] = float(
             self._settings.get("noise_reduction_strength") or 0.75
@@ -2749,6 +2827,35 @@ class Controller(QObject):
         return result
 
     def _set_status(self, value):
+        # Preparation runs without a transcription job, so the old handler
+        # only changed the global status and the model card stayed on a vague
+        # 55% label.  Keep a separate, honest stage for the model workflow.
+        if getattr(self, "_model_preparing", False) and value in {
+            "checking_model_files",
+            "loading_model",
+            "allocating_model",
+            "gpu_unavailable_falling_back_cpu",
+        }:
+            stage_messages = {
+                "checking_model_files": "Проверяем файлы модели в локальном кэше…",
+                "loading_model": "Готовим модель к загрузке…",
+                "allocating_model": (
+                    "Загружаем модель в память видеокарты… "
+                    "процент недоступен, ждём ответа CUDA"
+                ),
+                "gpu_unavailable_falling_back_cpu": (
+                    "Видеокарта не ответила, безопасно переходим на процессор…"
+                ),
+            }
+            self._model_state = {
+                **self._model_state,
+                "phase": "model_loading" if value in {"loading_model", "allocating_model"} else "checking",
+                "stage": value,
+                "model": self._model_state.get("model") or self._settings.get("model"),
+                "message": stage_messages[value],
+                "determinate": False,
+                "percent": -1.0,
+            }
         if self._jobs:
             label = STATUS_LABELS.get(value, value)
             if self.liveActive:
@@ -2832,7 +2939,9 @@ class Controller(QObject):
                 - float(getattr(self, "_trans_started_at", 0.0) or 0.0),
             )
         component_by_status = {
+            "checking_model_files": "model",
             "loading_model": "model",
+            "allocating_model": "model",
             "reading_audio": "audio",
             "transcribing_cpu": "asr",
             "transcribing_cuda": "asr",
@@ -2874,8 +2983,11 @@ class Controller(QObject):
     def _on_model_progress(self, model, message):
         self._model_state = {
             "phase": "downloading",
+            "stage": "download",
             "model": model,
             "message": message,
+            "determinate": False,
+            "percent": -1.0,
         }
         self._record_log("info", message)
         self.changed.emit()
@@ -2885,6 +2997,25 @@ class Controller(QObject):
         # полученных байтов; сюда прилетает уже готовый снимок ~3 раза в
         # секунду. Состояние гонки не боится: снимок словарь.
         self._model_download = {"model": str(model), **dict(info or {})}
+        if self._model_preparing:
+            payload = dict(info or {})
+            phase = str(payload.get("phase") or "download")
+            if phase == "download":
+                percent = payload.get("percent")
+                determinate = isinstance(percent, (int, float)) and float(percent) >= 0
+                self._model_state = {
+                    **self._model_state,
+                    "phase": "downloading",
+                    "stage": "download",
+                    "model": str(model),
+                    "message": (
+                        f"Скачиваем файлы модели: {float(percent):.1f}%"
+                        if determinate
+                        else "Скачиваем файлы модели… размер пока неизвестен"
+                    ),
+                    "determinate": determinate,
+                    "percent": float(percent) if determinate else -1.0,
+                }
         self.changed.emit()
 
     def _on_model_finished(self, model, device, error):
@@ -2895,12 +3026,27 @@ class Controller(QObject):
         self._model_prepare_done.set()
         self._model_library = [Engine.disk_status(name) for name in ("tiny", "base", "small", "medium", "large-v3", "turbo")]
         if error:
-            self._model_state = {"phase": "error", "model": model, "message": error}
-            self._record_log("error", error)
+            friendly = explain_transcribe_error(error)
+            self._model_state = {
+                "phase": "error",
+                "model": model,
+                "message": friendly,
+                "error": str(error),
+                "determinate": False,
+                "percent": -1.0,
+            }
+            self._record_log("error", friendly)
         else:
             placement = "на сервере" if device == "remote" else f"на {device}"
             message = f"Модель {model} готова {placement}."
-            self._model_state = {"phase": "ready", "model": model, "message": message}
+            self._model_state = {
+                "phase": "ready",
+                "stage": "ready",
+                "model": model,
+                "message": message,
+                "determinate": True,
+                "percent": 100.0,
+            }
             self._record_log("success", message)
             self._adopt_runtime_device(device)
             self._arm_idle_model_release()
@@ -2916,9 +3062,15 @@ class Controller(QObject):
         if actual != "cpu":
             return
         current = str(self._settings.get("device") or "auto")
-        if current != "cuda":
+        selected_index = self._settings.get("device_index")
+        if current != "cuda" and selected_index is None:
             return
-        self._settings["device"] = "cpu"
+        # A pinned adapter that failed must not be retried on every next Live
+        # window.  Explicit CUDA falls back to CPU; Auto keeps Auto but drops
+        # the pin so its next probe may choose a different working path.
+        if current == "cuda":
+            self._settings["device"] = "cpu"
+        self._settings["device_index"] = None
         try:
             self.store.save_settings(self._settings)
         except Exception:  # noqa: BLE001
@@ -2927,7 +3079,11 @@ class Controller(QObject):
             "warning",
             "Откат: видеокарта не приняла Whisper, включён процессор.",
         )
-        self._notice = "Видеокарта не подошла для Whisper. Включён процессор."
+        self._notice = (
+            "Видеокарта не подошла для Whisper. Включён процессор."
+            if current == "cuda"
+            else "Выбранная видеокарта не подошла для Whisper. Пин снят, оставлен режим Авто."
+        )
 
     def _set_level(self, value):
         self._level = max(0.0, min(1.0, value)) if self.recording else 0.0
@@ -3437,7 +3593,9 @@ class Controller(QObject):
         if self._draft_engine is None:
             self._draft_engine = Engine()
         engine = self._draft_engine
-        if not engine.has_cached_model(draft, config.device):
+        if not engine.has_cached_model(
+            draft, config.device, config.device_index
+        ):
             # Прогрев в фоне: захват уже идёт, а первое окно черновика
             # подождёт загрузку само, не блокируя интерфейс.
             def warm() -> None:
@@ -3519,7 +3677,9 @@ class Controller(QObject):
         model = config.model
         if (
             self._prepared_model == model
-            and self.engine.has_cached_model(model, config.device)
+            and self.engine.has_cached_model(
+                model, config.device, config.device_index
+            )
         ):
             if preload_needed:
                 threading.Thread(
@@ -3605,7 +3765,9 @@ class Controller(QObject):
             return
         if self._model_preparing:
             return
-        if self.engine.has_cached_model(config.model, config.device):
+        if self.engine.has_cached_model(
+            config.model, config.device, config.device_index
+        ):
             self._prepared_model = config.model
             return
         self._begin_engine_prepare(
@@ -5771,7 +5933,12 @@ class Controller(QObject):
             )
         finally:
             stop_beat.set()
-        if needs_post_translate(self._settings.get("speech_mode")):
+        # A registered pair is an explicit user action and applies to file
+        # transcription as well as Live callbacks.  Previously only the
+        # built-in en_ru mode reached this post-pass, so an imported zh→ru
+        # model appeared selectable but silently left file text untranslated.
+        descriptor = getattr(self, "_translation_descriptor", lambda: None)()
+        if needs_post_translate(self._settings.get("speech_mode")) or descriptor is not None:
             results = [self._translate_segment(item) for item in results]
         collected = [item for item in collected if item["text"]] or results
         if self._trans_cancel.is_set():

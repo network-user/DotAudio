@@ -313,6 +313,9 @@ def build_briefing(
         "whisperReady": bool(whisper_ready),
         "profile": plan.profile,
         "device": device,
+        "deviceIndex": (
+            hardware.get("cudaGpuIndex") if device in {"cuda", "auto"} else None
+        ),
         "deviceLabel": {
             "cuda": "Видеокарта (CUDA)",
             "cpu": "Процессор (CPU)",
@@ -450,6 +453,15 @@ def merge_briefing(base: dict[str, Any], overrides: dict[str, Any] | None) -> di
 
     if "useGpu" in data:
         result["useGpu"] = bool(data["useGpu"])
+    if "deviceIndex" in data:
+        try:
+            result["deviceIndex"] = (
+                None
+                if data["deviceIndex"] in (None, "", -1)
+                else int(data["deviceIndex"])
+            )
+        except (TypeError, ValueError):
+            pass
     if "downloadLlm" in data:
         result["downloadLlm"] = bool(data["downloadLlm"])
     if "downloadWhisper" in data:

@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Python-3.12--3.13-3776AB?style=flat" alt="Python 3.12-3.13" />
   <img src="https://img.shields.io/badge/Platform-Windows_|_Linux_|_macOS-555?style=flat" alt="Windows Linux macOS" />
   <img src="https://img.shields.io/badge/Category-Desktop_ASR-555?style=flat" alt="Desktop ASR" />
-  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-49289-lightgrey?style=flat" alt="49289 lines of code" /><!-- loc:end -->
+  <!-- loc:start --><img src="https://img.shields.io/badge/lines_of_code-49638-lightgrey?style=flat" alt="49638 lines of code" /><!-- loc:end -->
 </p>
 
 <img src="docs/cover.svg" width="720" alt="DotAudio: речь и субтитры" />
@@ -150,6 +150,8 @@ python3.12 -m venv .venv
   сохранённое целевое окно (Windows) и сохранением исходной расшифровки в историю.
 - Локальный словарь терминов, исправлений и voice snippets для финального
   текста диктовки без передачи правил на сервер.
+- Ограниченная подсказка Whisper, настраиваемое короткое Live-окно,
+  стационарное шумоподавление и high-pass без изменения исходной записи.
 - Выбор и проверка устройств ввода и вывода, визуальный уровень сигнала.
 - Медиа-режим: аудио или видео, сегменты с таймкодами, ручное редактирование,
   undo/redo и сохранение в TXT, строку `00:16 - 00:20 [Диктор 2] текст`,
@@ -182,15 +184,20 @@ python3.12 -m venv .venv
 - Подбор языковой модели по измеренному железу: число потоков, объём ОЗУ,
   видеокарта и её память. Каталог показывает, что поместится целиком в
   видеопамять, а что будет считаться на процессоре. Видеокарты перечисляются по
-  вендору - NVIDIA, AMD, Intel, - а не по одному признаку «есть ли CUDA».
+  вендору - NVIDIA, AMD, Intel, - а не по одному признаку «есть ли CUDA»; на
+  системах с несколькими NVIDIA можно выбрать конкретный CUDA-индекс.
 - Предварительная оценка RAM/VRAM перед загрузкой Whisper, автоматический выбор
   безопасного compute type и явный fallback на CPU или другой доступный GPU.
-  Пока модель инициализируется, UI показывает неопределённый прогресс, а не
+  Проверка файлов, выделение памяти и готовность разделены статусами; пока
+  модель инициализируется, UI показывает неопределённый прогресс, а не
   зависание на условных 55 %.
 - Аппаратная validation-проверка без запуска inference: состояния `ready`,
   `fallback`, `insufficient`, `unknown` и `unavailable` попадают в «Диагностику».
   Отчёт можно скопировать в bounded text/JSON-формате без секретов, traceback и
   абсолютных путей.
+- Перевод остаётся явным действием: штатный EN → RU работает локально, а свои
+  пары, например zh → ru, импортируются из проверенного каталога CTranslate2
+  и применяются к Live и файловой расшифровке.
 - Опциональная обработка аудио: стационарное шумоподавление, high-pass и
   настраиваемое короткое окно Live. Все тяжёлые операции выполняются вне GUI.
 - При транскрибации с голосами Whisper и NeMo работают в согласованном
@@ -255,7 +262,7 @@ python3.12 -m venv .venv
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m dotaudio --smoke-test --data-dir .local-check
 ```
 
-Последняя проверка на машине разработки (Windows): `599 passed, 11 skipped`.
+Последняя проверка на машине разработки (Windows): `603 passed, 11 skipped`.
 `ruff check src tests` и QML smoke-test проходят. Три предупреждения относятся к
 FastAPI/Starlette TestClient и невозможности pytest записать `.pytest_cache` в
 управляемом окружении. Реальные
@@ -301,7 +308,8 @@ LoC-бейдж пересчитан fallback-методом: непустые с
 
 hardware.py + adapt.py + modelhub.py
   -> hardware validation (RAM/VRAM/CUDA, без inference)
-  -> engine preflight -> model cache -> фактическое runtime-устройство
+  -> engine preflight для выбранного CUDA-индекса -> model cache
+  -> фактическое runtime-устройство и CPU fallback
   -> Doctor -> bounded text/JSON report без секретов и абсолютных путей
 ```
 

@@ -150,10 +150,13 @@ class DownloadTracker:
             span = now - self._samples[0][0]
             if span > 0:
                 speed = (self._received - self._samples[0][1]) / span
-        percent = 100.0 * self._received / self._total if self._total else 0.0
+        determinate = self._total > 0
+        percent = 100.0 * self._received / self._total if determinate else None
         return {
             "phase": "download",
-            "percent": round(min(100.0, percent), 1),
+            "percent": round(min(100.0, percent), 1) if percent is not None else None,
+            "determinate": determinate,
+            "indeterminate": not determinate,
             "received_mb": round(self._received / 1048576, 1),
             "total_mb": round(self._total / 1048576, 1),
             "speed_mb_s": round(speed / 1048576, 1),
@@ -250,6 +253,10 @@ class RecognitionConfig:
 
     model: str = "base"
     device: str = "auto"
+    # None lets CTranslate2 choose its default CUDA device.  An explicit index
+    # is useful on laptops with an iGPU+dGPU pair or on workstations with more
+    # than one NVIDIA adapter.  It is intentionally ignored for CPU/remote.
+    device_index: int | None = None
     # Russian is the useful default for the article and avoids an unnecessary
     # language-identification pass at the beginning of a live subtitle.
     language: str = "ru"
@@ -311,14 +318,21 @@ class Engine:
     _MAX_REMOTE_RESPONSE_BYTES = 8 * 1024 * 1024
 
     def __init__(self) -> None:
-        self._models: OrderedDict[tuple[str, str], Any] = OrderedDict()
+        # (model, device, CUDA device index).  Keeping the index in the cache
+        # key prevents a model prepared on GPU 0 from being silently reused
+        # after the user selected GPU 1.
+        self._models: OrderedDict[tuple[str, str, int | None], Any] = OrderedDict()
         self._tokenizers: dict[tuple[str, str, str, str], Any] = {}
         self._detected_languages: dict[tuple[str, str], str] = {}
         # Последний compute_type, с которым модель реально поднялась.
         # Pascal/MX часто отказывают float16: следующий заход сразу берёт int8.
-        self._compute_ok: dict[tuple[str, str], str] = {}
+        self._compute_ok: dict[tuple[str, str, int | None], str] = {}
         # None = неизвестно, пробуем float16. False = Pascal/MX, сразу int8.
         self.cuda_float16: bool | None = None
+        # FP16 capability belongs to the selected CUDA ordinal, not to the
+        # Python process. A workstation may combine a modern RTX card with
+        # an older adapter that would stall during a float16 allocation.
+        self._cuda_float16_by_device: dict[int | None, bool | None] = {}
         self._live_window = True
         self._model_lock = Lock()
         self._load_lock = Lock()
@@ -404,13 +418,17 @@ class Engine:
         if self._cancelled(cancel):
             self._status(on_status, "cancelled")
             raise DownloadCancelled("model prepare cancelled")
-        self._status(on_status, "loading_model")
+        self._status(on_status, "checking_model_files")
         self._ensure_model_files(config.model, on_progress, cancel=cancel)
         if self._cancelled(cancel):
             self._status(on_status, "cancelled")
             raise DownloadCancelled("model prepare cancelled")
         model, device = self._model_for(
-            config.model, config.device, on_status, cancel=cancel
+            config.model,
+            config.device,
+            on_status,
+            device_index=config.device_index,
+            cancel=cancel,
         )
         if config.live_stream:
             warm_error = self._warm_live_decoder(
@@ -422,7 +440,7 @@ class Engine:
                     and device == "cuda"
                 ):
                     self._status(on_status, "gpu_unavailable_falling_back_cpu")
-                    self._drop_model(config.model, "cuda")
+                    self._drop_model(config.model, "cuda", config.device_index)
                     model, device = self._model_for(
                         config.model, "cpu", on_status, cancel=cancel
                     )
@@ -473,6 +491,7 @@ class Engine:
                 live_config.model,
                 live_config.device,
                 on_status,
+                device_index=live_config.device_index,
                 cancel=cancel,
             )
             if self._cancelled(cancel):
@@ -489,7 +508,7 @@ class Engine:
                 and self._should_fallback_cpu(live_config.device, warm)
             ):
                 self._status(on_status, "gpu_unavailable_falling_back_cpu")
-                self._drop_model(config.model, "cuda")
+                self._drop_model(config.model, "cuda", config.device_index)
                 model, device = self._model_for(
                     config.model, "cpu", on_status, cancel=cancel
                 )
@@ -513,16 +532,21 @@ class Engine:
         )
         return payload
 
-    def has_cached_model(self, model_name: str, requested_device: str) -> bool:
+    def has_cached_model(
+        self,
+        model_name: str,
+        requested_device: str,
+        device_index: int | None = None,
+    ) -> bool:
         """True, когда выбранная модель уже лежит в памяти процесса."""
 
-        return self._has_cached_model(model_name, requested_device)
+        return self._has_cached_model(model_name, requested_device, device_index)
 
     def last_device(self, model_name: str) -> str:
         """Устройство, на котором сейчас лежит эта модель, или пустая строка."""
 
         with self._model_lock:
-            for name, device in reversed(self._models):
+            for name, device, _device_index in reversed(self._models):
                 if name == model_name:
                     return device
         return ""
@@ -533,6 +557,13 @@ class Engine:
             raise ValueError("backend must be 'local' or 'remote'")
         if config.device not in {"auto", "cpu", "cuda"}:
             raise ValueError("device must be 'auto', 'cpu', or 'cuda'")
+        if config.device_index is not None:
+            try:
+                device_index = int(config.device_index)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("device_index must be a non-negative integer") from exc
+            if device_index < 0:
+                raise ValueError("device_index must be a non-negative integer")
         if config.task not in {"transcribe", "translate"}:
             raise ValueError("task must be 'transcribe' or 'translate'")
         if config.profile not in {"fast", "balanced", "quality"}:
@@ -580,7 +611,9 @@ class Engine:
     ) -> list[Segment]:
         """Run local inference, retrying once on CPU for CUDA runtime faults."""
 
-        if not self._has_cached_model(config.model, config.device):
+        if not self._has_cached_model(
+            config.model, config.device, config.device_index
+        ):
             self._status(on_status, "loading_model")
         try:
             return self._run_local(
@@ -595,7 +628,7 @@ class Engine:
             if not self._should_fallback_cpu(config.device, exc):
                 raise
             self._status(on_status, "gpu_unavailable_falling_back_cpu")
-            self._drop_model(config.model, "cuda")
+            self._drop_model(config.model, "cuda", config.device_index)
             return self._run_local(
                 source, config, "cpu", cancel, on_segment, on_status
             )
@@ -613,6 +646,7 @@ class Engine:
             config.model,
             requested_device,
             on_status,
+            device_index=(config.device_index if requested_device != "cpu" else None),
             cancel=cancel,
         )
         if requested_device == "cuda" and actual_device == "cpu":
@@ -1034,9 +1068,14 @@ class Engine:
         model_name: str,
         requested_device: str,
         on_status: StatusCallback | None = None,
+        device_index: int | None = None,
         cancel: Event | None = None,
     ) -> tuple[Any, str]:
         self._raise_if_cancelled(cancel)
+        if device_index is not None:
+            device_index = int(device_index)
+            if device_index < 0:
+                raise ValueError("device_index must be a non-negative integer")
         if requested_device == "auto":
             # Reuse the device that successfully handled the previous call.
             # In particular, after a CUDA runtime failure _run_local loads the
@@ -1045,12 +1084,19 @@ class Engine:
             # caption from reaching the UI.
             with self._model_lock:
                 cached_key = next(
-                    (key for key in reversed(self._models) if key[0] == model_name),
+                    (
+                        key
+                        for key in reversed(self._models)
+                        if key[0] == model_name
+                        and (device_index is None or key[2] == device_index)
+                    ),
                     None,
                 )
                 if cached_key is not None:
                     self._models.move_to_end(cached_key)
                     return self._models[cached_key], cached_key[1]
+            if device_index is None:
+                device_index = self._auto_cuda_index()
         # Явный cuda тоже откатывается на CPU: мастер часто пишет device=cuda
         # после установки рантайма, хотя карта не тянет float16/int8.
         candidates = (
@@ -1066,6 +1112,7 @@ class Engine:
                         model_name,
                         device,
                         on_status,
+                        device_index=(device_index if device == "cuda" else None),
                         cancel=cancel,
                     ),
                     device,
@@ -1080,11 +1127,42 @@ class Engine:
         assert last_error is not None
         raise last_error
 
-    def _has_cached_model(self, model_name: str, requested_device: str) -> bool:
+    @staticmethod
+    def _auto_cuda_index() -> int | None:
+        """Choose the measured best CUDA ordinal for an unpinned Auto path."""
+
+        try:
+            from dotaudio.hardware import probe
+
+            profile = probe(include_optional=False)
+            if int(profile.cuda_runtime_devices or 0) <= 0:
+                return None
+            selected = profile.cuda_gpu
+            return None if selected is None else int(selected.index)
+        except Exception:
+            # Missing telemetry must not make the default backend unusable;
+            # faster-whisper will then use its own CUDA default.
+            return None
+
+    def _has_cached_model(
+        self,
+        model_name: str,
+        requested_device: str,
+        device_index: int | None = None,
+    ) -> bool:
         with self._model_lock:
             if requested_device == "auto":
-                return any(name == model_name for name, _device in self._models)
-            return (model_name, requested_device) in self._models
+                return any(
+                    name == model_name
+                    and (device_index is None or cached_index == device_index)
+                    for name, _device, cached_index in self._models
+                )
+            key = (
+                model_name,
+                requested_device,
+                device_index if requested_device == "cuda" else None,
+            )
+            return key in self._models
 
     def _warm_live_decoder(
         self,
@@ -1194,10 +1272,17 @@ class Engine:
         model_name: str,
         device: str,
         on_status: StatusCallback | None = None,
+        device_index: int | None = None,
         cancel: Event | None = None,
     ) -> Any:
         self._raise_if_cancelled(cancel)
-        key = (model_name, device)
+        if device == "cuda" and device_index is not None:
+            device_index = int(device_index)
+            if device_index < 0:
+                raise ValueError("device_index must be a non-negative integer")
+        else:
+            device_index = None
+        key = (model_name, device, device_index)
         with self._model_lock:
             cached = self._models.get(key)
             if cached is not None:
@@ -1224,10 +1309,38 @@ class Engine:
             last_error: BaseException | None = None
             loaded = None
             used_type = ""
-            for compute_type in self._compute_types_for(model_name, device):
+            if device == "cuda":
+                # Avoid trying FP16 on Pascal/MX cards.  On those adapters
+                # CTranslate2 may spend a long time inside native allocation
+                # instead of raising a useful error, which used to look like a
+                # frozen 55% progress bar.
+                float16_support = self._cuda_float16_by_device.get(device_index)
+                if device_index is None and self.cuda_float16 is not None:
+                    float16_support = self.cuda_float16
+                if float16_support is None:
+                    try:
+                        from dotaudio.hardware import gpu_allows_efficient_float16, probe
+
+                        float16_support = gpu_allows_efficient_float16(
+                            probe(include_optional=False).as_dict(),
+                            device_index=device_index,
+                        )
+                    except Exception:
+                        float16_support = None
+                    self._cuda_float16_by_device[device_index] = float16_support
+                    # Keep the historical public attribute useful for callers
+                    # that do not pin a GPU; indexed paths use the map above.
+                    if device_index is None:
+                        self.cuda_float16 = float16_support
+            self._status(on_status, "allocating_model")
+            for compute_type in self._compute_types_for(
+                model_name, device, device_index
+            ):
                 self._raise_if_cancelled(cancel)
                 try:
-                    self._preflight_model(model_name, device, compute_type)
+                    self._preflight_model(
+                        model_name, device, compute_type, device_index=device_index
+                    )
                 except ModelPreflightError as exc:
                     last_error = exc
                     # A lower-memory CUDA compute type may still fit.  Keep
@@ -1236,17 +1349,39 @@ class Engine:
                         continue
                     raise
                 try:
-                    loaded = WhisperModel(
-                        model_name,
-                        device=device,
-                        compute_type=compute_type,
-                        cpu_threads=live_cpu_threads(),
-                    )
+                    model_kwargs = {
+                        "device": device,
+                        "compute_type": compute_type,
+                        "cpu_threads": live_cpu_threads(),
+                    }
+                    # Keep compatibility with test doubles and older
+                    # faster-whisper builds when no explicit GPU was selected.
+                    if device == "cuda" and device_index is not None:
+                        model_kwargs["device_index"] = device_index
+                    try:
+                        loaded = WhisperModel(model_name, **model_kwargs)
+                    except TypeError as exc:
+                        # Some older faster-whisper releases and lightweight
+                        # test doubles do not expose ``device_index`` yet.
+                        # Do not turn that compatibility gap into a false GPU
+                        # failure; the native package still receives the
+                        # ordinal whenever its constructor supports it.
+                        detail = str(exc).casefold()
+                        if "device_index" not in detail or "keyword" not in detail:
+                            raise
+                        model_kwargs.pop("device_index", None)
+                        loaded = WhisperModel(model_name, **model_kwargs)
                     used_type = compute_type
                     last_error = None
                     break
                 except _MODEL_LOAD_ERRORS as exc:
                     last_error = exc
+                    if device == "cuda" and compute_type == "float16":
+                        # A native FP16 rejection is stable for this adapter;
+                        # remember it so a later model switch starts at int8.
+                        self._cuda_float16_by_device[device_index] = False
+                        if device_index is None:
+                            self.cuda_float16 = False
                     if not self._is_compute_type_error(exc):
                         raise
             if loaded is None:
@@ -1267,6 +1402,8 @@ class Engine:
         model_name: str,
         device: str,
         compute_type: str,
+        *,
+        device_index: int | None = None,
     ) -> None:
         """Reject only a measured, clearly insufficient memory budget.
 
@@ -1287,6 +1424,7 @@ class Engine:
                 hardware,
                 device=device,
                 compute_type=compute_type,
+                device_index=device_index,
             )
         except Exception:
             return
@@ -1334,22 +1472,45 @@ class Engine:
             available_mb=int(available) if available is not None else None,
         )
 
-    def _drop_model(self, model_name: str, device: str) -> None:
+    def _drop_model(
+        self,
+        model_name: str,
+        device: str,
+        device_index: int | None = None,
+    ) -> None:
         with self._model_lock:
-            self._models.pop((model_name, device), None)
+            if device_index is None:
+                keys = [
+                    key
+                    for key in self._models
+                    if key[:2] == (model_name, device)
+                ]
+            else:
+                keys = [(model_name, device, device_index)]
+            for key in keys:
+                self._models.pop(key, None)
             for key in [k for k in self._tokenizers if k[:2] == (model_name, device)]:
                 self._tokenizers.pop(key, None)
             self._detected_languages.pop((model_name, device), None)
 
-    def _compute_types_for(self, model_name: str, device: str) -> tuple[str, ...]:
+    def _compute_types_for(
+        self,
+        model_name: str,
+        device: str,
+        device_index: int | None = None,
+    ) -> tuple[str, ...]:
         if device == "cuda":
-            if self.cuda_float16 is False:
+            float16_support = self._cuda_float16_by_device.get(device_index)
+            if device_index is None and float16_support is None:
+                float16_support = self.cuda_float16
+            if float16_support is False:
                 base = tuple(kind for kind in CUDA_COMPUTE_TYPES if kind != "float16")
             else:
                 base = CUDA_COMPUTE_TYPES
         else:
             base = CPU_COMPUTE_TYPES
-        last = self._compute_ok.get((model_name, device))
+        key = (model_name, device, device_index if device == "cuda" else None)
+        last = self._compute_ok.get(key)
         if last and last in base:
             return (last,) + tuple(kind for kind in base if kind != last)
         return base

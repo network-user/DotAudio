@@ -299,10 +299,12 @@ Item {
 
                         Label {
                             visible: modelCard.downloading
-                            text: Math.round(modelCard.dl.percent || 0) + "%"
-                                  + " · " + Math.round(modelCard.dl.received_mb || 0)
-                                  + " из " + Math.round(modelCard.dl.total_mb || 0) + " МБ"
-                                  + " · " + (modelCard.dl.speed_mb_s || 0) + " МБ/с"
+                            text: modelCard.dl.determinate === false
+                                  ? (Math.round(modelCard.dl.received_mb || 0) + " МБ скачано · размер неизвестен")
+                                  : (Math.round(modelCard.dl.percent || 0) + "%"
+                                     + " · " + Math.round(modelCard.dl.received_mb || 0)
+                                     + " из " + Math.round(modelCard.dl.total_mb || 0) + " МБ"
+                                     + " · " + (modelCard.dl.speed_mb_s || 0) + " МБ/с")
                             color: Theme.muted
                             font.pixelSize: Theme.fsSmall
                             font.family: Theme.monoFamily

@@ -94,8 +94,32 @@ def _number(mapping: dict, *keys: str) -> float | None:
     return None
 
 
-def _gpu_budget_gb(hardware: dict) -> float | None:
+def _gpu_budget_gb(
+    hardware: dict,
+    *,
+    device_index: int | None = None,
+) -> float | None:
     """Prefer current free VRAM; fall back to total VRAM when it is unknown."""
+
+    if device_index is not None:
+        for gpu in hardware.get("gpus") or ():
+            if not isinstance(gpu, dict):
+                continue
+            try:
+                index = int(gpu.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if index != device_index:
+                continue
+            vendor = str(gpu.get("vendor") or "").casefold()
+            name = str(gpu.get("name") or "").casefold()
+            if vendor != "nvidia" and "nvidia" not in name:
+                return None
+            free = _number(gpu, "vramFreeMb", "vram_free_mb")
+            total = _number(gpu, "vramMb", "vram_mb")
+            value = free if free is not None else total
+            return None if value is None else max(0.0, value) / 1024.0
+        return None
 
     direct_free = _number(
         hardware,
@@ -184,6 +208,7 @@ def assess_whisper_model_fit(
     *,
     device: str = "cpu",
     compute_type: str = "int8",
+    device_index: int | None = None,
 ) -> dict[str, Any]:
     """Assess whether a model has enough *currently available* memory.
 
@@ -211,7 +236,7 @@ def assess_whisper_model_fit(
     available_ram_mb = (
         None if available_ram_gb is None else max(0.0, available_ram_gb * 1024)
     )
-    available_vram_gb = _gpu_budget_gb(hardware)
+    available_vram_gb = _gpu_budget_gb(hardware, device_index=device_index)
     available_vram_mb = (
         None if available_vram_gb is None else max(0.0, available_vram_gb * 1024)
     )
@@ -287,13 +312,6 @@ def _float_or_none(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
-
-
-def _gpu_vram_gb(hardware: dict) -> float | None:
-    vram = hardware.get("gpuVramGb")
-    if vram is None:
-        vram = hardware.get("vram_gb")
-    return _float_or_none(vram)
 
 
 def _has_nvidia(hardware: dict) -> bool:

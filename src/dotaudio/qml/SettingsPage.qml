@@ -8,6 +8,21 @@ Item {
     readonly property bool setupAlive: setup !== null && setup !== undefined
     readonly property bool setupVisible: setupAlive && Boolean(setup.visible)
     readonly property bool setupBusy: setupAlive && Boolean(setup.busy)
+    readonly property var cudaGpuOptions: {
+        var result = [{ label: "Авто · подходящая CUDA-карта", index: -1 }]
+        var cards = (bridge.hardware && bridge.hardware.gpus) || []
+        for (var i = 0; i < cards.length; ++i) {
+            var card = cards[i] || {}
+            var vendor = String(card.vendor || "").toLowerCase()
+            if (vendor !== "nvidia" || Boolean(card.integrated))
+                continue
+            var memory = card.vramGb !== null && card.vramGb !== undefined
+                         ? (" · " + card.vramGb + " ГБ") : ""
+            result.push({ label: String(card.name || ("NVIDIA GPU " + (card.index + 1))) + memory,
+                         index: Number(card.index) })
+        }
+        return result
+    }
 
     Flickable {
         anchors.fill: parent
@@ -256,6 +271,41 @@ Item {
                             color: Theme.faint
                             font.pixelSize: Theme.fsSmall
                             font.family: Theme.monoFamily
+                        }
+                    }
+                    RowLayout {
+                        visible: cudaGpuOptions.length > 1
+                        Layout.fillWidth: true
+                        spacing: Theme.gapSm
+                        Label {
+                            text: "CUDA-устройство"
+                            color: Theme.muted
+                            font.pixelSize: Theme.fsLabel
+                        }
+                        Dropdown {
+                            Layout.preferredWidth: 330
+                            Layout.maximumWidth: 430
+                            model: cudaGpuOptions
+                            textRole: "label"
+                            currentIndex: {
+                                var selected = bridge.settings.device_index
+                                if (selected === null || selected === undefined || Number(selected) < 0)
+                                    return 0
+                                for (var i = 1; i < cudaGpuOptions.length; ++i) {
+                                    if (Number(cudaGpuOptions[i].index) === Number(selected))
+                                        return i
+                                }
+                                return 0
+                            }
+                            enabled: !bridge.gpuSetup.busy && !bridge.recording
+                            onActivated: bridge.selectGpuDevice(Number(cudaGpuOptions[index].index))
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: "Индекс передаётся непосредственно faster-whisper/CUDA"
+                            color: Theme.faint
+                            font.pixelSize: Theme.fsMicro
+                            wrapMode: Text.Wrap
                         }
                     }
                     Rectangle {
@@ -515,9 +565,9 @@ Item {
                             }
                         }
                     }
-                 }
-             }
-            Rectangle {
+                        }
+                    }
+                    Rectangle {
                 Layout.fillWidth: true
                 implicitHeight: deviceBox.implicitHeight + 2 * Theme.padCard
                 radius: Theme.radiusLg
@@ -713,6 +763,30 @@ Item {
                     }
                     RowLayout {
                         Layout.fillWidth: true
+                        Label {
+                            Layout.fillWidth: true
+                            text: "Подсказка Whisper"
+                            color: Theme.text
+                            font.pixelSize: Theme.fsLabel
+                        }
+                        TextField {
+                            Layout.fillWidth: true
+                            Layout.preferredWidth: 360
+                            maximumLength: 700
+                            text: String(bridge.settings.model_prompt || "")
+                            placeholderText: "Например: названия компаний и технические термины"
+                            onEditingFinished: bridge.setSetting("model_prompt", text)
+                        }
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        text: "Это контекст для распознавания: термины и стиль пунктуации. Он не переписывает сохранённый текст и не отправляется на сервер."
+                        color: Theme.faint
+                        font.pixelSize: Theme.fsMicro
+                        wrapMode: Text.Wrap
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
                         Label { Layout.fillWidth: true; text: "Подавление стационарного шума"; color: Theme.text; font.pixelSize: Theme.fsLabel }
                         ToggleSwitch {
                             checked: Boolean(bridge.settings.noise_reduction)
@@ -725,6 +799,14 @@ Item {
                         Label { Layout.fillWidth: true; text: "Сила фильтра: " + Math.round(Number(bridge.settings.noise_reduction_strength || 0.75) * 100) + "%"; color: Theme.muted; font.pixelSize: Theme.fsSmall }
                         PillButton { text: "Мягче"; compact: true; onClicked: bridge.setSetting("noise_reduction_strength", 0.45) }
                         PillButton { text: "Сильнее"; compact: true; onClicked: bridge.setSetting("noise_reduction_strength", 0.85) }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: Boolean(bridge.settings.noise_reduction)
+                        Label { Layout.fillWidth: true; text: "Фильтр низких частот: " + (Number(bridge.settings.noise_highpass_hz || 0) > 0 ? Number(bridge.settings.noise_highpass_hz).toFixed(0) + " Гц" : "выкл."); color: Theme.muted; font.pixelSize: Theme.fsSmall }
+                        PillButton { text: "Выкл."; compact: true; onClicked: bridge.setSetting("noise_highpass_hz", 0) }
+                        PillButton { text: "80 Гц"; compact: true; onClicked: bridge.setSetting("noise_highpass_hz", 80) }
+                        PillButton { text: "120 Гц"; compact: true; onClicked: bridge.setSetting("noise_highpass_hz", 120) }
                     }
                     RowLayout {
                         Layout.fillWidth: true
