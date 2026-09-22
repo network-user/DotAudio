@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from typing import Any, Callable
 
 import numpy as np
@@ -118,6 +118,7 @@ class VoskEngine:
         config: RecognitionConfig,
         on_status: StatusCallback | None = None,
         on_progress: ProgressCallback | None = None,
+        cancel: Event | None = None,
     ) -> str:
         """Скачивание/загрузка vosk-модели. Возвращает подпись движка.
 
@@ -125,6 +126,8 @@ class VoskEngine:
         повторный вызов не трогает сеть, а сразу шлёт ``model_ready``.
         """
         name = self._target or vosk_model_name("small")
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError("Подготовка отменена")
         with self._lock:
             if self._model is not None and self._model_name == name:
                 self._signal(on_status, "model_ready")
@@ -138,6 +141,8 @@ class VoskEngine:
                     pass
             # Model(model_name=...) сам найдёт/скачает и распакует нужную модель.
             model = vosk.Model(model_name=name)
+            if cancel is not None and cancel.is_set():
+                return "vosk"
             self._model = model
             self._vosk = vosk
             self._model_name = name

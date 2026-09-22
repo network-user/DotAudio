@@ -58,7 +58,7 @@ preflight сравнивает VRAM выбранного адаптера, а н
 пара применяется и к файловой расшифровке; цикл режимов также включает
 multilingual. В Settings добавлены bounded-подсказка Whisper и high-pass.
 
-Проверки этой итерации: `pytest -q` - `603 passed, 11 skipped, 3 warnings`;
+Проверки этой итерации: `pytest -q` - `604 passed, 11 skipped, 3 warnings`;
 `ruff check src tests` и QML offscreen smoke-test проходят. Реальная RTX 4060,
 несколько GPU, микрофон и end-to-end Unix в этой сессии не проверялись вручную;
 для них нужен целевой компьютер.

@@ -405,6 +405,7 @@ QUIT_HOTKEY_OPTIONS = {
 }
 
 STATUS_LABELS = {
+    "preparing_vad": "Подготавливаем фильтр речи…",
     "checking_model_files": "Проверяем файлы модели в кэше…",
     "loading_model": "Загружаем выбранную модель…",
     "allocating_model": "Загружаем модель в память видеокарты… Процент недоступен",
@@ -750,6 +751,12 @@ class Controller(QObject):
     updateFinished = Signal("QVariantMap")
     hardwareArrived = Signal(object)
     translationModelsChanged = Signal()
+    # Подготовка модели обновляется чаще обычных настроек. Отдельные сигналы
+    # не заставляют QML заново читать историю, устройства и весь каталог.
+    modelChanged = Signal()
+    modelDownloadChanged = Signal()
+    modelPrepareStatusArrived = Signal(str, str)
+    modelLibraryArrived = Signal(object)
 
     def __init__(self, data_dir: Path, desktop):
         super().__init__()
@@ -895,6 +902,10 @@ class Controller(QObject):
             "phase": "idle",
             "model": self._settings["model"],
             "message": "Модель ещё не подготовлена",
+            "stage": "idle",
+            "determinate": False,
+            "percent": -1.0,
+            "elapsed_s": 0.0,
         }
         self._model_preparing = False
         self._model_download = {}
@@ -913,10 +924,24 @@ class Controller(QObject):
         self._model_prepare_done = threading.Event()
         self._prepared_model = ""
         self._model_prepare_error = ""
+        self._model_prepare_model = ""
+        self._model_pending_model = ""
+        self._model_prepare_serial = 0
+        self._model_prepare_started_at = 0.0
+        self._model_library_scan_serial = 0
         # Фоновый прогрев (и повтор после смены модели) включается только из
         # app.main: unit-тесты не должны скачивать Whisper при setSetting.
         self._warmup_enabled = False
-        self._model_library = [Engine.disk_status(name) for name in ("tiny", "base", "small", "medium", "large-v3", "turbo")]
+        self._model_library = [
+            {
+                "model": name,
+                "ready": False,
+                "bytes": 0,
+                "path": "",
+                "message": "Проверяем локальный кэш…",
+            }
+            for name in MODEL_CATALOG
+        ]
         # Сводка железа приехает фоном: импорт ctranslate2 для проверки CUDA
         # стоит сотни миллисекунд и не должен задерживать первый кадр окна.
         self._hardware = {
@@ -993,6 +1018,8 @@ class Controller(QObject):
         self.modelProgressArrived.connect(self._on_model_progress)
         self.modelDownloadProgress.connect(self._on_model_download_progress)
         self.modelFinished.connect(self._on_model_finished)
+        self.modelPrepareStatusArrived.connect(self._on_model_prepare_status)
+        self.modelLibraryArrived.connect(self._on_model_library_arrived)
         self.outputsArrived.connect(self._set_outputs)
         self.loopbacksArrived.connect(self._set_loopbacks)
         self.deviceTestLevelArrived.connect(self._on_device_test_level)
@@ -1034,6 +1061,7 @@ class Controller(QObject):
         self.refreshLoopbacks()
         self._sync_watch_folder()
         self._record_log("system", "DotAudio запущен. Выберите модель или начните работу.")
+        self._refresh_model_library_async()
         recoverable = self.store.list_recoverable_sessions()
         if recoverable:
             self._record_log(
@@ -1102,16 +1130,16 @@ class Controller(QObject):
     @Property("QVariantList", notify=logsChanged)
     def logs(self): return self._logs
 
-    @Property("QVariantMap", notify=changed)
+    @Property("QVariantMap", notify=modelChanged)
     def modelState(self): return self._model_state
 
-    @Property("QVariantList", notify=changed)
+    @Property("QVariantList", notify=modelChanged)
     def modelLibrary(self): return self._model_library
 
-    @Property(bool, notify=changed)
+    @Property(bool, notify=modelChanged)
     def modelPreparing(self): return self._model_preparing
 
-    @Property("QVariantMap", notify=changed)
+    @Property("QVariantMap", notify=modelDownloadChanged)
     def modelDownload(self): return self._model_download
 
     @Property("QVariantMap", notify=changed)
@@ -1389,6 +1417,11 @@ class Controller(QObject):
         self._model_prepare_done.clear()
         self._prepared_model = ""
         self._model_prepare_error = ""
+        self._model_prepare_model = model
+        self._model_pending_model = ""
+        self._model_prepare_started_at = time.monotonic()
+        self._model_prepare_serial += 1
+        self._model_download = {}
         self._model_preparing = True
         self._gpu_setup = {
             "phase": "model_loading",
@@ -1399,15 +1432,17 @@ class Controller(QObject):
             "restartRequired": False,
         }
         self._model_state = {
-            "phase": "downloading",
-            "stage": "checking",
+            "phase": "checking",
+            "stage": "checking_model_files",
             "model": model,
             "message": "Проверяем кэш и готовим модель на GPU…",
             "determinate": False,
             "percent": -1.0,
+            "elapsed_s": 0.0,
         }
         self._record_log("info", f"Подготовка модели {model} на CUDA.")
-        self.changed.emit()
+        self.modelDownloadChanged.emit()
+        self.modelChanged.emit()
 
         def prepare():
             try:
@@ -1469,6 +1504,7 @@ class Controller(QObject):
                     config,
                     status,
                     progress,
+                    cancel=self._prepare_cancel,
                 )
                 if self._prepare_cancel.is_set():
                     self.modelFinished.emit(model, "", "Подготовка отменена")
@@ -1490,6 +1526,7 @@ class Controller(QObject):
                             replace(config, device="cpu"),
                             status,
                             progress,
+                            cancel=self._prepare_cancel,
                         )
                 except Exception:  # noqa: BLE001
                     fallback_device = ""
@@ -2405,6 +2442,8 @@ class Controller(QObject):
                 value = int(value)
             except (TypeError, ValueError):
                 return
+        previous_model = str(self._settings.get("model") or "")
+        previous_value = self._settings.get(name)
         source_changed = (
             name in {"live_source", "input_device", "loopback_device", "output_device"}
             and self._settings.get(name) != value
@@ -2461,6 +2500,12 @@ class Controller(QObject):
             current = str(self._settings.get("model") or "")
             if PROFILE_FOR_MODEL.get(current) != value:
                 self._settings["model"] = MODEL_BY_PROFILE[value]
+        selected_model = str(self._settings.get("model") or "")
+        model_changed = selected_model != previous_model
+        preparation_target_changed = model_changed or (
+            name in {"device", "backend", "live_engine", "vosk_size"}
+            and previous_value != value
+        )
         if source_changed:
             # Проверка относится ровно к тому устройству, которое было открыто.
             # После смены входа старый «готово» нельзя оставлять рядом с кнопкой
@@ -2474,13 +2519,53 @@ class Controller(QObject):
             self._sync_watch_folder()
         if name == "history_semantic":
             self.refreshHistory(self._query)
-        if name == "model":
+        if preparation_target_changed and self._model_preparing:
+            active_model = str(
+                getattr(self, "_model_prepare_model", "")
+                or self._model_state.get("model")
+                or ""
+            )
+            # Keep only the latest choice. The current native load is
+            # cancelled cooperatively; its completion starts this target.
+            if active_model != selected_model or self._model_pending_model or not model_changed:
+                self._model_pending_model = selected_model
+                self._prepare_cancel.set()
+                self._model_download = {}
+                self._model_state = {
+                    "phase": "queued",
+                    "stage": "queued",
+                    "model": selected_model,
+                    "message": (
+                        f"Обновляем подготовку {selected_model}… "
+                        "завершаем текущую подготовку"
+                    ),
+                    "determinate": False,
+                    "percent": -1.0,
+                    "elapsed_s": 0.0,
+                }
+                self._record_log(
+                    "info",
+                    (
+                        f"Запрошено переключение модели: {selected_model}."
+                        if model_changed
+                        else f"Запрошено обновление подготовки: {name}."
+                    ),
+                )
+                self.modelDownloadChanged.emit()
+                self.modelChanged.emit()
+        elif model_changed:
+            self._model_pending_model = ""
             self._model_state = {
                 "phase": "idle",
-                "model": str(value),
+                "stage": "idle",
+                "model": selected_model,
                 "message": "Модель выбрана и ждёт подготовки",
+                "determinate": False,
+                "percent": -1.0,
+                "elapsed_s": 0.0,
             }
-            self._record_log("info", f"Выбрана модель: {value}")
+            self._record_log("info", f"Выбрана модель: {selected_model}")
+            self.modelChanged.emit()
         elif name in (
             "device", "backend", "source", "live_source", "language", "task",
             "speech_mode", "live_sensitivity", "device_index",
@@ -2830,32 +2915,46 @@ class Controller(QObject):
         # Preparation runs without a transcription job, so the old handler
         # only changed the global status and the model card stayed on a vague
         # 55% label.  Keep a separate, honest stage for the model workflow.
+        model_updated = False
         if getattr(self, "_model_preparing", False) and value in {
+            "preparing_vad",
             "checking_model_files",
             "loading_model",
             "allocating_model",
             "gpu_unavailable_falling_back_cpu",
         }:
-            stage_messages = {
-                "checking_model_files": "Проверяем файлы модели в локальном кэше…",
-                "loading_model": "Готовим модель к загрузке…",
-                "allocating_model": (
-                    "Загружаем модель в память видеокарты… "
-                    "процент недоступен, ждём ответа CUDA"
-                ),
-                "gpu_unavailable_falling_back_cpu": (
-                    "Видеокарта не ответила, безопасно переходим на процессор…"
-                ),
-            }
-            self._model_state = {
-                **self._model_state,
-                "phase": "model_loading" if value in {"loading_model", "allocating_model"} else "checking",
-                "stage": value,
-                "model": self._model_state.get("model") or self._settings.get("model"),
-                "message": stage_messages[value],
-                "determinate": False,
-                "percent": -1.0,
-            }
+            active_model = str(
+                getattr(self, "_model_prepare_model", "")
+                or self._model_state.get("model")
+                or self._settings.get("model")
+            )
+            pending = str(getattr(self, "_model_pending_model", "") or "")
+            cancelled = bool(
+                getattr(self, "_prepare_cancel", None) is not None
+                and self._prepare_cancel.is_set()
+            )
+            if not cancelled and (not pending or pending == active_model):
+                phase, message = self._model_stage_payload(str(value))
+                self._model_state = {
+                    **self._model_state,
+                    "phase": phase,
+                    "stage": value,
+                    "model": active_model,
+                    "message": message,
+                    "determinate": False,
+                    "percent": -1.0,
+                    "elapsed_s": round(
+                        max(
+                            0.0,
+                            time.monotonic()
+                            - float(getattr(self, "_model_prepare_started_at", 0.0) or 0.0),
+                        ),
+                        1,
+                    ),
+                }
+                self._status = STATUS_LABELS.get(str(value), message)
+                model_updated = True
+                self.modelChanged.emit()
         if self._jobs:
             label = STATUS_LABELS.get(value, value)
             if self.liveActive:
@@ -2895,6 +2994,9 @@ class Controller(QObject):
             if value != self._last_status:
                 self._last_status = value
                 self._record_log("info", label)
+        if model_updated:
+            self.statusChanged.emit()
+            return
         self.changed.emit()
 
     def _record_log(self, tone, message):
@@ -2980,62 +3082,201 @@ class Controller(QObject):
         self._record_log(tone, message)
         self.changed.emit()
 
-    def _on_model_progress(self, model, message):
+    def _model_prepare_event_is_current(self, model: str) -> bool:
+        """Reject progress from a preparation that was superseded by a switch."""
+
+        if not getattr(self, "_model_preparing", False):
+            return False
+        if getattr(self, "_prepare_cancel", None) is not None and self._prepare_cancel.is_set():
+            return False
+        active = str(getattr(self, "_model_prepare_model", "") or "")
+        if active and active != str(model):
+            return False
+        pending = str(getattr(self, "_model_pending_model", "") or "")
+        return not pending or pending == str(model)
+
+    @staticmethod
+    def _model_stage_payload(value: str) -> tuple[str, str]:
+        messages = {
+            "preparing_vad": "Подготавливаем фильтр речи перед запуском…",
+            "checking_model_files": "Проверяем файлы модели в локальном кэше…",
+            "loading_model": "Готовим модель к загрузке в память…",
+            "allocating_model": (
+                "Загружаем модель в память видеокарты… "
+                "процент недоступен, ждём ответа CUDA"
+            ),
+            "gpu_unavailable_falling_back_cpu": (
+                "Видеокарта не ответила, безопасно переходим на процессор…"
+            ),
+            "model_ready": "Модель отвечает и готова к работе.",
+        }
+        phases = {
+            "preparing_vad": "preparing",
+            "checking_model_files": "checking",
+            "loading_model": "loading",
+            "allocating_model": "loading",
+            "gpu_unavailable_falling_back_cpu": "fallback",
+            "model_ready": "ready",
+        }
+        return phases.get(value, "preparing"), messages.get(value, STATUS_LABELS.get(value, value))
+
+    def _on_model_prepare_status(self, model, value):
+        if not self._model_prepare_event_is_current(str(model)):
+            return
+        phase, message = self._model_stage_payload(str(value))
         self._model_state = {
-            "phase": "downloading",
-            "stage": "download",
-            "model": model,
+            **self._model_state,
+            "phase": phase,
+            "stage": str(value),
+            "model": str(model),
             "message": message,
             "determinate": False,
             "percent": -1.0,
+            "elapsed_s": round(
+                max(0.0, time.monotonic() - self._model_prepare_started_at), 1
+            ),
         }
-        self._record_log("info", message)
-        self.changed.emit()
+        label = STATUS_LABELS.get(str(value), message)
+        self._status = label
+        if str(value) != getattr(self, "_last_model_stage", ""):
+            self._last_model_stage = str(value)
+            self._record_log("info", label)
+        self.statusChanged.emit()
+        self.modelChanged.emit()
+
+    def _on_model_progress(self, model, message):
+        if not self._model_prepare_event_is_current(str(model)):
+            return
+        self._model_state = {
+            **self._model_state,
+            "phase": "checking",
+            "stage": "checking_model_files",
+            "model": str(model),
+            "message": str(message),
+            "determinate": False,
+            "percent": -1.0,
+            "elapsed_s": round(
+                max(0.0, time.monotonic() - self._model_prepare_started_at), 1
+            ),
+        }
+        self._status = str(message)
+        self._record_log("info", str(message))
+        self.statusChanged.emit()
+        self.modelChanged.emit()
 
     def _on_model_download_progress(self, model, info):
         # Проценты и скорость считает трекер загрузки в движке по факту
         # полученных байтов; сюда прилетает уже готовый снимок ~3 раза в
         # секунду. Состояние гонки не боится: снимок словарь.
-        self._model_download = {"model": str(model), **dict(info or {})}
-        if self._model_preparing:
-            payload = dict(info or {})
-            phase = str(payload.get("phase") or "download")
-            if phase == "download":
-                percent = payload.get("percent")
-                determinate = isinstance(percent, (int, float)) and float(percent) >= 0
-                self._model_state = {
-                    **self._model_state,
-                    "phase": "downloading",
-                    "stage": "download",
-                    "model": str(model),
-                    "message": (
-                        f"Скачиваем файлы модели: {float(percent):.1f}%"
-                        if determinate
-                        else "Скачиваем файлы модели… размер пока неизвестен"
-                    ),
-                    "determinate": determinate,
-                    "percent": float(percent) if determinate else -1.0,
-                }
-        self.changed.emit()
+        if self._model_preparing and not self._model_prepare_event_is_current(str(model)):
+            return
+        payload = dict(info or {})
+        self._model_download = {"model": str(model), **payload}
+        self.modelDownloadChanged.emit()
+        if not self._model_preparing:
+            return
+        phase = str(payload.get("phase") or "download")
+        if phase != "download":
+            return
+        percent = payload.get("percent")
+        determinate = isinstance(percent, (int, float)) and float(percent) >= 0
+        self._model_state = {
+            **self._model_state,
+            "phase": "downloading",
+            "stage": "download",
+            "model": str(model),
+            "message": (
+                f"Скачиваем файлы модели: {float(percent):.1f}%"
+                if determinate
+                else "Скачиваем файлы модели… размер пока неизвестен"
+            ),
+            "determinate": determinate,
+            "percent": float(percent) if determinate else -1.0,
+            "received_mb": float(payload.get("received_mb") or 0.0),
+            "total_mb": float(payload.get("total_mb") or 0.0),
+            "speed_mb_s": float(payload.get("speed_mb_s") or 0.0),
+            "elapsed_s": round(
+                max(0.0, time.monotonic() - self._model_prepare_started_at), 1
+            ),
+        }
+        self._status = self._model_state["message"]
+        self.statusChanged.emit()
+        self.modelChanged.emit()
 
     def _on_model_finished(self, model, device, error):
-        self._model_preparing = False
-        self._model_download = {}
-        self._prepared_model = "" if error else model
-        self._model_prepare_error = str(error or "")
+        model = str(model)
+        if (
+            getattr(self, "_model_prepare_model", "")
+            and model != str(self._model_prepare_model)
+        ):
+            return
+        raw_error = str(error or "")
+        pending = str(getattr(self, "_model_pending_model", "") or "")
+        cancelled = bool(raw_error) and "отмен" in raw_error.casefold()
+
         self._model_prepare_done.set()
-        self._model_library = [Engine.disk_status(name) for name in ("tiny", "base", "small", "medium", "large-v3", "turbo")]
-        if error:
-            friendly = explain_transcribe_error(error)
+        self._model_download = {}
+        self.modelDownloadChanged.emit()
+
+        # A switch is a small queue, not an error. The old native constructor
+        # may take a while to return; only then is it safe to ask Engine for the
+        # next model because it deliberately keeps one instance in memory.
+        if pending:
+            self._model_preparing = False
+            self._prepared_model = ""
+            self._model_prepare_error = ""
+            self._model_prepare_model = ""
+            self._model_pending_model = pending
+            self._model_prepare_started_at = 0.0
             self._model_state = {
-                "phase": "error",
-                "model": model,
-                "message": friendly,
-                "error": str(error),
+                "phase": "queued",
+                "stage": "queued",
+                "model": pending,
+                "message": f"Переключаемся на {pending}… готовим после освобождения памяти",
                 "determinate": False,
                 "percent": -1.0,
+                "elapsed_s": 0.0,
             }
-            self._record_log("error", friendly)
+            self._status = self._model_state["message"]
+            self._record_log("info", f"Предыдущая модель освобождена, запускаем {pending}.")
+            self.statusChanged.emit()
+            self.modelChanged.emit()
+            QTimer.singleShot(0, self.prepareSelectedModel)
+            return
+
+        self._model_preparing = False
+        self._model_prepare_model = ""
+        self._model_prepare_started_at = 0.0
+        self._prepared_model = "" if raw_error else model
+        self._model_prepare_error = raw_error
+        if raw_error:
+            if cancelled or self._prepare_cancel.is_set():
+                self._model_state = {
+                    "phase": "cancelled",
+                    "stage": "cancelled",
+                    "model": model,
+                    "message": "Подготовка модели остановлена. Её можно запустить снова.",
+                    "error": raw_error,
+                    "determinate": False,
+                    "percent": -1.0,
+                    "elapsed_s": 0.0,
+                }
+                self._status = self._model_state["message"]
+                self._record_log("warning", f"Подготовка модели {model} остановлена.")
+            else:
+                friendly = explain_transcribe_error(raw_error)
+                self._model_state = {
+                    "phase": "error",
+                    "stage": "error",
+                    "model": model,
+                    "message": friendly,
+                    "error": raw_error,
+                    "determinate": False,
+                    "percent": -1.0,
+                    "elapsed_s": 0.0,
+                }
+                self._status = friendly
+                self._record_log("error", friendly)
         else:
             placement = "на сервере" if device == "remote" else f"на {device}"
             message = f"Модель {model} готова {placement}."
@@ -3046,14 +3287,48 @@ class Controller(QObject):
                 "message": message,
                 "determinate": True,
                 "percent": 100.0,
+                "elapsed_s": 0.0,
             }
+            self._status = message
             self._record_log("success", message)
             self._adopt_runtime_device(device)
             self._arm_idle_model_release()
-        self.changed.emit()
+        self.statusChanged.emit()
+        self.modelChanged.emit()
+        self._refresh_model_library_async()
         if getattr(self, "_doctor_fix_pending", False):
             self._doctor_fix_pending = False
             QTimer.singleShot(0, self.runTranscriptDoctor)
+
+    def _on_model_library_arrived(self, payload) -> None:
+        data = dict(payload or {})
+        if int(data.get("serial") or 0) != self._model_library_scan_serial:
+            return
+        library = data.get("items")
+        if not isinstance(library, list):
+            return
+        self._model_library = list(library)
+        self.modelChanged.emit()
+
+    def _refresh_model_library_async(self) -> None:
+        """Read cache metadata away from the Qt thread."""
+
+        self._model_library_scan_serial += 1
+        serial = self._model_library_scan_serial
+        names = tuple(MODEL_CATALOG)
+
+        def scan() -> None:
+            try:
+                items = [Engine.disk_status(name) for name in names]
+            except Exception:
+                return
+            self.modelLibraryArrived.emit({"serial": serial, "items": items})
+
+        threading.Thread(
+            target=scan,
+            name="dotaudio-model-cache-scan",
+            daemon=True,
+        ).start()
 
     def _adopt_runtime_device(self, device) -> None:
         """Если Whisper ушёл на CPU, не оставлять в настройках сломанный cuda."""
@@ -3533,6 +3808,13 @@ class Controller(QObject):
 
     def _tick(self):
         self._sync_process_priority()
+        if self._model_preparing and self._model_prepare_started_at:
+            state = dict(self._model_state)
+            state["elapsed_s"] = round(
+                max(0.0, time.monotonic() - self._model_prepare_started_at), 1
+            )
+            self._model_state = state
+            self.modelChanged.emit()
         if self._jobs:
             if self.liveActive and self._capture_started_at is None:
                 return
@@ -3642,9 +3924,13 @@ class Controller(QObject):
             "phase": "idle",
             "model": self._settings["model"],
             "message": "Модель выгружена после 10 минут простоя.",
+            "stage": "idle",
+            "determinate": False,
+            "percent": -1.0,
+            "elapsed_s": 0.0,
         }
         self._record_log("info", "Модель выгружена из памяти после простоя.")
-        self.changed.emit()
+        self.modelChanged.emit()
 
     @Slot()
     def prepareSelectedModel(self):
@@ -3662,9 +3948,9 @@ class Controller(QObject):
             model = engine.model_name if getattr(engine, "model_name", None) else size
             self._begin_engine_prepare(
                 model_label=str(model),
-                prepare_fn=lambda on_status, on_progress: engine.prepare(
+                prepare_fn=lambda on_status, on_progress, cancel: engine.prepare(
                     self._config(live_stream=True), on_status, on_progress,
-                    cancel=self._prepare_cancel,
+                    cancel=cancel,
                 ),
                 preload_vad=preload_needed,
             )
@@ -3691,8 +3977,8 @@ class Controller(QObject):
         self._acquire_asr_vram(config)
         self._begin_engine_prepare(
             model_label=model,
-            prepare_fn=lambda on_status, on_progress: self.engine.prepare(
-                config, on_status, on_progress, cancel=self._prepare_cancel,
+            prepare_fn=lambda on_status, on_progress, cancel: self.engine.prepare(
+                config, on_status, on_progress, cancel=cancel,
             ),
             preload_vad=preload_needed,
         )
@@ -3702,46 +3988,78 @@ class Controller(QObject):
 
         if self._model_preparing:
             return
-        self._prepare_cancel = threading.Event()
+        cancel_event = threading.Event()
+        self._prepare_cancel = cancel_event
         self._model_prepare_done.clear()
         self._prepared_model = ""
         self._model_prepare_error = ""
+        self._model_prepare_model = str(model_label)
+        self._model_pending_model = ""
+        self._model_prepare_serial += 1
+        serial = self._model_prepare_serial
+        self._model_prepare_started_at = time.monotonic()
+        self._last_model_stage = ""
         self._model_preparing = True
         self._model_state = {
-            "phase": "downloading",
+            "phase": "checking",
+            "stage": "checking_model_files",
             "model": model_label,
             "message": "Проверяем кэш и готовим модель…",
+            "determinate": False,
+            "percent": -1.0,
+            "elapsed_s": 0.0,
         }
+        self._model_download = {}
         self._record_log("info", f"Подготовка модели {model_label} начата.")
-        self.changed.emit()
+        self.modelDownloadChanged.emit()
+        self.modelChanged.emit()
+
+        def is_current() -> bool:
+            return (
+                self._model_prepare_serial == serial
+                and self._prepare_cancel is cancel_event
+            )
+
+        def finish(device: str, error: str = "") -> None:
+            if is_current():
+                self.modelFinished.emit(model_label, device, error)
 
         def prepare():
             try:
                 if preload_vad:
+                    if is_current():
+                        self.modelPrepareStatusArrived.emit(model_label, "preparing_vad")
                     preload_voice_activity()
-                self.modelProgressArrived.emit(
-                    model_label, "Загружаем или проверяем файлы модели…"
-                )
-                if self._prepare_cancel.is_set():
-                    self.modelFinished.emit(model_label, "", "Подготовка отменена")
+                if is_current():
+                    self.modelProgressArrived.emit(
+                        model_label, "Проверяем кэш и загружаем файлы модели…"
+                    )
+                if cancel_event.is_set():
+                    finish("", "Подготовка отменена")
                     return
 
                 def progress(info):
-                    self.modelDownloadProgress.emit(model_label, info)
+                    if is_current():
+                        self.modelDownloadProgress.emit(model_label, info)
 
                 device = prepare_fn(
-                    lambda status: self.statusArrived.emit(status),
+                    lambda status: (
+                        self.modelPrepareStatusArrived.emit(model_label, status)
+                        if is_current()
+                        else None
+                    ),
                     progress,
+                    cancel_event,
                 )
-                if self._prepare_cancel.is_set():
-                    self.modelFinished.emit(model_label, "", "Подготовка отменена")
+                if cancel_event.is_set():
+                    finish("", "Подготовка отменена")
                     return
             except DownloadCancelled:
-                self.modelFinished.emit(model_label, "", "Подготовка отменена")
+                finish("", "Подготовка отменена")
             except Exception as exc:
-                self.modelFinished.emit(model_label, "", str(exc))
+                finish("", str(exc))
             else:
-                self.modelFinished.emit(model_label, device, "")
+                finish(device, "")
 
         threading.Thread(target=prepare, name="dotaudio-model-prepare", daemon=True).start()
 
@@ -3755,8 +4073,8 @@ class Controller(QObject):
                 return
             self._begin_engine_prepare(
                 model_label=getattr(engine, "model_name", "vosk") or "vosk",
-                prepare_fn=lambda on_status, on_progress: engine.prepare(
-                    config, on_status, on_progress
+                prepare_fn=lambda on_status, on_progress, cancel: engine.prepare(
+                    config, on_status, on_progress, cancel=cancel
                 ),
                 preload_vad=False,
             )
@@ -3772,8 +4090,8 @@ class Controller(QObject):
             return
         self._begin_engine_prepare(
             model_label=config.model,
-            prepare_fn=lambda on_status, on_progress: self.engine.prepare(
-                config, on_status, on_progress
+            prepare_fn=lambda on_status, on_progress, cancel: self.engine.prepare(
+                config, on_status, on_progress, cancel=cancel
             ),
             preload_vad=False,
         )
@@ -3783,14 +4101,22 @@ class Controller(QObject):
         if not self._model_preparing:
             return
         self._prepare_cancel.set()
+        self._model_pending_model = ""
         self._model_download = {}
         self._model_state = {
-            "phase": "idle",
+            "phase": "cancelling",
+            "stage": "cancelling",
             "model": self._settings["model"],
             "message": "Отменяем подготовку модели…",
+            "determinate": False,
+            "percent": -1.0,
+            "elapsed_s": round(
+                max(0.0, time.monotonic() - self._model_prepare_started_at), 1
+            ),
         }
         self._record_log("warning", "Подготовка модели отменена.")
-        self.changed.emit()
+        self.modelDownloadChanged.emit()
+        self.modelChanged.emit()
 
     @Slot()
     def hotkeyRecord(self):

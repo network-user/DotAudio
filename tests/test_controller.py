@@ -1,4 +1,5 @@
 import time
+from threading import Event
 
 from dotaudio.capture import next_live_source
 from dotaudio.controller import (
@@ -108,6 +109,63 @@ def test_engine_statuses_have_russian_labels() -> None:
     assert STATUS_LABELS["dictation_refine_1"].startswith("Уточняем")
     assert STATUS_LABELS["dictation_refine_2"].startswith("Уточняем")
     assert STATUS_LABELS["live_process"].startswith("Обрабатываем")
+
+
+def test_model_switch_queues_latest_target_after_old_prepare_finishes(monkeypatch) -> None:
+    controller = Controller.__new__(Controller)
+    controller._model_preparing = True
+    controller._model_prepare_model = "small"
+    controller._model_pending_model = "large-v3"
+    controller._model_prepare_done = Event()
+    controller._prepare_cancel = Event()
+    controller._prepare_cancel.set()
+    controller._model_download = {"model": "small", "phase": "download"}
+    controller._prepared_model = "small"
+    controller._model_prepare_error = ""
+    controller._model_prepare_started_at = time.monotonic() - 2
+    controller._model_state = {"model": "large-v3"}
+    controller._settings = {"model": "large-v3"}
+    controller.modelDownloadChanged = _Signal()
+    controller.modelChanged = _Signal()
+    controller.statusChanged = _Signal()
+    controller._record_log = lambda *_args: None
+    controller._refresh_model_library_async = lambda: None
+    restarted: list[str] = []
+    controller.prepareSelectedModel = lambda: restarted.append("large-v3")
+
+    monkeypatch.setattr(
+        "dotaudio.controller.QTimer.singleShot",
+        lambda _delay, callback: callback(),
+    )
+
+    Controller._on_model_finished(controller, "small", "cpu", "Подготовка отменена")
+
+    assert controller._model_preparing is False
+    assert controller._model_prepare_model == ""
+    assert controller._model_pending_model == "large-v3"
+    assert controller._model_state["phase"] == "queued"
+    assert controller._model_state["model"] == "large-v3"
+    assert restarted == ["large-v3"]
+
+
+def test_superseded_model_status_does_not_overwrite_new_target() -> None:
+    controller = Controller.__new__(Controller)
+    controller._model_preparing = True
+    controller._model_prepare_model = "small"
+    controller._model_pending_model = "large-v3"
+    controller._prepare_cancel = Event()
+    controller._model_state = {
+        "phase": "queued",
+        "model": "large-v3",
+        "message": "Переключаемся…",
+    }
+    controller.modelChanged = _Counting()
+
+    Controller._on_model_prepare_status(controller, "small", "allocating_model")
+
+    assert controller._model_state["model"] == "large-v3"
+    assert controller._model_state["phase"] == "queued"
+    assert controller.modelChanged.count == 0
 
 
 def test_dictation_defaults_enable_auto_paste() -> None:

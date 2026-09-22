@@ -144,8 +144,23 @@ Item {
                 readonly property var dl: bridge.modelDownload
                 readonly property bool downloading: preparing
                     && dl.model === modelData && dl.phase === "download"
+                readonly property bool determinateDownload: downloading && dl.determinate === true
+                readonly property bool queued: bridge.modelState.model === modelData
+                    && String(bridge.modelState.phase || "") === "queued"
+                readonly property bool showingPreparation: preparing || queued
+                readonly property bool switching: queued
+                readonly property string elapsedText: {
+                    var seconds = Math.round(Number(bridge.modelState.elapsed_s || 0))
+                    if (seconds <= 0)
+                        return ""
+                    var minutes = Math.floor(seconds / 60)
+                    var rest = seconds % 60
+                    return " · " + (minutes > 0
+                        ? minutes + " мин " + (rest < 10 ? "0" : "") + rest + " с"
+                        : seconds + " с")
+                }
                 Layout.fillWidth: true
-                implicitHeight: cardBody.implicitHeight + 2 * 16
+                implicitHeight: cardBody.implicitHeight + 2 * Theme.padCard
                 radius: Theme.radiusLg
                 color: selected ? Theme.fill : Theme.surface
                 border.width: 1
@@ -156,7 +171,7 @@ Item {
                 ColumnLayout {
                     id: cardBody
                     anchors.fill: parent
-                    anchors.margins: 16
+                    anchors.margins: Theme.padCard
                     spacing: Theme.gapSm
 
                     RowLayout {
@@ -256,9 +271,37 @@ Item {
                     // полученных байтов; после - модель грузится в
                     // память без процента, там честный свип.
                     ColumnLayout {
-                        visible: modelCard.preparing
+                        visible: modelCard.showingPreparation
                         Layout.fillWidth: true
                         spacing: 5
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.gapSm
+                            Rectangle {
+                                width: 6
+                                height: 6
+                                radius: 3
+                                color: Theme.text
+                                property real pulse: 1
+                                opacity: modelCard.switching ? 0.55 : pulse
+                                SequentialAnimation on pulse {
+                                    running: modelCard.showingPreparation && !modelCard.switching
+                                             && !Boolean(bridge.settings.reduce_motion)
+                                             && !modelCard.determinateDownload
+                                    loops: Animation.Infinite
+                                    NumberAnimation { to: 0.28; duration: Theme.baseMs }
+                                    NumberAnimation { to: 1; duration: Theme.baseMs }
+                                }
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: String(bridge.modelState.message || "Готовим модель…") + modelCard.elapsedText
+                                color: Theme.muted
+                                font.pixelSize: Theme.fsSmall
+                                wrapMode: Text.Wrap
+                            }
+                        }
 
                         Item {
                             Layout.fillWidth: true
@@ -270,7 +313,7 @@ Item {
                                 color: Theme.hairline
                             }
                             Rectangle {
-                                visible: modelCard.downloading
+                                visible: modelCard.determinateDownload
                                 width: parent.width * Math.min(1, (modelCard.dl.percent || 0) / 100)
                                 height: parent.height
                                 radius: 2
@@ -284,14 +327,14 @@ Item {
                             }
                             Rectangle {
                                 id: sweep
-                                visible: !modelCard.downloading
+                                visible: !modelCard.determinateDownload
                                 width: parent.width * 0.3
                                 height: parent.height
                                 radius: 2
                                 color: Theme.text
                                 SequentialAnimation on x {
                                     loops: Animation.Infinite
-                                    running: modelCard.preparing && !modelCard.downloading
+                                    running: modelCard.showingPreparation && !modelCard.determinateDownload
                                     NumberAnimation { from: -sweep.width; to: modelCard.width; duration: 1100; easing.type: Easing.InOutQuad }
                                 }
                             }
@@ -299,21 +342,16 @@ Item {
 
                         Label {
                             visible: modelCard.downloading
-                            text: modelCard.dl.determinate === false
-                                  ? (Math.round(modelCard.dl.received_mb || 0) + " МБ скачано · размер неизвестен")
-                                  : (Math.round(modelCard.dl.percent || 0) + "%"
+                            text: modelCard.determinateDownload
+                                  ? (Math.round(modelCard.dl.percent || 0) + "%"
                                      + " · " + Math.round(modelCard.dl.received_mb || 0)
                                      + " из " + Math.round(modelCard.dl.total_mb || 0) + " МБ"
                                      + " · " + (modelCard.dl.speed_mb_s || 0) + " МБ/с")
+                                  : (Math.round(modelCard.dl.received_mb || 0)
+                                     + " МБ скачано · размер неизвестен")
                             color: Theme.muted
                             font.pixelSize: Theme.fsSmall
                             font.family: Theme.monoFamily
-                        }
-                        Label {
-                            visible: !modelCard.downloading && bridge.modelState.message.length > 0
-                            text: bridge.modelState.message
-                            color: Theme.muted
-                            font.pixelSize: Theme.fsSmall
                         }
                     }
 
@@ -331,14 +369,14 @@ Item {
                             onClicked: bridge.cancelModelPrepare()
                         }
                         PillButton {
-                            visible: !modelCard.preparing && !modelCard.cached
+                            visible: !modelCard.showingPreparation && !modelCard.cached
                             text: "Загрузить"
                             primary: true
-                            enabled: !bridge.busy && !bridge.modelPreparing
+                            enabled: !bridge.busy && !bridge.modelPreparing && !modelCard.queued
                             onClicked: { bridge.setSetting("model", modelCard.modelData); bridge.prepareSelectedModel() }
                         }
                         Label {
-                            visible: modelCard.cached && !modelCard.preparing
+                            visible: modelCard.cached && !modelCard.showingPreparation
                             text: "Готова к работе"
                             color: Theme.muted
                             font.pixelSize: Theme.fsSmall

@@ -262,7 +262,7 @@ python3.12 -m venv .venv
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m dotaudio --smoke-test --data-dir .local-check
 ```
 
-Последняя проверка на машине разработки (Windows): `603 passed, 11 skipped`.
+Последняя проверка на машине разработки (Windows): `604 passed, 11 skipped`.
 `ruff check src tests` и QML smoke-test проходят. Три предупреждения относятся к
 FastAPI/Starlette TestClient и невозможности pytest записать `.pytest_cache` в
 управляемом окружении. Реальные
